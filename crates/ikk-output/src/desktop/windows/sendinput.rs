@@ -26,17 +26,48 @@ extern "system" {
     fn GetCurrentThreadId() -> u32;
 }
 
-/// `INPUT` with the keyboard union member; padded to the size of MOUSEINPUT.
+/// Win32 `KEYBDINPUT`.
 #[repr(C)]
-struct InputRecord {
-    r#type: u32,
+#[derive(Clone, Copy)]
+struct KeybdInput {
     w_vk: u16,
     w_scan: u16,
     dw_flags: u32,
     time: u32,
     dw_extra_info: usize,
-    _pad: [u8; 8],
 }
+
+/// Win32 `MOUSEINPUT`; only here so the union gets the size Windows expects.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MouseInput {
+    dx: i32,
+    dy: i32,
+    mouse_data: u32,
+    dw_flags: u32,
+    time: u32,
+    dw_extra_info: usize,
+}
+
+#[repr(C)]
+union InputUnion {
+    ki: KeybdInput,
+    _mi: MouseInput,
+}
+
+/// Win32 `INPUT`. The union is pointer-aligned, so on 64-bit Windows the
+/// keyboard data starts at byte 8 and the record is 40 bytes. SendInput
+/// rejects every event when `cbSize` does not match.
+#[repr(C)]
+struct InputRecord {
+    r#type: u32,
+    u: InputUnion,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<InputRecord>() == 40);
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(std::mem::size_of::<InputRecord>() == 28);
 
 const INPUT_KEYBOARD: u32 = 1;
 const KEYEVENTF_KEYUP: u32 = 0x0002;
@@ -53,12 +84,15 @@ const VK_V: u16 = 0x56;
 fn record(vk: u16, scan: u16, flags: u32) -> InputRecord {
     InputRecord {
         r#type: INPUT_KEYBOARD,
-        w_vk: vk,
-        w_scan: scan,
-        dw_flags: flags,
-        time: 0,
-        dw_extra_info: 0,
-        _pad: [0; 8],
+        u: InputUnion {
+            ki: KeybdInput {
+                w_vk: vk,
+                w_scan: scan,
+                dw_flags: flags,
+                time: 0,
+                dw_extra_info: 0,
+            },
+        },
     }
 }
 
