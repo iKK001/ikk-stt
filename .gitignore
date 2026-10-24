@@ -13,3 +13,6 @@ build/
 **/windows/flutter/ephemeral/
 *.iml
 .idea/
+
+# macOS Finder metadata
+.DS_Store
