@@ -1,0 +1,27 @@
+[package]
+name = "ikk-engine"
+description = "Orchestrator: audio → stt → text → commands → output; the only API shells see"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ikk-audio.workspace = true
+ikk-stt.workspace = true
+ikk-text.workspace = true
+ikk-commands.workspace = true
+ikk-output.workspace = true
+ikk-consent.workspace = true
+ikk-settings.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

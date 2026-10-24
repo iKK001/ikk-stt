@@ -1,0 +1,23 @@
+[package]
+name = "ikk_core_flutter"
+description = "Flutter plugin crate: flutter_rust_bridge surface over ikk-ffi"
+license = "AGPL-3.0-or-later"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0"
+ikk-ffi = { path = "../../../crates/ikk-ffi" }
+tokio = { workspace = true }
+ikk-engine = { path = "../../../crates/ikk-engine" }
+log = "0.4"
+serde_json = { workspace = true }
+# Wipes secrets from memory once they are handed over.
+zeroize = "1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

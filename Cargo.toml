@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/ikk_core_flutter/rust"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Stephan Korner"]
+repository = "https://github.com/iKK001/ikk-stt"
+publish = false
+
+# Core build number, shown in About next to the version. Bump for each build you hand out.
+[workspace.metadata.ikk]
+build_number = 17
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates. Core:
+ikk-audio = { path = "crates/ikk-audio" }
+ikk-stt = { path = "crates/ikk-stt" }
+ikk-providers = { path = "crates/ikk-providers" }
+ikk-stt-local = { path = "crates/ikk-stt-local" }
+ikk-text = { path = "crates/ikk-text" }
+ikk-commands = { path = "crates/ikk-commands" }
+ikk-output = { path = "crates/ikk-output" }
+ikk-consent = { path = "crates/ikk-consent" }
+ikk-settings = { path = "crates/ikk-settings" }
+ikk-engine = { path = "crates/ikk-engine" }
+ikk-ffi = { path = "crates/ikk-ffi" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 4
+lto = "thin"
+opt-level = 2
+strip = true

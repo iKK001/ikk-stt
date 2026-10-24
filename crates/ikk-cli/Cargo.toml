@@ -1,0 +1,27 @@
+[package]
+name = "ikk-cli"
+description = "Headless reference binary: dictate from mic to stdout or cursor; CI smoke test on all targets"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ikk-engine.workspace = true
+ikk-settings.workspace = true
+ikk-consent.workspace = true
+ikk-audio.workspace = true
+ikk-stt.workspace = true
+ikk-providers.workspace = true
+ikk-output.workspace = true
+ikk-ffi.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+anyhow.workspace = true
+
+[[bin]]
+name = "ikk-cli"
+path = "src/main.rs"

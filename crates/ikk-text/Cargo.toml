@@ -1,0 +1,13 @@
+[package]
+name = "ikk-text"
+description = "Transcript post-processing: punctuation, casing, normalization, vocabulary, LLM suggest"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true

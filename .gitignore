@@ -1,0 +1,15 @@
+# Rust
+debug
+target
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# Flutter / Dart
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/windows/flutter/ephemeral/
+*.iml
+.idea/

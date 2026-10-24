@@ -1,0 +1,4 @@
+This plugin is part of ikk-stt and is licensed under the GNU Affero General
+Public License v3.0 or later. See the LICENSE and NOTICE files at the
+repository root. The bundled `cargokit/` build helper keeps its own license
+(see cargokit/LICENSE).

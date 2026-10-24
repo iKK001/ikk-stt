@@ -1,0 +1,19 @@
+[package]
+name = "ikk-stt-local"
+description = "Optional on-device whisper provider (desktop only, feature local-whisper)"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ikk-stt.workspace = true
+async-trait.workspace = true
+# whisper-rs = { version = "0.16", default-features = false, optional = true }
+
+[features]
+default = []
+local-whisper = []   # later: ["dep:whisper-rs"]
