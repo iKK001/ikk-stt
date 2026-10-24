@@ -119,7 +119,7 @@ pub fn is_secure_desktop_active() -> bool {
 /// SetForegroundWindow is restricted to the current foreground process;
 /// briefly attach to the target's input thread when the plain call fails.
 pub fn force_foreground(hwnd: HWND) {
-    let h = hwnd.0 as *mut c_void;
+    let h = hwnd.0;
     unsafe {
         if SetForegroundWindow(h) != 0 {
             return;
