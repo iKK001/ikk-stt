@@ -8,8 +8,8 @@
 //! API keys) is handed to the plugin's encrypted store whenever it changes
 //! (see `IkkSecureStore.java`) and restored from there on start.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ikk_engine::{EngineEvent, EngineState};
@@ -70,8 +70,8 @@ fn on_event(s: &Shared, ev: &EngineEvent) {
     match ev {
         EngineEvent::State(state) => {
             let listening = matches!(state, EngineState::Listening | EngineState::Finishing);
-            if s.listening.swap(listening, Ordering::SeqCst) != listening {
-            }
+            let changed = s.listening.swap(listening, Ordering::SeqCst) != listening;
+            let _ = changed;
         }
         EngineEvent::ConsentChanged(state) => {
             if let Ok(json) = serde_json::to_string(state) {
@@ -125,8 +125,7 @@ impl Shared {
     /// Hand the current state to the encrypted store, off the caller's
     /// thread (Keystore calls can take tens of milliseconds). Each write
     /// takes its snapshot under the lock, so the last write is the newest.
-    fn persist(&self) {
-    }
+    fn persist(&self) {}
 
     #[allow(dead_code)]
     fn snapshot(&self) -> String {
@@ -142,14 +141,14 @@ impl Shared {
         let out = v.to_string();
         // Overwrite the key copies held by the JSON value before dropping it.
         if let Some(map) = v.get_mut("credentials").and_then(|c| c.as_object_mut()) {
-            for (_, val) in map.iter_mut() {
+            for val in map.values_mut() {
                 if let serde_json::Value::String(s) = val {
                     zeroize::Zeroize::zeroize(s);
                 }
             }
         }
         let mut credentials = credentials;
-        for (_, s) in credentials.iter_mut() {
+        for s in credentials.values_mut() {
             zeroize::Zeroize::zeroize(s);
         }
         out
@@ -193,7 +192,7 @@ impl Shared {
             }
         }
         if let Some(map) = v.get_mut("credentials").and_then(|c| c.as_object_mut()) {
-            for (_, val) in map.iter_mut() {
+            for val in map.values_mut() {
                 if let serde_json::Value::String(s) = val {
                     zeroize::Zeroize::zeroize(s);
                 }
