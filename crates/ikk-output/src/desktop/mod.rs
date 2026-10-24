@@ -32,6 +32,10 @@ pub struct DesktopSink {
     typing_delay_ms: u32,
     /// Allow clipboard paste when keystrokes keep failing.
     clipboard_fallback: bool,
+    /// Wait for the target to process each character before the next.
+    sync_typing: bool,
+    /// Insert text through the clipboard instead of keystrokes.
+    paste_mode: bool,
     last_level: AccessLevel,
 }
 
@@ -47,6 +51,8 @@ impl DesktopSink {
         Self {
             typing_delay_ms: MIN_SAFE_CHAR_DELAY_MS,
             clipboard_fallback: true,
+            sync_typing: false,
+            paste_mode: false,
             last_level: AccessLevel::BasicTyping,
         }
     }
@@ -56,12 +62,28 @@ impl DesktopSink {
         self
     }
 
+    pub fn with_sync_typing(mut self, on: bool) -> Self {
+        self.sync_typing = on;
+        self
+    }
+
+    pub fn with_paste_mode(mut self, on: bool) -> Self {
+        self.paste_mode = on;
+        self
+    }
+
     fn type_chunked(&self, text: &str) -> Result<(), OutputError> {
+        if self.paste_mode {
+            return platform::paste_clipboard(text);
+        }
         let delay = self.typing_delay_ms.max(MIN_SAFE_CHAR_DELAY_MS);
         for chunk in chunk_plan(text) {
             if is_typewriter(delay) {
                 for ch in chunk.chars() {
                     platform::type_text(&ch.to_string())?;
+                    if self.sync_typing {
+                        platform::wait_input_idle();
+                    }
                     std::thread::sleep(Duration::from_millis(delay as u64));
                 }
             } else {

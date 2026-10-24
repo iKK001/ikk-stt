@@ -138,6 +138,11 @@ pub fn type_text(text: &str) -> Result<(), OutputError> {
     Ok(())
 }
 
+/// Wait until the target has processed the input sent so far.
+pub fn wait_input_idle() {
+    sendinput::wait_target_idle(250);
+}
+
 pub fn press(key: Key, n: usize) -> Result<(), OutputError> {
     let vk = match key {
         Key::Backspace => sendinput::VK_BACK,

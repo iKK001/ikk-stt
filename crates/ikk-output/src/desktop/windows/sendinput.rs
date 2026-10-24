@@ -20,6 +20,15 @@ extern "system" {
     fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
     fn SetFocus(h_wnd: *mut c_void) -> *mut c_void;
     fn SendInput(c_inputs: u32, p_inputs: *const InputRecord, cb_size: i32) -> u32;
+    fn SendMessageTimeoutW(
+        h_wnd: *mut c_void,
+        msg: u32,
+        w_param: usize,
+        l_param: isize,
+        flags: u32,
+        timeout_ms: u32,
+        result: *mut usize,
+    ) -> isize;
 }
 #[link(name = "kernel32")]
 extern "system" {
@@ -111,6 +120,25 @@ fn send(inputs: &[InputRecord]) -> Result<(), OutputError> {
         )));
     }
     Ok(())
+}
+
+const WM_NULL: u32 = 0;
+const SMTO_ABORTIFHUNG: u32 = 0x0002;
+
+/// Block until the foreground window's thread has pumped its messages once
+/// (at most `timeout_ms`). Unicode key events carry their character in
+/// per-thread state; when several queue up before the target reads them,
+/// slow targets (Windows 11 Notepad) turn a burst into repeats of the last
+/// character. Waiting for the target between characters prevents that.
+pub fn wait_target_idle(timeout_ms: u32) {
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_null() {
+            return;
+        }
+        let mut result = 0usize;
+        SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, timeout_ms, &mut result);
+    }
 }
 
 pub fn send_unicode_char(ch: char) -> Result<(), OutputError> {

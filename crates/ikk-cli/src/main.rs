@@ -100,6 +100,15 @@ enum Cmd {
     TypeTest {
         #[arg(long, default_value_t = 3)]
         wait_seconds: u64,
+        /// Pause per character in milliseconds (default: the sink's minimum).
+        #[arg(long)]
+        delay_ms: Option<u32>,
+        /// Wait for the target to process each character before the next.
+        #[arg(long)]
+        sync: bool,
+        /// Insert through the clipboard instead of keystrokes.
+        #[arg(long)]
+        paste: bool,
     },
 }
 
@@ -196,17 +205,36 @@ async fn main() -> anyhow::Result<()> {
             println!("saved {}", path.display());
             Ok(())
         }
-        Cmd::TypeTest { wait_seconds } => {
-            let mut sink = ikk_output::default_sink();
+        Cmd::TypeTest {
+            wait_seconds,
+            delay_ms,
+            sync,
+            paste,
+        } => {
+            let mut sink: Box<dyn TextSink> = {
+                let mut s = ikk_output::desktop::DesktopSink::new()
+                    .with_sync_typing(sync)
+                    .with_paste_mode(paste);
+                if let Some(ms) = delay_ms {
+                    s = s.with_typing_delay(ms);
+                }
+                Box::new(s)
+            };
             eprintln!("focus the target window now … typing in {wait_seconds} s");
             tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
             let status = sink.probe();
             eprintln!("probe: {status:?}");
+            let started = Instant::now();
             sink.type_text(TYPE_TEST_STRING)?;
+            let took = started.elapsed();
+            tokio::time::sleep(Duration::from_millis(300)).await;
             eprintln!(
-                "typed {} chars; compare the target with:\n{TYPE_TEST_STRING}",
-                TYPE_TEST_STRING.chars().count()
+                "typed {} chars in {:.1} s; read-back: {:?}",
+                TYPE_TEST_STRING.chars().count(),
+                took.as_secs_f32(),
+                sink.verify(TYPE_TEST_STRING)
             );
+            eprintln!("expected:\n{TYPE_TEST_STRING}");
             Ok(())
         }
         Cmd::Mics => {
