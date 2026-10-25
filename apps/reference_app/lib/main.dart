@@ -795,12 +795,52 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// A slider's value as plain text. No value bubble (Slider `label`): its
-  /// overlay moves the slider's accessibility node on every rebuild, which
-  /// Flutter's Windows bridge rejects with "Failed to update ui::AXTree".
-  Widget _sliderValue(String text) => ExcludeSemantics(
-        child: SizedBox(width: 72, child: Text(text, textAlign: TextAlign.end)),
-      );
+  /// A number setting as "−  value  +" buttons. Not a Material Slider: it
+  /// always keeps an overlay (its value bubble) whose accessibility node
+  /// moves on every rebuild, which Flutter's Windows bridge rejects with
+  /// "Failed to update ui::AXTree". Big buttons are also easier to hit.
+  Widget _stepper({
+    required String label,
+    required num value,
+    required num min,
+    required num max,
+    required num step,
+    required String unit,
+    required void Function(num) onChanged,
+  }) {
+    void set(num v) {
+      setState(() => onChanged(v.clamp(min, max)));
+      _saveSettings();
+    }
+
+    final text = '${value.round()} $unit';
+    return Row(children: [
+      SizedBox(width: 120, child: Text(label)),
+      Semantics(
+        button: true,
+        label: '$label lower',
+        child: IconButton(
+          icon: const Icon(Icons.remove),
+          onPressed: value > min ? () => set(value - step) : null,
+        ),
+      ),
+      Semantics(
+        label: label,
+        value: text,
+        child: ExcludeSemantics(
+          child: SizedBox(width: 80, child: Text(text, textAlign: TextAlign.center)),
+        ),
+      ),
+      Semantics(
+        button: true,
+        label: '$label higher',
+        child: IconButton(
+          icon: const Icon(Icons.add),
+          onPressed: value < max ? () => set(value + step) : null,
+        ),
+      ),
+    ]);
+  }
 
   Widget _soundSection() {
     final sound = _settings['sound'] as Map<String, dynamic>;
@@ -812,21 +852,15 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Sound', style: Theme.of(context).textTheme.titleMedium),
-            Row(children: [
-              const SizedBox(width: 120, child: Text('Preamp gain')),
-              Expanded(
-                child: Slider(
-                  value: (sound['preamp_gain_db'] as num).toDouble(),
-                  min: 0,
-                  max: 24,
-                  divisions: 24,
-                  semanticFormatterCallback: (v) => '${v.round()} dB',
-                  onChanged: (v) => setState(() => sound['preamp_gain_db'] = v.roundToDouble()),
-                  onChangeEnd: (_) => _saveSettings(),
-                ),
-              ),
-              _sliderValue('${(sound['preamp_gain_db'] as num).round()} dB'),
-            ]),
+            _stepper(
+              label: 'Preamp gain',
+              value: sound['preamp_gain_db'] as num,
+              min: 0,
+              max: 24,
+              step: 1,
+              unit: 'dB',
+              onChanged: (v) => sound['preamp_gain_db'] = v.toDouble(),
+            ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Noise reduction (RNNoise)'),
@@ -836,21 +870,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
-            Row(children: [
-              const SizedBox(width: 120, child: Text('Pause (ms)')),
-              Expanded(
-                child: Slider(
-                  value: (vad['silence_duration_ms'] as num).toDouble(),
-                  min: 300,
-                  max: 3000,
-                  divisions: 27,
-                  semanticFormatterCallback: (v) => '${v.round()} ms',
-                  onChanged: (v) => setState(() => vad['silence_duration_ms'] = v.round()),
-                  onChangeEnd: (_) => _saveSettings(),
-                ),
-              ),
-              _sliderValue('${vad['silence_duration_ms']} ms'),
-            ]),
+            _stepper(
+              label: 'Pause',
+              value: vad['silence_duration_ms'] as num,
+              min: 300,
+              max: 3000,
+              step: 100,
+              unit: 'ms',
+              onChanged: (v) => vad['silence_duration_ms'] = v.round(),
+            ),
           ],
         ),
       ),
