@@ -795,6 +795,13 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// A slider's value as plain text. No value bubble (Slider `label`): its
+  /// overlay moves the slider's accessibility node on every rebuild, which
+  /// Flutter's Windows bridge rejects with "Failed to update ui::AXTree".
+  Widget _sliderValue(String text) => ExcludeSemantics(
+        child: SizedBox(width: 72, child: Text(text, textAlign: TextAlign.end)),
+      );
+
   Widget _soundSection() {
     final sound = _settings['sound'] as Map<String, dynamic>;
     final vad = sound['vad'] as Map<String, dynamic>;
@@ -813,11 +820,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   min: 0,
                   max: 24,
                   divisions: 24,
-                  label: '${sound['preamp_gain_db']} dB',
+                  semanticFormatterCallback: (v) => '${v.round()} dB',
                   onChanged: (v) => setState(() => sound['preamp_gain_db'] = v.roundToDouble()),
                   onChangeEnd: (_) => _saveSettings(),
                 ),
               ),
+              _sliderValue('${(sound['preamp_gain_db'] as num).round()} dB'),
             ]),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -836,11 +844,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   min: 300,
                   max: 3000,
                   divisions: 27,
-                  label: '${vad['silence_duration_ms']} ms',
+                  semanticFormatterCallback: (v) => '${v.round()} ms',
                   onChanged: (v) => setState(() => vad['silence_duration_ms'] = v.round()),
                   onChangeEnd: (_) => _saveSettings(),
                 ),
               ),
+              _sliderValue('${vad['silence_duration_ms']} ms'),
             ]),
           ],
         ),
