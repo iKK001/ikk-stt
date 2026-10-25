@@ -13,8 +13,8 @@ use windows::Globalization::Language;
 use windows::Media::SpeechRecognition::{
     ISpeechRecognitionConstraint, SpeechContinuousRecognitionCompletedEventArgs,
     SpeechContinuousRecognitionResultGeneratedEventArgs, SpeechContinuousRecognitionSession,
-    SpeechRecognitionHypothesisGeneratedEventArgs, SpeechRecognitionResultStatus, SpeechRecognitionScenario,
-    SpeechRecognitionTopicConstraint, SpeechRecognizer,
+    SpeechRecognitionHypothesisGeneratedEventArgs, SpeechRecognitionListConstraint, SpeechRecognitionResultStatus,
+    SpeechRecognitionScenario, SpeechRecognitionTopicConstraint, SpeechRecognizer,
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
@@ -245,12 +245,27 @@ fn start(
         }
         None => SpeechRecognizer::new().map_err(win_err)?,
     };
-    let topic =
-        SpeechRecognitionTopicConstraint::Create(SpeechRecognitionScenario::Dictation, &HSTRING::from("dictation"))
-            .map_err(win_err)?;
+    // Diagnosis: IKK_WIN_SPEECH_WORDS="Hallo,Test,Diktat" recognises only
+    // these words, entirely on the device, without Microsoft's online
+    // dictation service.
+    let constraint: ISpeechRecognitionConstraint = match std::env::var("IKK_WIN_SPEECH_WORDS") {
+        Ok(words) if !words.trim().is_empty() => {
+            let list: Vec<HSTRING> = words.split(',').map(|w| HSTRING::from(w.trim())).collect();
+            tracing::info!(words = %words, "Windows speech: word list on the device (diagnosis)");
+            let iterable: windows_collections::IIterable<HSTRING> = list.into();
+            SpeechRecognitionListConstraint::Create(&iterable)
+                .and_then(|c| c.cast())
+                .map_err(win_err)?
+        }
+        _ => {
+            SpeechRecognitionTopicConstraint::Create(SpeechRecognitionScenario::Dictation, &HSTRING::from("dictation"))
+                .and_then(|c| c.cast())
+                .map_err(win_err)?
+        }
+    };
     recognizer
         .Constraints()
-        .and_then(|c| c.Append(&topic.cast::<ISpeechRecognitionConstraint>()?))
+        .and_then(|c| c.Append(&constraint))
         .map_err(win_err)?;
     let op = recognizer.CompileConstraintsAsync().map_err(win_err)?;
     if !wait(|| op.Status().map(|s| s.0 != 0).unwrap_or(true), SETUP_TIMEOUT) {

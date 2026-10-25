@@ -1262,6 +1262,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
+ "windows-collections",
 ]
 
 [[package]]
