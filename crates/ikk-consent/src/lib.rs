@@ -38,6 +38,10 @@ pub fn recipient_for(provider_id: &str, display_name: &str) -> Recipient {
             "https://privacy.microsoft.com/privacystatement",
             vec![Use::Transcription],
         ),
+        "azure" => (
+            "https://privacy.microsoft.com/privacystatement",
+            vec![Use::Transcription],
+        ),
         "openai" => (
             "https://openai.com/policies/privacy-policy/",
             vec![Use::Transcription, Use::Suggestions, Use::Translation],

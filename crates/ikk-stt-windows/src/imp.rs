@@ -245,28 +245,49 @@ fn start(
         }
         None => SpeechRecognizer::new().map_err(win_err)?,
     };
-    // Diagnosis: IKK_WIN_SPEECH_WORDS="Hallo,Test,Diktat" recognises only
-    // these words, entirely on the device, without Microsoft's online
-    // dictation service.
-    let constraint: ISpeechRecognitionConstraint = match std::env::var("IKK_WIN_SPEECH_WORDS") {
+    // Diagnosis switches:
+    // - IKK_WIN_SPEECH_WORDS="Hallo,Test": only these words, on the device.
+    // - IKK_WIN_SPEECH_CONSTRAINT=none: no constraint, Windows' built-in
+    //   dictation grammar; =websearch: the other online topic.
+    // - IKK_WIN_SPEECH_TIMEOUTS=default: keep Windows' own waiting times.
+    let mode = std::env::var("IKK_WIN_SPEECH_CONSTRAINT").unwrap_or_default();
+    let keep_timeouts = std::env::var("IKK_WIN_SPEECH_TIMEOUTS").is_ok_and(|v| v == "default");
+    tracing::info!(
+        constraint = if mode.is_empty() { "dictation" } else { mode.as_str() },
+        timeouts = if keep_timeouts { "windows defaults" } else { "long" },
+        "Windows speech: mode"
+    );
+    let constraint: Option<ISpeechRecognitionConstraint> = match std::env::var("IKK_WIN_SPEECH_WORDS") {
         Ok(words) if !words.trim().is_empty() => {
             let list: Vec<HSTRING> = words.split(',').map(|w| HSTRING::from(w.trim())).collect();
             tracing::info!(words = %words, "Windows speech: word list on the device (diagnosis)");
             let iterable: windows_collections::IIterable<HSTRING> = list.into();
-            SpeechRecognitionListConstraint::Create(&iterable)
-                .and_then(|c| c.cast())
-                .map_err(win_err)?
+            Some(
+                SpeechRecognitionListConstraint::Create(&iterable)
+                    .and_then(|c| c.cast())
+                    .map_err(win_err)?,
+            )
         }
+        _ if mode == "none" => None,
         _ => {
-            SpeechRecognitionTopicConstraint::Create(SpeechRecognitionScenario::Dictation, &HSTRING::from("dictation"))
-                .and_then(|c| c.cast())
-                .map_err(win_err)?
+            let scenario = if mode == "websearch" {
+                SpeechRecognitionScenario::WebSearch
+            } else {
+                SpeechRecognitionScenario::Dictation
+            };
+            Some(
+                SpeechRecognitionTopicConstraint::Create(scenario, &HSTRING::from("dictation"))
+                    .and_then(|c| c.cast())
+                    .map_err(win_err)?,
+            )
         }
     };
-    recognizer
-        .Constraints()
-        .and_then(|c| c.Append(&constraint))
-        .map_err(win_err)?;
+    if let Some(constraint) = constraint {
+        recognizer
+            .Constraints()
+            .and_then(|c| c.Append(&constraint))
+            .map_err(win_err)?;
+    }
     let op = recognizer.CompileConstraintsAsync().map_err(win_err)?;
     if !wait(|| op.Status().map(|s| s.0 != 0).unwrap_or(true), SETUP_TIMEOUT) {
         return Err(timeout_err("preparing dictation"));
@@ -280,9 +301,11 @@ fn start(
             status_text(status)
         ))));
     }
-    if let Ok(t) = recognizer.Timeouts() {
-        let _ = t.SetInitialSilenceTimeout(span_ms(60 * 60 * 1000));
-        let _ = t.SetEndSilenceTimeout(span_ms(1200));
+    if !keep_timeouts {
+        if let Ok(t) = recognizer.Timeouts() {
+            let _ = t.SetInitialSilenceTimeout(span_ms(60 * 60 * 1000));
+            let _ = t.SetEndSilenceTimeout(span_ms(1200));
+        }
     }
 
     let tx = events.clone();
@@ -301,7 +324,9 @@ fn start(
 
     let session = recognizer.ContinuousRecognitionSession().map_err(win_err)?;
     // Keep listening through long pauses; the user stops dictation.
-    let _ = session.SetAutoStopSilenceTimeout(span_ms(12 * 60 * 60 * 1000));
+    if !keep_timeouts {
+        let _ = session.SetAutoStopSilenceTimeout(span_ms(12 * 60 * 60 * 1000));
+    }
 
     let tx = events.clone();
     session

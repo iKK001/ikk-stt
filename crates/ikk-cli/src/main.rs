@@ -317,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
             agc,
             to_cursor,
         } => {
-            // Windows' own recognizer needs no key.
+            // Windows' own recognizer (test only) needs no key.
             let keyless = provider == "windows";
             let env_name = key_env.unwrap_or_else(|| format!("{}_API_KEY", provider.to_uppercase()));
             let mut key = if keyless {
@@ -325,6 +325,12 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 std::env::var(&env_name).map_err(|_| anyhow::anyhow!("set {env_name} to your {provider} API key"))?
             };
+            if provider == "azure" && !key.contains(':') {
+                // Azure needs the region of the Speech resource too.
+                let region = std::env::var("AZURE_REGION")
+                    .map_err(|_| anyhow::anyhow!("set AZURE_REGION as well, e.g. westeurope"))?;
+                key = format!("{region}:{key}");
+            }
             if provider == "voiceitt" {
                 // Voiceitt needs App ID + API key; the credential is "APP_ID:API_KEY".
                 let app_id =
@@ -373,8 +379,8 @@ async fn main() -> anyhow::Result<()> {
                     .send(EngineCommand::SetCredential(pid.clone(), Secret::new(key)))
                     .await;
             }
-            // Choosing a provider here (with its key, if it needs one) is
-            // consent for the CLI; record it like the app would.
+            // Choosing a provider here with its key is consent for the CLI;
+            // record it like the app would.
             eprintln!("consent recorded for {provider}: audio is sent to this provider");
             let consent_file = consent_path().ok();
             if let Some(p) = &consent_file {

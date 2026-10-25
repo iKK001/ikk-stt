@@ -39,7 +39,8 @@ class IkkApp extends StatelessWidget {
 }
 
 const kLanguages = {
-  'deu': 'Deutsch / Schweizerdeutsch',
+  'deu': 'Deutsch',
+  'gsw': 'Schweizerdeutsch',
   'eng': 'English',
   'fra': 'Français',
   'ita': 'Italiano',
@@ -107,17 +108,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String get _provider => (_settings['providers']?['active'] as String?) ?? 'deepgram';
 
-  /// Providers that need no API key and offer no batch mode (Windows' own
-  /// recognizer).
-  static const _keyless = {'windows'};
-  bool get _needsKey => !_keyless.contains(_provider);
-
   Future<void> _loadKey() async {
-    if (!_needsKey) {
-      _keyStored = false;
-      _keyCtl.text = '';
-      return;
-    }
     String k = '';
     try {
       k = await _secure.read(key: 'api_key:$_provider') ?? '';
@@ -550,13 +541,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
-            if (!_needsKey)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Text('Windows speech recognition: no API key needed. Dictation runs in '
-                    'Microsoft\'s cloud and uses the Windows default microphone.'),
-              ),
-            if (_needsKey)
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Batch upload (higher accuracy, slower)'),
@@ -568,7 +552,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
-            if (_needsKey)
             Row(
               children: [
                 Expanded(
@@ -577,7 +560,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     obscureText: true,
                     decoration: InputDecoration(
                       labelText: _keyStored ? 'API key stored · enter to replace' : 'API key for $_provider',
-                      helperText: _provider == 'voiceitt' ? 'Format: APP_ID:API_KEY' : null,
+                      helperText: switch (_provider) {
+                        'voiceitt' => 'Format: APP_ID:API_KEY',
+                        'azure' => 'Format: REGION:KEY, e.g. westeurope:abc123… (Azure portal, Speech resource)',
+                        _ => null,
+                      },
                     ),
                   ),
                 ),
