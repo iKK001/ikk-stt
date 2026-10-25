@@ -30,6 +30,29 @@ const PRIVACY_MESSAGE: &str = "Windows speech recognition needs \"Online speech 
 
 static FIRST_HYPOTHESIS: std::sync::Once = std::sync::Once::new();
 
+/// What Windows reports as installed for speech recognition.
+fn log_installed_languages() {
+    let tags = |v: windows::core::Result<windows_collections::IVectorView<Language>>| -> String {
+        v.map(|list| {
+            list.into_iter()
+                .filter_map(|l| l.LanguageTag().ok().map(|t| t.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|e| format!("error {e}"))
+    };
+    let system = SpeechRecognizer::SystemSpeechLanguage()
+        .and_then(|l| l.LanguageTag())
+        .map(|t| t.to_string())
+        .unwrap_or_else(|e| format!("error {e}"));
+    tracing::info!(
+        system = %system,
+        dictation = %tags(SpeechRecognizer::SupportedTopicLanguages()),
+        word_lists = %tags(SpeechRecognizer::SupportedGrammarLanguages()),
+        "Windows speech: installed languages"
+    );
+}
+
 /// 100-ns ticks for a WinRT TimeSpan.
 fn span_ms(ms: i64) -> TimeSpan {
     TimeSpan { Duration: ms * 10_000 }
@@ -238,6 +261,13 @@ fn start(
         language = tag.unwrap_or("system default"),
         "Windows speech: preparing dictation"
     );
+    log_installed_languages();
+    // Diagnosis: IKK_WIN_SPEECH_LANG=system lets Windows pick its own language.
+    let tag = if std::env::var("IKK_WIN_SPEECH_LANG").is_ok_and(|v| v == "system") {
+        None
+    } else {
+        tag
+    };
     let recognizer = match tag {
         Some(t) => {
             let lang = Language::CreateLanguage(&HSTRING::from(t)).map_err(win_err)?;
