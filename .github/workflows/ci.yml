@@ -1,11 +1,6 @@
 name: ci
-# Runs on pushes to main, on pull requests into main, or by hand
-# (Actions tab, "Run workflow").
+# Runs only by hand: Actions tab > ci > "Run workflow".
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 # Read-only token: CI never writes to the repository.
