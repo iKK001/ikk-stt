@@ -70,6 +70,23 @@ class _HomeScreenState extends State<HomeScreen> {
   // Azure keys belong to a region (where the Speech resource was created).
   final _regionCtl = TextEditingController(text: 'switzerlandnorth');
   bool _keyStored = false;
+  // Last four characters of the stored key, so the user can tell which key
+  // it is; null when none is stored. Set when the secure store failed.
+  String? _keyTail;
+  String? _keyReadError;
+
+  /// Where flutter_secure_storage keeps keys on this platform.
+  static String get _keyStoreName {
+    if (Platform.isMacOS || Platform.isIOS) return 'the Keychain';
+    if (Platform.isAndroid) return 'the Android Keystore (encrypted)';
+    if (Platform.isWindows) return 'Windows (encrypted, key in the Credential Manager)';
+    return 'the secure store';
+  }
+
+  void _rememberKeyTail(String credential) {
+    final key = _provider == 'azure' ? credential.substring(credential.indexOf(':') + 1) : credential;
+    _keyTail = key.isEmpty ? null : key.substring(key.length > 4 ? key.length - 4 : 0);
+  }
 
   String _state = 'Idle';
   double _level = -90;
@@ -112,10 +129,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadKey() async {
     String k = '';
+    _keyReadError = null;
     try {
       k = await _secure.read(key: 'api_key:$_provider') ?? '';
     } catch (e) {
-      _error = 'Keychain read failed: $e';
+      _keyReadError = '$e';
     }
     if (_provider == 'azure' && k.isNotEmpty) {
       final i = k.indexOf(':');
@@ -127,8 +145,26 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
     _keyStored = k.isNotEmpty;
-    if (k.isNotEmpty) _engine.setCredential(provider: _provider, secret: k);
+    _keyTail = null;
+    if (k.isNotEmpty) {
+      _engine.setCredential(provider: _provider, secret: k);
+      _rememberKeyTail(k);
+    }
     _keyCtl.text = '';
+  }
+
+  Future<void> _removeKey() async {
+    _engine.setCredential(provider: _provider, secret: '');
+    try {
+      await _secure.delete(key: 'api_key:$_provider');
+      _snack('Key for $_provider removed');
+    } catch (e) {
+      _snack('Could not remove the key: $e');
+    }
+    setState(() {
+      _keyStored = false;
+      _keyTail = null;
+    });
   }
 
   /// Azure: "REGION:KEY" from the two fields. A pasted "REGION:KEY" is
@@ -164,12 +200,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _engine.setCredential(provider: _provider, secret: k);
     try {
       await _secure.write(key: 'api_key:$_provider', value: k);
-      _snack('Key saved to keychain');
+      _keyReadError = null;
+      _snack('Key saved in $_keyStoreName');
     } catch (e) {
-      _snack('Key set for this run only; keychain write failed: $e');
+      _snack('Key set for this run only; saving failed: $e');
     }
     setState(() {
       _keyStored = true;
+      _rememberKeyTail(k);
       _keyCtl.text = '';
     });
   }
@@ -373,102 +411,107 @@ class _HomeScreenState extends State<HomeScreen> {
       _snack(denied);
       return;
     }
-    // Free the microphone for the recordings.
-    _engine.setVoiceCommands(commandsJson: null, settingsJson: jsonEncode(_settings));
-    final step = ValueNotifier<_VoiceStep>(const _VoiceStep('Get ready …', _StepKind.info));
-    var cancelled = false;
-    var detail = '';
-    if (!mounted) return;
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Record your voice commands'),
-        content: ValueListenableBuilder<_VoiceStep>(
-          valueListenable: step,
-          builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
-            Icon(st.icon, size: 48, color: st.color(Theme.of(ctx).colorScheme)),
-            const SizedBox(height: 12),
-            Text(st.text, style: Theme.of(ctx).textTheme.titleMedium, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            if (st.kind == _StepKind.listening) const LinearProgressIndicator(),
-          ]),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              cancelled = true;
-              Navigator.of(ctx).pop();
-            },
-            child: const Text('Close'),
+    // Nothing may listen or dictate while the words are recorded: a
+    // running dictation would transcribe them (and type them somewhere).
+    _engine.setVoiceTraining(active: true);
+    try {
+      final step = ValueNotifier<_VoiceStep>(const _VoiceStep('Get ready …', _StepKind.info));
+      var cancelled = false;
+      var detail = '';
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Record your voice commands'),
+          content: ValueListenableBuilder<_VoiceStep>(
+            valueListenable: step,
+            builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(st.icon, size: 48, color: st.color(Theme.of(ctx).colorScheme)),
+              const SizedBox(height: 12),
+              Text(st.text, style: Theme.of(ctx).textTheme.titleMedium, textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              if (st.kind == _StepKind.listening) const LinearProgressIndicator(),
+            ]),
           ),
-        ],
-      ),
-    );
-    Future<void> show(String text, _StepKind kind, [int ms = 0]) async {
-      step.value = _VoiceStep(text, kind);
-      if (ms > 0) await Future<void>.delayed(Duration(milliseconds: ms));
-    }
-
-    final takes = <String, List<Float32List>>{'start': [], 'stop': []};
-    for (final word in ['start', 'stop']) {
-      final label = word == 'start' ? 'START' : 'STOP';
-      if (word == 'stop') {
-        await show('✓ START word learned.\nNext: your STOP word – a different word.', _StepKind.ok, 2500);
+          actions: [
+            TextButton(
+              onPressed: () {
+                cancelled = true;
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      Future<void> show(String text, _StepKind kind, [int ms = 0]) async {
+        step.value = _VoiceStep(text, kind);
+        if (ms > 0) await Future<void>.delayed(Duration(milliseconds: ms));
       }
-      var retry = false;
-      while (!cancelled && takes[word]!.length < 3) {
-        final n = takes[word]!.length + 1;
-        await show(
-          retry
-              ? 'Didn\'t catch that clearly ($detail).\nPlease say your $label word again ($n of 3).'
-              : n == 1
-                  ? 'Say your $label word now ($n of 3).'
-                  : 'Say your $label word once more ($n of 3).',
-          retry ? _StepKind.retry : _StepKind.listening,
-        );
-        try {
-          final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 8);
-          if (cancelled) break;
-          takes[word]!.add(take);
-          retry = false;
-          await show('✓ Understood ($n of 3).', _StepKind.ok, 1300);
-        } catch (e) {
-          if (cancelled) break;
-          retry = true;
-          detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
-          await show('Didn\'t catch that clearly.\n($detail)', _StepKind.retry, 2000);
+
+      final takes = <String, List<Float32List>>{'start': [], 'stop': []};
+      for (final word in ['start', 'stop']) {
+        final label = word == 'start' ? 'START' : 'STOP';
+        if (word == 'stop') {
+          await show('✓ START word learned.\nNext: your STOP word – a different word.', _StepKind.ok, 2500);
         }
-        if (!cancelled && takes[word]!.length == 3) {
+        var retry = false;
+        while (!cancelled && takes[word]!.length < 3) {
+          final n = takes[word]!.length + 1;
+          await show(
+            retry
+                ? 'Didn\'t catch that clearly ($detail).\nPlease say your $label word again ($n of 3).'
+                : n == 1
+                    ? 'Say your $label word now ($n of 3).'
+                    : 'Say your $label word once more ($n of 3).',
+            retry ? _StepKind.retry : _StepKind.listening,
+          );
           try {
-            await voiceCheckWord(takes: takes[word]!);
-          } catch (_) {
-            takes[word]!.clear();
+            final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 8);
+            if (cancelled) break;
+            takes[word]!.add(take);
             retry = false;
-            await show('Those three sounded too different.\nLet\'s record your $label word again.', _StepKind.retry, 2500);
+            await show('✓ Understood ($n of 3).', _StepKind.ok, 1300);
+          } catch (e) {
+            if (cancelled) break;
+            retry = true;
+            detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
+            await show('Didn\'t catch that clearly.\n($detail)', _StepKind.retry, 2000);
+          }
+          if (!cancelled && takes[word]!.length == 3) {
+            try {
+              await voiceCheckWord(takes: takes[word]!);
+            } catch (_) {
+              takes[word]!.clear();
+              retry = false;
+              await show('Those three sounded too different.\nLet\'s record your $label word again.', _StepKind.retry, 2500);
+            }
           }
         }
+        if (cancelled) break;
       }
-      if (cancelled) break;
-    }
-    if (cancelled) {
+      if (cancelled) {
+        _applyVoice();
+        return;
+      }
+      await show('Learning your words …', _StepKind.listening);
+      try {
+        _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
+        _voiceOn = true;
+        await _saveVoice();
+        await show('✓ Done. Say your START word to dictate,\nyour STOP word to stop.', _StepKind.ok, 2500);
+        if (mounted && !cancelled) Navigator.of(context).pop();
+      } catch (e) {
+        // Stays visible until closed: the reason matters for the next try.
+        final msg = '$e'.replaceFirst(RegExp(r'^.*?Error:\s*'), '');
+        await show('Could not learn your words:\n$msg\n\nClose and record them again.', _StepKind.retry);
+      }
       _applyVoice();
-      return;
+      setState(() {});
+    } finally {
+      _engine.setVoiceTraining(active: false);
     }
-    await show('Learning your words …', _StepKind.listening);
-    try {
-      _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
-      _voiceOn = true;
-      await _saveVoice();
-      await show('✓ Done. Say your START word to dictate,\nyour STOP word to stop.', _StepKind.ok, 2500);
-      if (mounted && !cancelled) Navigator.of(context).pop();
-    } catch (e) {
-      // Stays visible until closed: the reason matters for the next try.
-      final msg = '$e'.replaceFirst(RegExp(r'^.*?Error:\s*'), '');
-      await show('Could not learn your words:\n$msg\n\nClose and record them again.', _StepKind.retry);
-    }
-    _applyVoice();
-    setState(() {});
   }
 
   Widget _voiceSection() {
@@ -500,15 +543,19 @@ class _HomeScreenState extends State<HomeScreen> {
                       setState(() {});
                     },
             ),
+            // Diagnosis for tuning, updated every few seconds: not for
+            // screen readers.
             if (_voiceOn && (_voiceHeard != null || _standbyLevel != null))
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
+                child: ExcludeSemantics(
+                  child: Text(
                   [
                     if (_standbyLevel != null) 'Waiting listener level: ${_standbyLevel!.toStringAsFixed(0)} dBFS',
                     if (_voiceHeard != null) 'Last heard. $_voiceHeard',
                   ].join('\n'),
                   style: Theme.of(context).textTheme.bodySmall,
+                  ),
                 ),
               ),
             OutlinedButton(
@@ -608,18 +655,37 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Center(child: Text('$_state${_speech ? ' · speech' : ''}')),
+          // What changes during dictation (status, level, interim text, the
+          // growing list of sentences) sits behind one fixed accessibility
+          // node per area whose label changes: nodes appearing, vanishing
+          // and shifting several times a second made Flutter's Windows
+          // accessibility bridge log "Failed to update ui::AXTree" lines.
+          Semantics(
+            container: true,
+            label: 'Status: $_state',
+            child: ExcludeSemantics(child: Center(child: Text('$_state${_speech ? ' · speech' : ''}'))),
+          ),
           const SizedBox(height: 8),
-          // Changes ten times a second: kept out of the accessibility tree
-          // (screen readers, and Flutter's Windows bridge, which logs
-          // "Failed to update ui::AXTree" on such fast updates).
           ExcludeSemantics(child: LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0))),
           const SizedBox(height: 12),
-          if (_interim.isNotEmpty) Text(_interim, style: const TextStyle(fontStyle: FontStyle.italic)),
           if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
           if (_fallbackReason != null) _fallbackCard(),
-          const SizedBox(height: 12),
-          ..._finals.reversed.take(20).map((t) => Padding(padding: const EdgeInsets.symmetric(vertical: 2), child: Text(t))),
+          Semantics(
+            container: true,
+            label: _finals.isEmpty ? 'No text recognised yet' : 'Last recognised: ${_finals.last}',
+            child: ExcludeSemantics(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_interim.isNotEmpty) Text(_interim, style: const TextStyle(fontStyle: FontStyle.italic)),
+                  const SizedBox(height: 12),
+                  ..._finals.reversed
+                      .take(20)
+                      .map((t) => Padding(padding: const EdgeInsets.symmetric(vertical: 2), child: Text(t))),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -667,6 +733,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            _keyStatus(),
             if (_provider == 'azure')
               TextField(
                 controller: _regionCtl,
@@ -683,7 +750,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     controller: _keyCtl,
                     obscureText: true,
                     decoration: InputDecoration(
-                      labelText: _keyStored ? 'API key stored · enter to replace' : 'API key for $_provider',
+                      labelText: _keyStored ? 'New API key (replaces the stored one)' : 'API key for $_provider',
                       helperText: switch (_provider) {
                         'voiceitt' => 'Format: APP_ID:API_KEY',
                         'azure' => 'KEY 1 or KEY 2 of the Speech resource',
@@ -698,6 +765,32 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Whether a key for the chosen provider is stored, and where.
+  Widget _keyStatus() {
+    final scheme = Theme.of(context).colorScheme;
+    final (IconData icon, Color color, String text) = switch ((_keyReadError, _keyStored)) {
+      (final String e, _) => (Icons.error_outline, scheme.error, 'Could not read the key store: $e'),
+      (null, true) => (
+          Icons.check_circle,
+          Colors.green.shade700,
+          'Key for $_provider found in $_keyStoreName: ••••${_keyTail ?? ''}'
+              '${_provider == 'azure' ? ' · region ${_regionCtl.text.trim()}' : ''}',
+        ),
+      (null, false) => (Icons.key_off, Colors.orange.shade800, 'No key stored for $_provider yet: enter it below.'),
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 8),
+          Expanded(child: Text(text, style: TextStyle(color: color))),
+          if (_keyStored) TextButton(onPressed: _removeKey, child: const Text('Remove')),
+        ],
       ),
     );
   }

@@ -36,6 +36,10 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// (`None`). `settings_json`: what a voice start dictates with.
   void setVoiceCommands({String? commandsJson, required String settingsJson});
 
+  /// The voice command recording dialog opens (true) or closes (false):
+  /// no dictation, no listening meanwhile, on every platform.
+  void setVoiceTraining({required bool active});
+
   /// Floating microphone button over all apps (desktop): a click toggles
   /// dictation with the remembered settings; red while listening.
   void showFloatingButton({required bool show_});

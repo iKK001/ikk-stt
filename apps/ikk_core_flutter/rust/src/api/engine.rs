@@ -47,6 +47,9 @@ impl IkkEngine {
     #[frb(sync)]
     /// The app's dictate button: a click, so the voice listener is on again.
     pub fn start(&self, settings_json: String) -> Result<(), String> {
+        if self.inner.is_training() {
+            return Err(crate::shared::TRAINING.into());
+        }
         self.inner.remember_settings(&settings_json);
         self.inner.set_mic_off(false);
         self.inner.engine.start(&settings_json)
@@ -57,6 +60,12 @@ impl IkkEngine {
         self.inner.engine.stop()?;
         self.inner.set_mic_off(true);
         Ok(())
+    }
+    /// The voice command recording dialog opens (true) or closes (false):
+    /// no dictation, no listening meanwhile, on every platform.
+    #[frb(sync)]
+    pub fn set_voice_training(&self, active: bool) {
+        self.inner.set_training(active);
     }
     #[frb(sync)]
     pub fn cut_segment(&self) -> Result<(), String> {

@@ -383,8 +383,13 @@ impl Engine {
                 self.consent = state;
                 Ok(())
             }
+            // An empty secret removes the key (the user deleted it).
             EngineCommand::SetCredential(p, s) => {
-                self.credentials.insert(p, s);
+                if s.expose().is_empty() {
+                    self.credentials.remove(&p);
+                } else {
+                    self.credentials.insert(p, s);
+                }
                 Ok(())
             }
             EngineCommand::TransferToTarget => self.transfer().await,

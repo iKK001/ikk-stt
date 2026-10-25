@@ -39,12 +39,18 @@ pub struct Shared {
     mic_off: AtomicBool,
     /// Whether the engine currently has the voice listener on.
     voice_applied: AtomicBool,
+    /// The user records voice commands: nothing listens or dictates, or
+    /// the recorded words would be transcribed (and typed) as well.
+    training: AtomicBool,
     /// Serialises writes to the encrypted store.
     #[allow(dead_code)]
     persist_lock: Mutex<()>,
 }
 
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
+
+/// Why a start is refused while voice commands are recorded.
+pub const TRAINING: &str = "voice commands are being recorded";
 
 #[allow(dead_code)]
 pub fn get() -> Option<Arc<Shared>> {
@@ -68,6 +74,7 @@ pub fn get_or_create() -> Arc<Shared> {
                 screen_paused: AtomicBool::new(false),
                 mic_off: AtomicBool::new(false),
                 voice_applied: AtomicBool::new(false),
+                training: AtomicBool::new(false),
                 persist_lock: Mutex::new(()),
             });
             if let Some(mut rx) = shared.engine.take_events() {
@@ -148,8 +155,10 @@ impl Shared {
     /// and the microphone was not switched off by click.
     fn apply_voice(&self, force: bool) {
         let model = self.voice.lock().ok().and_then(|g| g.clone());
-        let want =
-            model.is_some() && !self.screen_paused.load(Ordering::SeqCst) && !self.mic_off.load(Ordering::SeqCst);
+        let want = model.is_some()
+            && !self.screen_paused.load(Ordering::SeqCst)
+            && !self.mic_off.load(Ordering::SeqCst)
+            && !self.training.load(Ordering::SeqCst);
         if self.voice_applied.swap(want, Ordering::SeqCst) == want && !force {
             return;
         }
@@ -196,6 +205,23 @@ impl Shared {
     pub fn set_voice_paused(&self, paused: bool) {
         self.screen_paused.store(paused, Ordering::SeqCst);
         self.apply_voice(false);
+    }
+
+    /// Recording voice commands (true): stop a running dictation and the
+    /// voice listener, refuse starts. Done (false): the listener comes back
+    /// as before; a stopped dictation stays stopped.
+    pub fn set_training(&self, on: bool) {
+        if self.training.swap(on, Ordering::SeqCst) == on {
+            return;
+        }
+        if on {
+            let _ = self.engine.stop();
+        }
+        self.apply_voice(false);
+    }
+
+    pub fn is_training(&self) -> bool {
+        self.training.load(Ordering::SeqCst)
     }
 
     /// An empty secret removes the stored key.
@@ -325,6 +351,9 @@ impl Shared {
     pub fn start_listening(&self) -> Result<bool, String> {
         if self.listening.load(Ordering::SeqCst) {
             return Ok(true);
+        }
+        if self.training.load(Ordering::SeqCst) {
+            return Err(TRAINING.into());
         }
         let json = self
             .settings
