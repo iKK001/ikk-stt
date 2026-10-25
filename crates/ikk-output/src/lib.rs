@@ -104,6 +104,12 @@ pub trait TextSink: Send {
     fn verify(&mut self, _expected_tail: &str) -> Verification {
         Verification::Unavailable
     }
+    /// True when the sink inserts text in one piece (clipboard paste):
+    /// the engine then hands over whole segments instead of a
+    /// character-by-character flow.
+    fn wants_whole_segments(&self) -> bool {
+        false
+    }
 }
 
 /// Sink that collects text for a host to insert (mobile, tests).

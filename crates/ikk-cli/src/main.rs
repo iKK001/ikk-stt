@@ -106,9 +106,12 @@ enum Cmd {
         /// Wait for the target to process each character before the next.
         #[arg(long)]
         sync: bool,
-        /// Insert through the clipboard instead of keystrokes.
+        /// Insert through the clipboard instead of keystrokes (default on Windows).
         #[arg(long)]
         paste: bool,
+        /// Force keystrokes, also on Windows.
+        #[arg(long, conflicts_with = "paste")]
+        keys: bool,
     },
 }
 
@@ -210,11 +213,16 @@ async fn main() -> anyhow::Result<()> {
             delay_ms,
             sync,
             paste,
+            keys,
         } => {
             let mut sink: Box<dyn TextSink> = {
-                let mut s = ikk_output::desktop::DesktopSink::new()
-                    .with_sync_typing(sync)
-                    .with_paste_mode(paste);
+                let mut s = ikk_output::desktop::DesktopSink::new().with_sync_typing(sync);
+                if paste {
+                    s = s.with_paste_mode(true);
+                }
+                if keys {
+                    s = s.with_paste_mode(false);
+                }
                 if let Some(ms) = delay_ms {
                     s = s.with_typing_delay(ms);
                 }

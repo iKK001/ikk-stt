@@ -153,22 +153,73 @@ pub fn press(key: Key, n: usize) -> Result<(), OutputError> {
     sendinput::press_vk(vk, n)
 }
 
+#[link(name = "user32")]
+extern "system" {
+    fn GetClipboardSequenceNumber() -> u32;
+}
+
+/// The user's clipboard while our pastes are in flight, restored once the
+/// last paste is RESTORE_AFTER old and nobody else changed the clipboard.
+struct PendingRestore {
+    prior: Option<String>,
+    our_seq: u32,
+    last_paste: std::time::Instant,
+}
+
+static PENDING: std::sync::Mutex<Option<PendingRestore>> = std::sync::Mutex::new(None);
+const RESTORE_AFTER: Duration = Duration::from_millis(1500);
+
+/// Kept out of the clipboard history (Win+V), the cloud clipboard and
+/// clipboard tools, so dictated text leaves no copy behind.
+fn set_private_text(cb: &mut arboard::Clipboard, text: &str) -> Result<(), OutputError> {
+    use arboard::SetExtWindows;
+    cb.set()
+        .exclude_from_monitoring()
+        .exclude_from_history()
+        .exclude_from_cloud()
+        .text(text.to_string())
+        .map_err(|e| OutputError::Failed(format!("clipboard set: {e}")))
+}
+
 pub fn paste_clipboard(text: &str) -> Result<(), OutputError> {
     let mut cb = arboard::Clipboard::new().map_err(|e| OutputError::Failed(format!("clipboard: {e}")))?;
-    let prior = cb.get_text().ok();
-    cb.set_text(text.to_string())
-        .map_err(|e| OutputError::Failed(format!("clipboard set: {e}")))?;
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    // A paste shortly after the previous one: the clipboard still holds our
+    // own text, so keep the user's original from the first paste.
+    let prior = match pending.take() {
+        Some(p) if unsafe { GetClipboardSequenceNumber() } == p.our_seq => p.prior,
+        _ => cb.get_text().ok(),
+    };
+    set_private_text(&mut cb, text)?;
+    let our_seq = unsafe { GetClipboardSequenceNumber() };
     sleep(Duration::from_millis(40));
-    sendinput::ctrl_v()?;
-    if let Some(prev) = prior {
-        std::thread::spawn(move || {
-            sleep(Duration::from_millis(2000));
-            if let Ok(mut cb2) = arboard::Clipboard::new() {
-                let _ = cb2.set_text(prev);
-            }
-        });
-    }
-    Ok(())
+    let pasted = sendinput::ctrl_v();
+    *pending = Some(PendingRestore {
+        prior,
+        our_seq,
+        last_paste: std::time::Instant::now(),
+    });
+    drop(pending);
+    std::thread::spawn(|| {
+        sleep(RESTORE_AFTER);
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let due = pending
+            .as_ref()
+            .is_some_and(|p| p.last_paste.elapsed() >= RESTORE_AFTER);
+        if !due {
+            return; // a newer paste will restore
+        }
+        let Some(p) = pending.take() else { return };
+        // Only if the clipboard still holds our text: never overwrite
+        // something the user copied in the meantime.
+        if unsafe { GetClipboardSequenceNumber() } != p.our_seq {
+            return;
+        }
+        if let (Some(prev), Ok(mut cb)) = (p.prior, arboard::Clipboard::new()) {
+            let _ = set_private_text(&mut cb, &prev);
+        }
+    });
+    pasted
 }
 
 /// Read the focused field through UI Automation and compare its tail.

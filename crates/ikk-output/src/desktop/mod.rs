@@ -52,7 +52,10 @@ impl DesktopSink {
             typing_delay_ms: MIN_SAFE_CHAR_DELAY_MS,
             clipboard_fallback: true,
             sync_typing: false,
-            paste_mode: false,
+            // Windows: keystrokes get garbled in slow targets (Windows 11
+            // Notepad turns bursts into repeats of one character, measured
+            // 2026-10-24 even at 20 ms per character); paste was exact.
+            paste_mode: cfg!(target_os = "windows"),
             last_level: AccessLevel::BasicTyping,
         }
     }
@@ -161,5 +164,9 @@ impl TextSink for DesktopSink {
 
     fn verify(&mut self, expected_tail: &str) -> Verification {
         platform::verify_tail(expected_tail)
+    }
+
+    fn wants_whole_segments(&self) -> bool {
+        self.paste_mode
     }
 }

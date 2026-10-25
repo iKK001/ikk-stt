@@ -347,7 +347,14 @@ impl Engine {
             cfg.session.credential = self.credentials.get(&cfg.session.provider).cloned();
         }
         self.session_text.clear();
-        self.live = LiveTyper::new(Box::new(ikk_output::guard::AllowAllGuard), cfg.flow_ms);
+        // A pasting sink inserts whole segments; a character flow would
+        // mean one paste per character.
+        let flow_ms = if self.sink.wants_whole_segments() {
+            0
+        } else {
+            cfg.flow_ms
+        };
+        self.live = LiveTyper::new(Box::new(ikk_output::guard::AllowAllGuard), flow_ms);
         self.decide_output_mode().await?;
 
         let capture = (self.open_capture)(&cfg.capture)?;
