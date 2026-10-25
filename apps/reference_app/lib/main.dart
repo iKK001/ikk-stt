@@ -573,7 +573,10 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 8),
           Center(child: Text('$_state${_speech ? ' · speech' : ''}')),
           const SizedBox(height: 8),
-          LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0)),
+          // Changes ten times a second: kept out of the accessibility tree
+          // (screen readers, and Flutter's Windows bridge, which logs
+          // "Failed to update ui::AXTree" on such fast updates).
+          ExcludeSemantics(child: LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0))),
           const SizedBox(height: 12),
           if (_interim.isNotEmpty) Text(_interim, style: const TextStyle(fontStyle: FontStyle.italic)),
           if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),

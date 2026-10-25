@@ -419,7 +419,12 @@ impl Engine {
         if !idle || voice.standby.is_some() || voice.standby_failed {
             return;
         }
-        match (self.open_capture)(&voice.start.capture) {
+        // The words were recorded without AGC and preamp (ikk-ffi
+        // record_take); the start word must be heard the same way.
+        let mut capture = voice.start.capture.clone();
+        capture.agc = false;
+        capture.preamp_gain_db = 0.0;
+        match (self.open_capture)(&capture) {
             Ok(c) => {
                 voice.standby = Some(c);
                 voice.segmenter = ikk_wake::Segmenter::new();

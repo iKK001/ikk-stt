@@ -13,9 +13,16 @@ const MIN_FRAMES: usize = 25;
 const THRESHOLD_FACTOR: f32 = 1.35;
 /// The winning word must be this much closer than the other one.
 const AMBIGUITY_MARGIN: f32 = 0.85;
+/// Very similar takes would give a limit so tight that the word, said a
+/// little differently later, is missed. Real words of the same speaker
+/// scored 17 to 22, other speech and noise 26 and more.
+const MIN_THRESHOLD: f32 = 23.0;
 /// One take much further from the others than they are from each other
-/// (noise, a cough, a different word) makes the set unusable.
+/// (noise, a cough, a different word) makes the set unusable ...
 const CONSISTENCY_RATIO: f32 = 2.2;
+/// ... unless it is still close enough to be the same word: two nearly
+/// identical takes must not turn a good third one into a reject.
+const CONSISTENT_ENOUGH: f32 = 20.0;
 /// Utterances much shorter or longer than the takes are not the word.
 const DURATION_RANGE: (f32, f32) = (0.5, 2.0);
 
@@ -94,15 +101,20 @@ impl CommandModel {
                 best = best.min(d);
             }
         }
-        if !worst.is_finite() || worst > best.max(1e-3) * CONSISTENCY_RATIO {
+        if !worst.is_finite() || (worst > best.max(1e-3) * CONSISTENCY_RATIO && worst > CONSISTENT_ENOUGH) {
             return Err(WakeError::TakesInconsistent);
         }
         let mean_frames = templates.iter().map(|t| t.len() as f32).sum::<f32>() / templates.len() as f32;
         Ok(Self {
             templates,
-            threshold: worst * THRESHOLD_FACTOR,
+            threshold: (worst * THRESHOLD_FACTOR).max(MIN_THRESHOLD),
             mean_frames,
         })
+    }
+
+    /// The acceptance limit, also for words trained before MIN_THRESHOLD.
+    pub fn limit(&self) -> f32 {
+        self.threshold.max(MIN_THRESHOLD)
     }
 
     /// Smallest distance to any take, or None if the length rules it out.
@@ -154,9 +166,9 @@ impl Spotter {
             level_dbfs: 20.0 * rms.max(1e-9).log10(),
             frames: frames.len(),
             start: None,
-            start_threshold: self.commands.start.threshold,
+            start_threshold: self.commands.start.limit(),
             stop: None,
-            stop_threshold: self.commands.stop.threshold,
+            stop_threshold: self.commands.stop.limit(),
         };
         if frames.len() < MIN_FRAMES {
             return j;
@@ -164,7 +176,7 @@ impl Spotter {
         j.start = self.commands.start.distance(&frames);
         j.stop = self.commands.stop.distance(&frames);
         let accept = |d: Option<f32>, model: &CommandModel, other: Option<f32>| {
-            d.is_some_and(|d| d <= model.threshold && other.is_none_or(|o| d <= o * AMBIGUITY_MARGIN))
+            d.is_some_and(|d| d <= model.limit() && other.is_none_or(|o| d <= o * AMBIGUITY_MARGIN))
         };
         j.command = if accept(j.start, &self.commands.start, j.stop) {
             Some(Command::Start)
