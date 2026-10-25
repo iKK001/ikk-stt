@@ -45,13 +45,18 @@ impl IkkEngine {
     }
 
     #[frb(sync)]
+    /// The app's dictate button: a click, so the voice listener is on again.
     pub fn start(&self, settings_json: String) -> Result<(), String> {
         self.inner.remember_settings(&settings_json);
+        self.inner.set_mic_off(false);
         self.inner.engine.start(&settings_json)
     }
+    /// The app's stop button: a click, so the voice listener goes off too.
     #[frb(sync)]
     pub fn stop(&self) -> Result<(), String> {
-        self.inner.engine.stop()
+        self.inner.engine.stop()?;
+        self.inner.set_mic_off(true);
+        Ok(())
     }
     #[frb(sync)]
     pub fn cut_segment(&self) -> Result<(), String> {
@@ -81,6 +86,37 @@ impl IkkEngine {
         }
         zeroize::Zeroize::zeroize(&mut secret);
         r
+    }
+    /// Floating microphone button over all apps (desktop): a click toggles
+    /// dictation with the remembered settings; red while listening.
+    #[frb(sync)]
+    pub fn show_floating_button(&self, show: bool) {
+        if show {
+            ikk_overlay::show(std::sync::Arc::new(|| {
+                if let Some(s) = crate::shared::get() {
+                    if let Err(e) = s.click_toggle() {
+                        log::warn!("floating button: {e}");
+                    }
+                }
+            }));
+            ikk_overlay::set_listening(self.inner.listening.load(std::sync::atomic::Ordering::SeqCst));
+            ikk_overlay::set_standby(self.inner.standby.load(std::sync::atomic::Ordering::SeqCst));
+        } else {
+            ikk_overlay::hide();
+        }
+    }
+
+    /// Offline voice commands on (model JSON from `voice_train`) or off
+    /// (`None`). `settings_json`: what a voice start dictates with.
+    #[frb(sync)]
+    pub fn set_voice_commands(&self, commands_json: Option<String>, settings_json: String) -> Result<(), String> {
+        if let Some(json) = commands_json.as_deref() {
+            // Validate before keeping it.
+            ikk_wake::VoiceCommands::from_json(json).map_err(|e| e.to_string())?;
+        }
+        self.inner.remember_settings(&settings_json);
+        self.inner.remember_voice(commands_json.as_deref());
+        Ok(())
     }
     #[frb(sync)]
     pub fn transfer_to_target(&self) -> Result<(), String> {

@@ -57,6 +57,7 @@ impl Provider for FakeProvider {
             streaming: true,
             interim: true,
             requires_network: true,
+            own_audio: false,
             ..Default::default()
         }
     }
@@ -408,4 +409,253 @@ async fn spoken_stop_command_ends_session() {
         "command text must not be typed"
     );
     handle.shutdown().await;
+}
+
+// ---------- offline voice commands ----------
+
+/// Synthetic word: voiced sounds (pitch, formant 1, formant 2, seconds).
+fn word(sounds: &[(f32, f32, f32, f32)], speed: f32, gain: f32) -> Vec<f32> {
+    let sr = 16_000f32;
+    let mut out = Vec::new();
+    let mut phase = 0f32;
+    for &(f0, f1, f2, dur) in sounds {
+        let n = (dur * speed * sr) as usize;
+        for i in 0..n {
+            let env = (std::f32::consts::PI * i as f32 / n as f32).sin().max(0.0);
+            phase += f0 / sr;
+            let mut v = 0f32;
+            for h in 1..40 {
+                let fh = f0 * h as f32;
+                if fh > 7000.0 {
+                    break;
+                }
+                let w = 1.0 / (1.0 + ((fh - f1) / 90.0).powi(2)) + 0.6 / (1.0 + ((fh - f2) / 120.0).powi(2));
+                v += w * (2.0 * std::f32::consts::PI * h as f32 * phase).sin();
+            }
+            out.push(gain * 0.1 * env * v);
+        }
+    }
+    out
+}
+
+const START_WORD: &[(f32, f32, f32, f32)] = &[
+    (120.0, 300.0, 2300.0, 0.18),
+    (130.0, 700.0, 1200.0, 0.22),
+    (110.0, 500.0, 1800.0, 0.15),
+];
+const STOP_WORD: &[(f32, f32, f32, f32)] = &[
+    (150.0, 600.0, 1000.0, 0.12),
+    (140.0, 350.0, 900.0, 0.25),
+    (160.0, 750.0, 1700.0, 0.12),
+];
+
+/// Microphone the test speaks into; every open gets a fresh stream.
+type Mic = Arc<StdMutex<Option<mpsc::Sender<AudioFrame>>>>;
+
+async fn say(mic: &Mic, samples: &[f32]) {
+    let tx = mic.lock().unwrap().clone().expect("microphone open");
+    let mut padded = vec![0.0005f32; 16_000];
+    padded.extend_from_slice(samples);
+    padded.extend(std::iter::repeat_n(0.0005f32, 16_000));
+    for chunk in padded.chunks(1600) {
+        let _ = tx
+            .send(AudioFrame {
+                samples: chunk.to_vec(),
+                sample_rate_hz: 16_000,
+                offset: Duration::ZERO,
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn voice_commands_start_and_stop_dictation() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(FakeProvider));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opener_mic = mic.clone();
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog::default(),
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    let takes = |w| vec![word(w, 1.0, 1.0), word(w, 0.9, 0.7), word(w, 1.12, 1.3)];
+    let commands = ikk_wake::VoiceCommands::train(&takes(START_WORD), &takes(STOP_WORD)).unwrap();
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    handle
+        .send(EngineCommand::SetVoiceCommands(Some(Box::new(VoiceSetup {
+            commands,
+            start: start_cfg(),
+        }))))
+        .await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::VoiceStandby(true)),
+        Duration::from_secs(3),
+    )
+    .await;
+    assert!(
+        ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(true))),
+        "standby: {ev:?}"
+    );
+
+    say(&mic, &word(START_WORD, 1.05, 0.8)).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::VoiceCommand(ikk_wake::Command::Start))),
+        "start word: {ev:?}"
+    );
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, EngineEvent::State(EngineState::Listening))));
+
+    say(&mic, &word(STOP_WORD, 0.95, 1.2)).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::VoiceStandby(true)),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::VoiceCommand(ikk_wake::Command::Stop))),
+        "stop word: {ev:?}"
+    );
+    assert!(ev.iter().any(|e| matches!(e, EngineEvent::State(EngineState::Idle))));
+    assert!(
+        ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(true))),
+        "back to standby"
+    );
+}
+
+/// Provider that records the microphone itself (like Windows' recognizer).
+struct OwnMicProvider;
+
+struct SilentSession {
+    rx: mpsc::Receiver<TranscriptEvent>,
+    _tx: mpsc::Sender<TranscriptEvent>,
+}
+
+#[async_trait::async_trait]
+impl StreamingSession for SilentSession {
+    async fn push(&mut self, _f: AudioFrame) -> Result<(), SttError> {
+        Ok(())
+    }
+    async fn cut_segment(&mut self) -> Result<(), SttError> {
+        Ok(())
+    }
+    async fn finish(&mut self) -> Result<(), SttError> {
+        let _ = self._tx.send(TranscriptEvent::Closed).await;
+        Ok(())
+    }
+    fn events(&mut self) -> &mut mpsc::Receiver<TranscriptEvent> {
+        &mut self.rx
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for OwnMicProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("fake".into())
+    }
+    fn display_name(&self) -> &'static str {
+        "Own mic"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streaming: true,
+            interim: true,
+            requires_network: true,
+            own_audio: true,
+            ..Default::default()
+        }
+    }
+    async fn transcribe(&self, _: AudioClip, _: &SessionConfig) -> Result<Transcript, SttError> {
+        Err(SttError::Unsupported)
+    }
+    async fn stream(&self, _: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError> {
+        let (tx, rx) = mpsc::channel(8);
+        Ok(Box::new(SilentSession { rx, _tx: tx }))
+    }
+}
+
+#[tokio::test]
+async fn stop_word_works_with_providers_that_own_the_microphone() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(OwnMicProvider));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opens = Arc::new(StdMutex::new(0usize));
+    let (opener_mic, opener_opens) = (mic.clone(), opens.clone());
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        *opener_opens.lock().unwrap() += 1;
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog::default(),
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    let takes = |w| vec![word(w, 1.0, 1.0), word(w, 0.9, 0.7), word(w, 1.12, 1.3)];
+    let commands = ikk_wake::VoiceCommands::train(&takes(START_WORD), &takes(STOP_WORD)).unwrap();
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    handle
+        .send(EngineCommand::SetVoiceCommands(Some(Box::new(VoiceSetup {
+            commands,
+            start: start_cfg(),
+        }))))
+        .await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::VoiceStandby(true)),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    say(&mic, &word(START_WORD, 1.0, 1.0)).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::State(EngineState::Listening))),
+        "{ev:?}"
+    );
+    // The listener stayed open: no second microphone stream was needed.
+    assert!(
+        !ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(false))),
+        "{ev:?}"
+    );
+
+    say(&mic, &word(STOP_WORD, 1.0, 1.0)).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Idle)),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::VoiceCommand(ikk_wake::Command::Stop))),
+        "stop word: {ev:?}"
+    );
+    assert!(ev.iter().any(|e| matches!(e, EngineEvent::State(EngineState::Idle))));
+    assert_eq!(*opens.lock().unwrap(), 1, "one listener for the whole cycle");
 }

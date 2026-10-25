@@ -103,6 +103,8 @@ pub enum EngineCommand {
     TransferToTarget,
     /// Fallback mode: shell took the text (copy/share); clear it.
     ClearSessionText,
+    /// Offline voice commands on (trained words + what to start with) or off.
+    SetVoiceCommands(Option<Box<VoiceSetup>>),
     Shutdown,
 }
 
@@ -128,7 +130,24 @@ pub enum EngineEvent {
     /// Characters handed to the sink.
     Typed(usize),
     /// Mobile: the host (keyboard extension / IME) must insert this text.
-    HostText(String),
+    /// Text for a host that inserts it itself (Android service, iOS
+    /// keyboard). `rhythm`: type it character by character (streaming);
+    /// otherwise insert it at once (batch chunks, dictation window).
+    HostText {
+        text: String,
+        rhythm: bool,
+    },
+    /// The provider needs a setting outside the app first (after consent).
+    /// `settings_url` is a page the shell can open, or empty.
+    SetupRequired {
+        provider: String,
+        message: String,
+        settings_url: String,
+    },
+    /// An offline voice command was recognised.
+    VoiceCommand(ikk_wake::Command),
+    /// Listening locally for the start word (true) or not (false).
+    VoiceStandby(bool),
     /// A spoken command was recognised and executed.
     Command(Intent),
     Error(String),
@@ -170,6 +189,24 @@ impl EngineHandle {
     }
 }
 
+/// Trained voice commands and the session they start.
+#[derive(Debug)]
+pub struct VoiceSetup {
+    pub commands: ikk_wake::VoiceCommands,
+    pub start: StartConfig,
+}
+
+/// Offline voice commands while switched on.
+struct Voice {
+    spotter: ikk_wake::Spotter,
+    segmenter: ikk_wake::Segmenter,
+    start: StartConfig,
+    /// Local microphone stream while no session runs (start word only).
+    standby: Option<Box<dyn Capture>>,
+    /// Opening the standby stream failed; retried after the next command.
+    standby_failed: bool,
+}
+
 const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
 const FINISH_GRACE: Duration = Duration::from_secs(8);
 
@@ -192,6 +229,14 @@ pub struct Engine {
     last_level: Instant,
     /// Owner of the physical target text while injecting.
     live: LiveTyper,
+    /// How text goes into the target in this session.
+    insert_style: ikk_output::InsertStyle,
+    voice: Option<Voice>,
+    /// When and how much text went into the target in this session; lets a
+    /// spoken stop word take back what was typed for it.
+    typed_log: Vec<(Instant, usize)>,
+    /// Stopping by voice: text still in flight belongs to the stop word.
+    discard_pending: bool,
 }
 
 impl Engine {
@@ -224,6 +269,10 @@ impl Engine {
             command_locale: String::new(),
             last_level: Instant::now(),
             live: LiveTyper::default(),
+            insert_style: ikk_output::InsertStyle::default(),
+            voice: None,
+            typed_log: Vec::new(),
+            discard_pending: false,
         };
         let task = tokio::spawn(engine.run(cmd_rx));
         EngineHandle {
@@ -245,6 +294,7 @@ impl Engine {
 
     async fn run(mut self, mut commands: mpsc::Receiver<EngineCommand>) {
         loop {
+            self.maintain_standby().await;
             tokio::select! {
                 cmd = commands.recv() => match cmd {
                     None | Some(EngineCommand::Shutdown) => {
@@ -264,6 +314,11 @@ impl Engine {
                         warn!("capture ended unexpectedly");
                         self.stop().await;
                     }
+                },
+                frame = async { self.voice.as_mut().unwrap().standby.as_mut().unwrap().frames().recv().await },
+                    if self.voice.as_ref().is_some_and(|v| v.standby.is_some()) => match frame {
+                    Some(frame) => self.on_standby_frame(frame).await,
+                    None => self.close_standby().await,
                 },
                 ev = async { self.session.as_mut().unwrap().events().recv().await }, if self.session.is_some() => match ev {
                     Some(ev) => self.on_transcript(ev).await,
@@ -324,14 +379,114 @@ impl Engine {
                 self.session_text.clear();
                 Ok(())
             }
+            EngineCommand::SetVoiceCommands(setup) => {
+                self.close_standby().await;
+                self.voice = setup.map(|v| Voice {
+                    spotter: ikk_wake::Spotter::new(v.commands),
+                    segmenter: ikk_wake::Segmenter::new(),
+                    start: v.start,
+                    standby: None,
+                    standby_failed: false,
+                });
+                Ok(())
+            }
             EngineCommand::Shutdown => Ok(()),
         }
+    }
+
+    /// While voice commands are on and no session runs, listen locally for
+    /// the start word.
+    async fn maintain_standby(&mut self) {
+        // Open whenever our own session stream is not running: while idle,
+        // and during sessions of providers with their own microphone.
+        let idle = self.capture.is_none();
+        let Some(voice) = self.voice.as_mut() else { return };
+        if !idle || voice.standby.is_some() || voice.standby_failed {
+            return;
+        }
+        match (self.open_capture)(&voice.start.capture) {
+            Ok(c) => {
+                voice.standby = Some(c);
+                voice.segmenter = ikk_wake::Segmenter::new();
+                let _ = self.events.send(EngineEvent::VoiceStandby(true)).await;
+            }
+            Err(e) => {
+                warn!(%e, "voice command standby could not open the microphone");
+                voice.standby_failed = true;
+            }
+        }
+    }
+
+    async fn close_standby(&mut self) {
+        if let Some(c) = self.voice.as_mut().and_then(|v| v.standby.take()) {
+            c.stop();
+            let _ = self.events.send(EngineEvent::VoiceStandby(false)).await;
+        }
+    }
+
+    async fn on_standby_frame(&mut self, frame: ikk_audio::AudioFrame) {
+        let Some(voice) = self.voice.as_mut() else { return };
+        if frame.sample_rate_hz != ikk_wake::SAMPLE_RATE_HZ {
+            return;
+        }
+        let Some(utterance) = voice.segmenter.push(&frame.samples) else {
+            return;
+        };
+        let heard = voice.spotter.detect(&utterance);
+        // During a session with its own microphone this listener hears the
+        // stop word; otherwise it waits for the start word.
+        if self.session.is_some() {
+            if heard == Some(ikk_wake::Command::Stop) {
+                let secs = utterance.len() as f32 / ikk_wake::SAMPLE_RATE_HZ as f32;
+                self.stop_by_voice(secs).await;
+            }
+            return;
+        }
+        if heard != Some(ikk_wake::Command::Start) {
+            return;
+        }
+        let cfg = voice.start.clone();
+        let _ = self
+            .events
+            .send(EngineEvent::VoiceCommand(ikk_wake::Command::Start))
+            .await;
+        if let Err(e) = self.start(cfg).await {
+            let _ = self.events.send(EngineEvent::Error(e.to_string())).await;
+        }
+    }
+
+    /// The stop word was heard during dictation: take back what was typed
+    /// for it, drop what is still in flight, stop.
+    async fn stop_by_voice(&mut self, utterance_secs: f32) {
+        let _ = self
+            .events
+            .send(EngineEvent::VoiceCommand(ikk_wake::Command::Stop))
+            .await;
+        // The utterance plus the pause that ended it, plus provider latency.
+        let since = Instant::now()
+            .checked_sub(Duration::from_secs_f32(utterance_secs + 0.9))
+            .unwrap_or_else(Instant::now);
+        let typed: usize = self.typed_log.iter().filter(|(t, _)| *t >= since).map(|(_, n)| n).sum();
+        if typed > 0 && self.output_mode == OutputMode::Inject {
+            if let Err(e) = self.sink.backspace(typed) {
+                warn!(%e, "could not take back the stop word");
+            }
+        }
+        let keep = self.session_text.chars().count().saturating_sub(typed);
+        self.session_text = self.session_text.chars().take(keep).collect();
+        self.discard_pending = true;
+        self.stop().await;
+        self.discard_pending = false;
     }
 
     async fn start(&mut self, mut cfg: StartConfig) -> Result<(), EngineError> {
         if self.session.is_some() {
             return Err(EngineError::Busy);
         }
+        if let Some(v) = self.voice.as_mut() {
+            v.standby_failed = false;
+        }
+        self.typed_log.clear();
         let provider = self
             .registry
             .get(&cfg.session.provider)
@@ -343,12 +498,34 @@ impl Engine {
             let _ = self.events.send(EngineEvent::ConsentRequired(r)).await;
             return Ok(());
         }
+        // Consent given; now anything the user must switch on elsewhere.
+        if let Some(setup) = provider.setup_needed() {
+            let _ = self
+                .events
+                .send(EngineEvent::SetupRequired {
+                    provider: cfg.session.provider.0.clone(),
+                    message: setup.message,
+                    settings_url: setup.settings_url,
+                })
+                .await;
+            return Ok(());
+        }
         if cfg.session.credential.is_none() {
             cfg.session.credential = self.credentials.get(&cfg.session.provider).cloned();
         }
         self.session_text.clear();
-        // A pasting sink inserts whole segments; a character flow would
-        // mean one paste per character.
+        // Streaming text is typed in rhythm at the cursor; batch chunks are
+        // pasted in one piece (open_session streams exactly when asked and
+        // supported).
+        let streaming = caps.streaming && (cfg.session.transfer == ikk_stt::TransferMode::Streaming || !caps.batch);
+        self.insert_style = if streaming {
+            ikk_output::InsertStyle::Rhythm
+        } else {
+            ikk_output::InsertStyle::Paste
+        };
+        self.sink.set_insert_style(self.insert_style);
+        // A sink that pastes or sets its own rhythm wants whole segments; a
+        // character flow would mean one paste per character.
         let flow_ms = if self.sink.wants_whole_segments() {
             0
         } else {
@@ -357,17 +534,31 @@ impl Engine {
         self.live = LiveTyper::new(Box::new(ikk_output::guard::AllowAllGuard), flow_ms);
         self.decide_output_mode().await?;
 
-        let capture = (self.open_capture)(&cfg.capture)?;
+        // Our session stream takes over from the voice listener. Providers
+        // with their own microphone run next to it (Windows and macOS let
+        // several readers share a microphone), so the stop word works with
+        // every provider, like Dragon's always-available commands.
+        if !caps.own_audio {
+            self.close_standby().await;
+        }
+        // System recognizers record the microphone themselves.
+        let capture = if caps.own_audio {
+            None
+        } else {
+            Some((self.open_capture)(&cfg.capture)?)
+        };
         let session = match open_session(provider, &cfg.session).await {
             Ok(s) => s,
             Err(e) => {
-                capture.stop();
+                if let Some(c) = capture {
+                    c.stop();
+                }
                 return Err(e.into());
             }
         };
         let mut vad = VoiceActivityDetector::new(cfg.vad_mode, PIPELINE_SAMPLE_RATE_HZ);
         vad.set_pause_duration_ms(cfg.pause.as_millis().max(100) as u32);
-        self.capture = Some(capture);
+        self.capture = capture;
         self.session = Some(session);
         self.vad = Some(vad);
         self.text_cfg = cfg.text;
@@ -378,6 +569,17 @@ impl Engine {
     }
 
     async fn on_frame(&mut self, frame: ikk_audio::AudioFrame) {
+        if let Some(voice) = self.voice.as_mut() {
+            if frame.sample_rate_hz == ikk_wake::SAMPLE_RATE_HZ {
+                if let Some(utterance) = voice.segmenter.push(&frame.samples) {
+                    if voice.spotter.detect(&utterance) == Some(ikk_wake::Command::Stop) {
+                        let secs = utterance.len() as f32 / ikk_wake::SAMPLE_RATE_HZ as f32;
+                        self.stop_by_voice(secs).await;
+                        return;
+                    }
+                }
+            }
+        }
         if self.last_level.elapsed() >= LEVEL_INTERVAL {
             self.last_level = Instant::now();
             let _ = self.events.try_send(EngineEvent::Level(frame.level_dbfs()));
@@ -532,7 +734,10 @@ impl Engine {
         if let Some(c) = self.capture.take() {
             c.stop();
         }
-        if self.output_mode == OutputMode::Inject {
+        if self.discard_pending {
+            // Queued text belongs to the stop word: drop it untyped.
+            self.live = LiveTyper::default();
+        } else if self.output_mode == OutputMode::Inject {
             if let Err(e) = self.live.flush(&mut *self.sink) {
                 self.switch_to_fallback(FallbackReason::InjectionFailed(e.to_string()))
                     .await;
@@ -554,7 +759,7 @@ impl Engine {
                 }
             }
             for t in finals {
-                if !t.is_empty() {
+                if !t.is_empty() && !self.discard_pending {
                     let with_space = if self.session_text.is_empty() {
                         t
                     } else {
@@ -580,6 +785,18 @@ impl Engine {
             other => return Err(EngineError::NotInjectable(other)),
         }
         let text = std::mem::take(&mut self.session_text);
+        // Text from the dictation window goes in at once.
+        self.insert_style = ikk_output::InsertStyle::Paste;
+        self.sink.set_insert_style(self.insert_style);
+        if self.sink.access_level() == AccessLevel::Host {
+            let _ = self
+                .events
+                .send(EngineEvent::HostText {
+                    text: text.clone(),
+                    rhythm: false,
+                })
+                .await;
+        }
         match self.sink.type_text(&text) {
             Ok(()) => {
                 let _ = self.events.send(EngineEvent::Transferred(text.chars().count())).await;
@@ -633,8 +850,16 @@ impl Engine {
             return Ok(n);
         }
         let segment = text.trim_start();
+        self.typed_log.push((Instant::now(), n));
         if self.sink.access_level() == AccessLevel::Host {
-            let _ = self.events.send(EngineEvent::HostText(text.to_string())).await;
+            let rhythm = self.insert_style == ikk_output::InsertStyle::Rhythm;
+            let _ = self
+                .events
+                .send(EngineEvent::HostText {
+                    text: text.to_string(),
+                    rhythm,
+                })
+                .await;
         }
         match self.live.append(segment, &mut *self.sink) {
             Ok(_) => {

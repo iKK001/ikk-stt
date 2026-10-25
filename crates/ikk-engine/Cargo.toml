@@ -17,6 +17,7 @@ ikk-commands.workspace = true
 ikk-output.workspace = true
 ikk-consent.workspace = true
 ikk-settings.workspace = true
+ikk-wake.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

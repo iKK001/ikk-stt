@@ -28,7 +28,17 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// Settings the Android accessibility service starts with.
   void rememberSettings({required String settingsJson});
 
+  /// Also kept in the encrypted store on Android, so the accessibility
+  /// service works after a reboot without opening the app.
   void setCredential({required String provider, required String secret});
+
+  /// Offline voice commands on (model JSON from `voice_train`) or off
+  /// (`None`). `settings_json`: what a voice start dictates with.
+  void setVoiceCommands({String? commandsJson, required String settingsJson});
+
+  /// Floating microphone button over all apps (desktop): a click toggles
+  /// dictation with the remembered settings; red while listening.
+  void showFloatingButton({required bool show_});
 
   void start({required String settingsJson});
 

@@ -1157,6 +1157,7 @@ dependencies = [
  "ikk-settings",
  "ikk-stt",
  "ikk-text",
+ "ikk-wake",
  "serde",
  "thiserror 2.0.21",
  "tokio",
@@ -1174,6 +1175,7 @@ dependencies = [
  "ikk-providers",
  "ikk-settings",
  "ikk-stt",
+ "ikk-wake",
  "serde",
  "serde_json",
  "tokio",
@@ -1193,6 +1195,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikk-overlay"
+version = "0.0.1"
+dependencies = [
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "ikk-providers"
 version = "0.0.1"
 dependencies = [
@@ -1201,6 +1211,7 @@ dependencies = [
  "futures",
  "ikk-audio",
  "ikk-stt",
+ "ikk-stt-windows",
  "reqwest",
  "rustls",
  "serde_json",
@@ -1242,10 +1253,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikk-stt-windows"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "ikk-audio",
+ "ikk-stt",
+ "tokio",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "ikk-text"
 version = "0.0.1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "ikk-wake"
+version = "0.0.1"
+dependencies = [
+ "ikk-audio",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1255,6 +1289,8 @@ dependencies = [
  "flutter_rust_bridge",
  "ikk-engine",
  "ikk-ffi",
+ "ikk-overlay",
+ "ikk-wake",
  "log",
  "serde_json",
  "tokio",

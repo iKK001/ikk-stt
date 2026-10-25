@@ -33,6 +33,11 @@ pub fn recipient_for(provider_id: &str, display_name: &str) -> Recipient {
         "deepgram" => ("https://deepgram.com/privacy", vec![Use::Transcription]),
         "voiceitt" => ("https://voiceitt.com/legal/privacy", vec![Use::Transcription]),
         "elevenlabs" => ("https://elevenlabs.io/privacy-policy", vec![Use::Transcription]),
+        // Windows' own recognizer: dictation runs in Microsoft's cloud.
+        "windows" => (
+            "https://privacy.microsoft.com/privacystatement",
+            vec![Use::Transcription],
+        ),
         "openai" => (
             "https://openai.com/policies/privacy-policy/",
             vec![Use::Transcription, Use::Suggestions, Use::Translation],

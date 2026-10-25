@@ -106,12 +106,12 @@ enum Cmd {
         /// Wait for the target to process each character before the next.
         #[arg(long)]
         sync: bool,
-        /// Insert through the clipboard instead of keystrokes (default on Windows).
+        /// Insert through the clipboard instead of keystrokes.
         #[arg(long)]
         paste: bool,
-        /// Force keystrokes, also on Windows.
+        /// Keystrokes without waiting for each character to appear.
         #[arg(long, conflicts_with = "paste")]
-        keys: bool,
+        blind: bool,
     },
 }
 
@@ -213,15 +213,15 @@ async fn main() -> anyhow::Result<()> {
             delay_ms,
             sync,
             paste,
-            keys,
+            blind,
         } => {
             let mut sink: Box<dyn TextSink> = {
                 let mut s = ikk_output::desktop::DesktopSink::new().with_sync_typing(sync);
                 if paste {
                     s = s.with_paste_mode(true);
                 }
-                if keys {
-                    s = s.with_paste_mode(false);
+                if blind {
+                    s = s.with_confirmed_typing(false);
                 }
                 if let Some(ms) = delay_ms {
                     s = s.with_typing_delay(ms);
@@ -315,9 +315,14 @@ async fn main() -> anyhow::Result<()> {
             agc,
             to_cursor,
         } => {
+            // Windows' own recognizer needs no key.
+            let keyless = provider == "windows";
             let env_name = key_env.unwrap_or_else(|| format!("{}_API_KEY", provider.to_uppercase()));
-            let mut key =
-                std::env::var(&env_name).map_err(|_| anyhow::anyhow!("set {env_name} to your {provider} API key"))?;
+            let mut key = if keyless {
+                String::new()
+            } else {
+                std::env::var(&env_name).map_err(|_| anyhow::anyhow!("set {env_name} to your {provider} API key"))?
+            };
             if provider == "voiceitt" {
                 // Voiceitt needs App ID + API key; the credential is "APP_ID:API_KEY".
                 let app_id =
@@ -361,10 +366,14 @@ async fn main() -> anyhow::Result<()> {
                 Box::new(StdoutSink)
             };
             let mut engine = Engine::spawn(reg, sink);
-            engine
-                .send(EngineCommand::SetCredential(pid.clone(), Secret::new(key)))
-                .await;
-            // Passing a key is consent for the CLI; record it like the app would.
+            if !keyless {
+                engine
+                    .send(EngineCommand::SetCredential(pid.clone(), Secret::new(key)))
+                    .await;
+            }
+            // Choosing a provider here (with its key, if it needs one) is
+            // consent for the CLI; record it like the app would.
+            eprintln!("consent recorded for {provider}: audio is sent to this provider");
             let consent_file = consent_path().ok();
             if let Some(p) = &consent_file {
                 if let Ok(c) = ikk_consent::ConsentState::load(p) {
@@ -414,6 +423,13 @@ async fn main() -> anyhow::Result<()> {
                         }
                         Some(EngineEvent::Transcript(TranscriptEvent::Error(e))) => eprintln!("\n[provider error] {e:?}"),
                         Some(EngineEvent::Error(e)) => eprintln!("\n[error] {e}"),
+                        Some(EngineEvent::SetupRequired { message, settings_url, .. }) => {
+                            eprintln!("\n[setup needed] {message}");
+                            if !settings_url.is_empty() {
+                                eprintln!("open it with:  start {settings_url}");
+                            }
+                            break;
+                        }
                         Some(EngineEvent::Command(c)) => eprintln!("\n[command] {c:?}"),
                         Some(EngineEvent::FallbackRequired { reason, .. }) => eprintln!("\n[fallback] {reason:?}"),
                         Some(EngineEvent::State(ikk_engine::EngineState::Idle)) if stopping => break,

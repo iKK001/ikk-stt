@@ -20,12 +20,25 @@ pub struct Shared {
     pub engine: FfiEngine,
     pub events: broadcast::Sender<String>,
     pub listening: AtomicBool,
+    /// The voice listener is waiting for the start word.
+    pub standby: AtomicBool,
     /// Last settings JSON the app used; the service starts with it.
     pub settings: Mutex<Option<String>>,
     /// Last consent state as JSON.
     consent: Mutex<Option<String>>,
     /// API keys by provider id.
     credentials: Mutex<BTreeMap<String, String>>,
+    /// Trained offline voice commands (JSON) while switched on.
+    voice: Mutex<Option<String>>,
+    /// Android: screen off, nothing listens (battery).
+    #[allow(dead_code)]
+    screen_paused: AtomicBool,
+    /// Microphone switched off by click: the voice listener stays off too
+    /// and only a click turns it on again (Dragon's "microphone off"). A
+    /// stop by voice keeps the listener on (Dragon's "go to sleep").
+    mic_off: AtomicBool,
+    /// Whether the engine currently has the voice listener on.
+    voice_applied: AtomicBool,
     /// Serialises writes to the encrypted store.
     #[allow(dead_code)]
     persist_lock: Mutex<()>,
@@ -47,9 +60,14 @@ pub fn get_or_create() -> Arc<Shared> {
                 engine,
                 events: tx.clone(),
                 listening: AtomicBool::new(false),
+                standby: AtomicBool::new(false),
                 settings: Mutex::new(None),
                 consent: Mutex::new(None),
                 credentials: Mutex::new(BTreeMap::new()),
+                voice: Mutex::new(None),
+                screen_paused: AtomicBool::new(false),
+                mic_off: AtomicBool::new(false),
+                voice_applied: AtomicBool::new(false),
                 persist_lock: Mutex::new(()),
             });
             if let Some(mut rx) = shared.engine.take_events() {
@@ -71,7 +89,14 @@ fn on_event(s: &Shared, ev: &EngineEvent) {
         EngineEvent::State(state) => {
             let listening = matches!(state, EngineState::Listening | EngineState::Finishing);
             let changed = s.listening.swap(listening, Ordering::SeqCst) != listening;
-            let _ = changed;
+            if changed {
+                ikk_overlay::set_listening(listening);
+            }
+        }
+        // Button colour: brand blue while waiting for the start word.
+        EngineEvent::VoiceStandby(on) => {
+            s.standby.store(*on, Ordering::SeqCst);
+            ikk_overlay::set_standby(*on);
         }
         EngineEvent::ConsentChanged(state) => {
             if let Ok(json) = serde_json::to_string(state) {
@@ -103,6 +128,76 @@ impl Shared {
         self.persist();
     }
 
+    /// Voice commands on (model JSON) or off; kept for a restart.
+    pub fn remember_voice(&self, json: Option<&str>) {
+        let changed = match self.voice.lock() {
+            Ok(mut v) if v.as_deref() != json => {
+                *v = json.map(str::to_string);
+                true
+            }
+            _ => false,
+        };
+        // Always re-apply: the settings a voice start uses may have changed.
+        self.apply_voice(true);
+        if changed {
+            self.persist();
+        }
+    }
+
+    /// Voice listener on exactly when words are trained, the screen is on
+    /// and the microphone was not switched off by click.
+    fn apply_voice(&self, force: bool) {
+        let model = self.voice.lock().ok().and_then(|g| g.clone());
+        let want =
+            model.is_some() && !self.screen_paused.load(Ordering::SeqCst) && !self.mic_off.load(Ordering::SeqCst);
+        if self.voice_applied.swap(want, Ordering::SeqCst) == want && !force {
+            return;
+        }
+        match (want, model) {
+            (true, Some(model)) => {
+                if let Some(settings) = self.settings.lock().ok().and_then(|g| g.clone()) {
+                    let _ = self.engine.set_voice_commands(Some(&model), &settings);
+                }
+            }
+            _ => {
+                let _ = self.engine.set_voice_commands(None, "");
+            }
+        }
+    }
+
+    /// Microphone off by click (true) or on again by click (false).
+    pub fn set_mic_off(&self, off: bool) {
+        if self.mic_off.swap(off, Ordering::SeqCst) != off {
+            self.apply_voice(false);
+            self.persist();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn mic_off(&self) -> bool {
+        self.mic_off.load(Ordering::SeqCst)
+    }
+
+    /// A click on a microphone button: off switches everything off, on
+    /// switches the listener back on and starts dictating.
+    pub fn click_toggle(&self) -> Result<bool, String> {
+        if self.listening.load(Ordering::SeqCst) {
+            self.engine.stop()?;
+            self.set_mic_off(true);
+            return Ok(false);
+        }
+        self.set_mic_off(false);
+        self.start_listening().map(|_| true)
+    }
+
+    /// Pause the voice listener (screen off, saves battery) or resume it
+    /// (screen on and unlocked); the trained words stay.
+    #[allow(dead_code)]
+    pub fn set_voice_paused(&self, paused: bool) {
+        self.screen_paused.store(paused, Ordering::SeqCst);
+        self.apply_voice(false);
+    }
+
     /// An empty secret removes the stored key.
     pub fn remember_credential(&self, provider: &str, secret: &str) {
         if let Ok(mut c) = self.credentials.lock() {
@@ -132,11 +227,15 @@ impl Shared {
         let settings = self.settings.lock().ok().and_then(|g| g.clone());
         let consent = self.consent.lock().ok().and_then(|g| g.clone());
         let credentials = self.credentials.lock().map(|g| g.clone()).unwrap_or_default();
+        let voice = self.voice.lock().ok().and_then(|g| g.clone());
+        let mic_off = self.mic_off.load(Ordering::SeqCst);
         let mut v = serde_json::json!({
             "v": 1,
             "settings": settings,
             "consent": consent,
             "credentials": credentials,
+            "voice": voice,
+            "mic_off": mic_off,
         });
         let out = v.to_string();
         // Overwrite the key copies held by the JSON value before dropping it.
@@ -191,6 +290,23 @@ impl Shared {
                 }
             }
         }
+        // Voice commands: the listener comes back unless the microphone was
+        // switched off by click.
+        if v.get("mic_off").and_then(|x| x.as_bool()) == Some(true) {
+            self.mic_off.store(true, Ordering::SeqCst);
+        }
+        if let Some(model) = v.get("voice").and_then(|x| x.as_str()) {
+            let restored = match self.voice.lock() {
+                Ok(mut g) if g.is_none() => {
+                    *g = Some(model.to_string());
+                    true
+                }
+                _ => false,
+            };
+            if restored {
+                self.apply_voice(true);
+            }
+        }
         if let Some(map) = v.get_mut("credentials").and_then(|c| c.as_object_mut()) {
             for val in map.values_mut() {
                 if let serde_json::Value::String(s) = val {
@@ -203,10 +319,12 @@ impl Shared {
     #[allow(dead_code)]
     /// Start with the remembered settings, or stop if listening.
     /// Returns the new listening state, or an error text.
-    pub fn toggle(&self) -> Result<bool, String> {
+    /// Start unless already listening. `Ok(true)`: was already listening
+    /// (no state change will follow); `Ok(false)`: start requested.
+    #[allow(dead_code)]
+    pub fn start_listening(&self) -> Result<bool, String> {
         if self.listening.load(Ordering::SeqCst) {
-            self.engine.stop()?;
-            return Ok(false);
+            return Ok(true);
         }
         let json = self
             .settings
@@ -215,6 +333,12 @@ impl Shared {
             .and_then(|s| s.clone())
             .ok_or_else(|| "open the app once to load settings".to_string())?;
         self.engine.start(&json)?;
-        Ok(true)
+        Ok(false)
+    }
+
+    /// Stop whatever runs; harmless when nothing does.
+    #[allow(dead_code)]
+    pub fn stop_listening(&self) -> Result<(), String> {
+        self.engine.stop()
     }
 }

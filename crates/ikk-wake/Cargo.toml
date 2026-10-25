@@ -1,0 +1,17 @@
+[package]
+name = "ikk-wake"
+description = "Offline voice commands from the user's own recordings: start/stop dictation without touching anything"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ikk-audio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rustfft = "6"

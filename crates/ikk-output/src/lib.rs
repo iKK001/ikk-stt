@@ -73,6 +73,16 @@ pub enum TargetStatus {
     NoInjection(String),
 }
 
+/// How a sink puts text into the target field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InsertStyle {
+    /// Visible typing at the cursor; for streaming text.
+    #[default]
+    Rhythm,
+    /// One paste per piece; for batch chunks and the dictation window.
+    Paste,
+}
+
 /// Result of checking that typed text actually arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verification {
@@ -110,6 +120,8 @@ pub trait TextSink: Send {
     fn wants_whole_segments(&self) -> bool {
         false
     }
+    /// Choose between typing rhythm and paste; sinks with one way ignore it.
+    fn set_insert_style(&mut self, _style: InsertStyle) {}
 }
 
 /// Sink that collects text for a host to insert (mobile, tests).

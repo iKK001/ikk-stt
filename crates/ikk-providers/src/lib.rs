@@ -2,6 +2,7 @@
 //! plain HTTP / WebSocket / Socket.IO so no vendor SDK enters the AGPL build.
 //!
 //! Deepgram, Voiceitt, OpenAI: batch + streaming. ElevenLabs: batch (chunked session for live).
+//! On Windows also Windows' own recognizer (crate `ikk-stt-windows`).
 
 #[cfg(feature = "deepgram")]
 pub mod deepgram;
@@ -27,6 +28,7 @@ pub fn register_all(reg: &mut ProviderRegistry) {
     reg.register(Box::new(openai::OpenAi));
     #[cfg(feature = "elevenlabs")]
     reg.register(Box::new(elevenlabs::ElevenLabs));
+    reg.register(Box::new(ikk_stt_windows::WindowsSpeech));
 }
 
 #[cfg(test)]
@@ -37,6 +39,7 @@ mod tests {
     fn all_default_providers_register() {
         let mut reg = ProviderRegistry::new();
         register_all(&mut reg);
-        assert_eq!(reg.ids().len(), 4);
+        let expected = if cfg!(target_os = "windows") { 5 } else { 4 };
+        assert_eq!(reg.ids().len(), expected);
     }
 }

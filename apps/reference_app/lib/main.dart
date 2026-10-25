@@ -6,6 +6,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -59,6 +60,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   late String _settingsPath;
   late String _consentPath;
+  late String _voicePath;
+  late String _uiPath;
   Map<String, dynamic> _settings = {};
   List<String> _providers = [];
   List<InputDevice> _mics = [];
@@ -84,6 +87,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final dir = configDir() ?? (await getApplicationSupportDirectory()).path;
     _settingsPath = '$dir${Platform.pathSeparator}settings.json';
     _consentPath = '$dir${Platform.pathSeparator}consent.json';
+    _voicePath = '$dir${Platform.pathSeparator}voice_commands.json';
+    _uiPath = '$dir${Platform.pathSeparator}ui.json';
     _settings = jsonDecode(await settingsLoad(path: _settingsPath)) as Map<String, dynamic>;
     _providers = about().providers;
     try {
@@ -95,12 +100,24 @@ class _HomeScreenState extends State<HomeScreen> {
     await _loadKey();
     _events = _engine.events().listen(_onEvent);
     _engine.rememberSettings(settingsJson: jsonEncode(_settings));
+    await _loadVoice();
+    await _loadFloating();
     if (mounted) setState(() {});
   }
 
   String get _provider => (_settings['providers']?['active'] as String?) ?? 'deepgram';
 
+  /// Providers that need no API key and offer no batch mode (Windows' own
+  /// recognizer).
+  static const _keyless = {'windows'};
+  bool get _needsKey => !_keyless.contains(_provider);
+
   Future<void> _loadKey() async {
+    if (!_needsKey) {
+      _keyStored = false;
+      _keyCtl.text = '';
+      return;
+    }
     String k = '';
     try {
       k = await _secure.read(key: 'api_key:$_provider') ?? '';
@@ -133,6 +150,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final json = jsonEncode(_settings);
     await settingsSave(path: _settingsPath, json: json);
     _engine.rememberSettings(settingsJson: json);
+    _applyVoice();
     setState(() {});
   }
 
@@ -168,6 +186,12 @@ class _HomeScreenState extends State<HomeScreen> {
           if (t.containsKey('Error')) _error = 'Provider: ${t['Error']}';
         case 'ConsentRequired':
           _askConsent(v as Map<String, dynamic>);
+        case 'VoiceStandby':
+          _voiceStandby = v as bool;
+        case 'VoiceCommand':
+          _snack(v == 'Start' ? 'Voice command: start' : 'Voice command: stop');
+        case 'SetupRequired':
+          _askSetup(v as Map<String, dynamic>);
         case 'ConsentChanged':
           consentSave(path: _consentPath, json: jsonEncode(v));
         case 'FallbackRequired':
@@ -218,6 +242,202 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       _engine.denyConsent(provider: r['id'] as String);
     }
+  }
+
+  // ------------------------------------------------ floating button
+
+  final bool _floatingSupported = floatingButtonSupported();
+  bool _floatingOn = true;
+
+  Future<void> _loadFloating() async {
+    if (!_floatingSupported) return;
+    try {
+      final f = File(_uiPath);
+      if (await f.exists()) {
+        _floatingOn = (jsonDecode(await f.readAsString()) as Map<String, dynamic>)['floating_button'] as bool? ?? true;
+      }
+    } catch (_) {}
+    _engine.showFloatingButton(show_: _floatingOn);
+  }
+
+  Future<void> _setFloating(bool on) async {
+    _floatingOn = on;
+    _engine.showFloatingButton(show_: on);
+    try {
+      await File(_uiPath).writeAsString(jsonEncode({'floating_button': on}));
+    } catch (_) {}
+    setState(() {});
+  }
+
+  Widget _floatingSection() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Floating microphone button'),
+          subtitle: const Text('Stays on top of all apps. Click it to start or stop dictating into the app '
+              'you are working in; drag it to move it. Red while listening.'),
+          value: _floatingOn,
+          onChanged: _setFloating,
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------ offline voice commands
+
+  String? _voiceModel;
+  bool _voiceOn = false;
+  bool _voiceStandby = false;
+
+  Future<void> _loadVoice() async {
+    try {
+      final f = File(_voicePath);
+      if (!await f.exists()) return;
+      final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      _voiceModel = j['model'] as String?;
+      _voiceOn = (j['enabled'] as bool? ?? false) && _voiceModel != null;
+      _applyVoice();
+    } catch (_) {}
+  }
+
+  Future<void> _saveVoice() async {
+    await File(_voicePath).writeAsString(jsonEncode({'enabled': _voiceOn, 'model': _voiceModel}));
+  }
+
+  /// Tell the engine; a voice start dictates with the current settings.
+  void _applyVoice() {
+    try {
+      _engine.setVoiceCommands(
+        commandsJson: _voiceOn ? _voiceModel : null,
+        settingsJson: jsonEncode(_settings),
+      );
+    } catch (e) {
+      _snack('Voice commands: $e');
+    }
+    if (!_voiceOn) _voiceStandby = false;
+  }
+
+  /// Three takes of the start word, then three of the stop word.
+  Future<void> _trainVoice() async {
+    final denied = await ensureMicPermission();
+    if (denied != null) {
+      _snack(denied);
+      return;
+    }
+    // Free the microphone for the recordings.
+    _engine.setVoiceCommands(commandsJson: null, settingsJson: jsonEncode(_settings));
+    final prompt = ValueNotifier<String>('');
+    final takes = <String, List<Float32List>>{'start': [], 'stop': []};
+    String? error;
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('Record your voice commands'),
+        content: ValueListenableBuilder<String>(
+          valueListenable: prompt,
+          builder: (_, text, _) => Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(text, style: Theme.of(context).textTheme.titleMedium, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            const LinearProgressIndicator(),
+          ]),
+        ),
+      ),
+    );
+    for (final word in ['start', 'stop']) {
+      final label = word == 'start' ? 'START' : 'STOP';
+      while (takes[word]!.length < 3) {
+        prompt.value = 'Say your $label word now (${takes[word]!.length + 1} of 3)';
+        try {
+          takes[word]!.add(await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 6));
+          prompt.value = 'Got it.';
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+        } catch (e) {
+          prompt.value = 'Nothing heard, once more …';
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+        }
+      }
+    }
+    prompt.value = 'Learning your words …';
+    try {
+      _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
+      _voiceOn = true;
+      await _saveVoice();
+    } catch (e) {
+      error = '$e';
+    }
+    if (mounted) Navigator.of(context).pop();
+    _applyVoice();
+    if (error != null) {
+      _snack('Voice commands: $error');
+    } else {
+      _snack('Voice commands ready: say your start word to dictate');
+    }
+    setState(() {});
+  }
+
+  Widget _voiceSection() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Voice commands (offline)', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            const Text('Start and stop dictation with two words of your own. They are recorded in your '
+                'voice and recognised on this device only; nothing is sent anywhere.'),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Start and stop by voice'),
+              subtitle: Text(_voiceModel == null
+                  ? 'Record your words first'
+                  : _voiceStandby
+                      ? 'Listening for your start word'
+                      : 'Ready'),
+              value: _voiceOn,
+              onChanged: _voiceModel == null
+                  ? null
+                  : (on) async {
+                      _voiceOn = on;
+                      await _saveVoice();
+                      _applyVoice();
+                      setState(() {});
+                    },
+            ),
+            OutlinedButton(
+              onPressed: _trainVoice,
+              child: Text(_voiceModel == null ? 'Record start and stop word' : 'Record them again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The provider needs a setting outside the app (asked after consent).
+  Future<void> _askSetup(Map<String, dynamic> s) async {
+    final url = s['settings_url'] as String? ?? '';
+    final retry = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('One more setting needed'),
+        content: Text(s['message'] as String? ?? ''),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          if (url.isNotEmpty)
+            TextButton(
+              onPressed: () => launchUrl(Uri.parse(url)),
+              child: const Text('Open settings'),
+            ),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Done, start')),
+        ],
+      ),
+    );
+    if (retry == true) _start();
   }
 
   Future<void> _start() async {
@@ -271,6 +491,9 @@ class _HomeScreenState extends State<HomeScreen> {
           _soundSection(),
           const SizedBox(height: 16),
           _micSection(),
+          const SizedBox(height: 16),
+          _voiceSection(),
+          if (_floatingSupported) ...[const SizedBox(height: 16), _floatingSection()],
           if (otherAppsCard() case final card?) ...[const SizedBox(height: 16), card],
           const SizedBox(height: 24),
           Center(
@@ -327,6 +550,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            if (!_needsKey)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('Windows speech recognition: no API key needed. Dictation runs in '
+                    'Microsoft\'s cloud and uses the Windows default microphone.'),
+              ),
+            if (_needsKey)
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Batch upload (higher accuracy, slower)'),
@@ -338,6 +568,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            if (_needsKey)
             Row(
               children: [
                 Expanded(

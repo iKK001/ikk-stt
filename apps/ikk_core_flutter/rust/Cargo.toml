@@ -14,6 +14,9 @@ flutter_rust_bridge = "=2.13.0"
 ikk-ffi = { path = "../../../crates/ikk-ffi" }
 tokio = { workspace = true }
 ikk-engine = { path = "../../../crates/ikk-engine" }
+ikk-wake = { path = "../../../crates/ikk-wake" }
+# Floating microphone button on the desktop (no-op elsewhere).
+ikk-overlay = { path = "../../../crates/ikk-overlay" }
 log = "0.4"
 serde_json = { workspace = true }
 # Wipes secrets from memory once they are handed over.

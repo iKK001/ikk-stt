@@ -202,25 +202,45 @@ pub fn paste_clipboard(text: &str) -> Result<(), OutputError> {
     drop(pending);
     std::thread::spawn(|| {
         sleep(RESTORE_AFTER);
-        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-        let due = pending
-            .as_ref()
-            .is_some_and(|p| p.last_paste.elapsed() >= RESTORE_AFTER);
-        if !due {
-            return; // a newer paste will restore
-        }
-        let Some(p) = pending.take() else { return };
-        // Only if the clipboard still holds our text: never overwrite
-        // something the user copied in the meantime.
-        if unsafe { GetClipboardSequenceNumber() } != p.our_seq {
-            return;
-        }
-        if let (Some(prev), Ok(mut cb)) = (p.prior, arboard::Clipboard::new()) {
-            let _ = set_private_text(&mut cb, &prev);
-        }
+        restore_clipboard(false);
     });
     pasted
 }
+
+/// Put the user's clipboard back once the last paste is old enough, or now
+/// with `force` (the sink is closing; a short pause lets the target read
+/// the clipboard first). Without earlier text the clipboard is cleared, so
+/// dictated text never stays behind.
+pub fn restore_clipboard(force: bool) {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(age) = pending.as_ref().map(|p| p.last_paste.elapsed()) else {
+        return;
+    };
+    if !force && age < RESTORE_AFTER {
+        return; // a newer paste will restore
+    }
+    if force && age < MIN_PASTE_SETTLE {
+        sleep(MIN_PASTE_SETTLE - age);
+    }
+    let Some(p) = pending.take() else { return };
+    // Only if the clipboard still holds our text: never overwrite
+    // something the user copied in the meantime.
+    if unsafe { GetClipboardSequenceNumber() } != p.our_seq {
+        return;
+    }
+    let Ok(mut cb) = arboard::Clipboard::new() else { return };
+    match p.prior {
+        Some(prev) => {
+            let _ = set_private_text(&mut cb, &prev);
+        }
+        None => {
+            let _ = cb.clear();
+        }
+    }
+}
+
+/// Time the target gets to read the clipboard after Ctrl+V.
+const MIN_PASTE_SETTLE: Duration = Duration::from_millis(400);
 
 /// Read the focused field through UI Automation and compare its tail.
 pub fn verify_tail(expected: &str) -> Verification {
@@ -246,6 +266,30 @@ pub fn verify_tail(expected: &str) -> Verification {
         }
         Err(_) => Verification::Unavailable,
     }
+}
+
+/// Exact tail check for confirmed typing: only line endings are unified
+/// (an editor may store a typed Return as CR or CRLF).
+pub fn confirm_tail(expected: &str) -> Verification {
+    if expected.is_empty() {
+        return Verification::Unavailable;
+    }
+    match uia::with_focused(uia::read_text) {
+        Ok(text) => {
+            let text = unify_newlines(&text);
+            let expected = unify_newlines(expected);
+            if text.ends_with(&expected) {
+                Verification::Confirmed
+            } else {
+                Verification::Mismatch
+            }
+        }
+        Err(_) => Verification::Unavailable,
+    }
+}
+
+fn unify_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn normalize(s: &str) -> String {

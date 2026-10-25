@@ -167,6 +167,7 @@ impl Provider for Deepgram {
                 .map(|s| s.to_string())
                 .collect(),
             requires_network: true,
+            own_audio: false,
         }
     }
 

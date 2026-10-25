@@ -5,6 +5,7 @@
 //! texts every shell must show (settings → About / Licenses).
 
 pub mod engine;
+pub mod voice;
 
 use serde::{Deserialize, Serialize};
 
@@ -118,5 +119,20 @@ mod tests {
         assert!(license_text().len() > 100);
         assert!(notice_text().contains("Stephan Korner"));
         assert!(!third_party_text().is_empty());
+    }
+
+    /// Consent names the real recipient: every compiled-in cloud provider
+    /// needs an entry with a privacy policy in `ikk_consent::recipient_for`.
+    #[test]
+    fn every_cloud_provider_has_a_consent_entry() {
+        let mut reg = ikk_stt::ProviderRegistry::new();
+        ikk_providers::register_all(&mut reg);
+        for id in reg.ids() {
+            let p = reg.get(&id).unwrap();
+            if p.capabilities().requires_network {
+                let r = ikk_consent::recipient_for(&id.0, p.display_name());
+                assert!(!r.privacy_url.is_empty(), "{} has no consent entry", id.0);
+            }
+        }
     }
 }

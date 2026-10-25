@@ -53,6 +53,19 @@ pub struct Capabilities {
     pub languages: Vec<String>,
     /// Audio leaves the device. Always true for cloud providers.
     pub requires_network: bool,
+    /// The provider records the microphone itself (system recognizers);
+    /// the engine then opens no capture and pushes no frames.
+    pub own_audio: bool,
+}
+
+/// Something the user must set up outside the app before the provider
+/// works, e.g. a system privacy switch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setup {
+    /// What is missing and why, for the user.
+    pub message: String,
+    /// Where to change it (a settings URI the shell can open), or empty.
+    pub settings_url: String,
 }
 
 /// Streaming vs chunked batch, when a provider supports both.
@@ -284,6 +297,12 @@ pub trait Provider: Send + Sync {
     /// A true streaming session. Providers without streaming return
     /// `Unsupported`; use [`open_session`] to get chunked batch instead.
     async fn stream(&self, cfg: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError>;
+
+    /// What the user still has to set up before this provider works, if
+    /// anything. Checked after consent, before a session opens.
+    fn setup_needed(&self) -> Option<Setup> {
+        None
+    }
 }
 
 /// Opens the best session for the config: streaming if requested and
@@ -293,7 +312,7 @@ pub async fn open_session(
     cfg: &SessionConfig,
 ) -> Result<Box<dyn StreamingSession>, SttError> {
     let caps = provider.capabilities();
-    if cfg.transfer == TransferMode::Streaming && caps.streaming {
+    if caps.streaming && (cfg.transfer == TransferMode::Streaming || !caps.batch) {
         return provider.stream(cfg).await;
     }
     if caps.batch {

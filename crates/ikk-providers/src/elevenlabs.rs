@@ -27,6 +27,7 @@ impl Provider for ElevenLabs {
         Capabilities {
             batch: true,
             requires_network: true,
+            own_audio: false,
             ..Default::default()
         }
     }

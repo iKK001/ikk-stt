@@ -234,6 +234,7 @@ impl Provider for Voiceitt {
             required_sample_rate_hz: Some(WIRE_RATE_HZ),
             languages: vec!["eng".into()],
             requires_network: true,
+            own_audio: false,
         }
     }
 

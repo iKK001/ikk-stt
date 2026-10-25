@@ -35,6 +35,10 @@ Future<String> consentLoad({required String path}) =>
 Future<void> consentSave({required String path, required String json}) =>
     RustLib.instance.api.crateApiCoreConsentSave(path: path, json: json);
 
+/// Whether this platform has the floating microphone button.
+bool floatingButtonSupported() =>
+    RustLib.instance.api.crateApiCoreFloatingButtonSupported();
+
 class AboutInfo {
   final String coreVersion;
   final int buildNumber;

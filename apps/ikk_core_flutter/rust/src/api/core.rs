@@ -87,3 +87,9 @@ pub fn consent_load(path: String) -> Result<String, String> {
 pub fn consent_save(path: String, json: String) -> Result<(), String> {
     ikk_ffi::consent_save(&path, &json)
 }
+
+/// Whether this platform has the floating microphone button.
+#[flutter_rust_bridge::frb(sync)]
+pub fn floating_button_supported() -> bool {
+    ikk_overlay::SUPPORTED
+}

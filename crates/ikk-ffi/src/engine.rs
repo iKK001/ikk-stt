@@ -106,6 +106,22 @@ impl FfiEngine {
     pub fn clear_session_text(&self) -> Result<(), String> {
         self.send(EngineCommand::ClearSessionText)
     }
+    /// Offline voice commands on (trained model JSON + the settings a voice
+    /// start uses) or off (`None`).
+    pub fn set_voice_commands(&self, commands_json: Option<&str>, settings_json: &str) -> Result<(), String> {
+        let setup = match commands_json {
+            None => None,
+            Some(json) => {
+                let commands = ikk_wake::VoiceCommands::from_json(json).map_err(|e| e.to_string())?;
+                let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+                Some(Box::new(ikk_engine::VoiceSetup {
+                    commands,
+                    start: ikk_engine::config::start_config(&settings),
+                }))
+            }
+        };
+        self.send(EngineCommand::SetVoiceCommands(setup))
+    }
 }
 
 impl Default for FfiEngine {
