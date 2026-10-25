@@ -179,6 +179,10 @@ fn start(
     tag: Option<&str>,
     events: &mpsc::Sender<TranscriptEvent>,
 ) -> Result<(SpeechRecognizer, SpeechContinuousRecognitionSession), SttError> {
+    tracing::info!(
+        language = tag.unwrap_or("system default"),
+        "Windows speech: preparing dictation"
+    );
     let recognizer = match tag {
         Some(t) => {
             let lang = Language::CreateLanguage(&HSTRING::from(t)).map_err(win_err)?;
@@ -198,6 +202,7 @@ fn start(
         .and_then(|op| op.join())
         .map_err(win_err)?;
     let status = compiled.Status().map_err(win_err)?;
+    tracing::info!(status = status_text(status), "Windows speech: dictation prepared");
     if status != SpeechRecognitionResultStatus::Success {
         return Err(SttError::Provider(ErrorClass::BadRequest(format!(
             "Windows speech could not prepare dictation ({})",
@@ -233,7 +238,9 @@ fn start(
             SpeechContinuousRecognitionResultGeneratedEventArgs,
         >::new(move |_, args| {
             if let Ok(result) = args.ok().and_then(|a| a.Result()) {
-                if result.Status().ok() == Some(SpeechRecognitionResultStatus::Success) {
+                let status = result.Status().unwrap_or(SpeechRecognitionResultStatus::Unknown);
+                tracing::info!(status = status_text(status), "Windows speech: result");
+                if status == SpeechRecognitionResultStatus::Success {
                     if let Ok(text) = result.Text() {
                         let text = text.to_string();
                         if !text.trim().is_empty() {
@@ -256,6 +263,7 @@ fn start(
                 .ok()
                 .and_then(|a| a.Status())
                 .unwrap_or(SpeechRecognitionResultStatus::Unknown);
+            tracing::info!(status = status_text(status), "Windows speech: session completed");
             if status != SpeechRecognitionResultStatus::Success && status != SpeechRecognitionResultStatus::UserCanceled
             {
                 warn!(status = status_text(status), "Windows speech session ended");
@@ -272,6 +280,7 @@ fn start(
         .map_err(win_err)?;
 
     session.StartAsync().and_then(|op| op.join()).map_err(win_err)?;
+    tracing::info!("Windows speech: listening (default microphone)");
     Ok((recognizer, session))
 }
 

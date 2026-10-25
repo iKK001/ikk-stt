@@ -152,6 +152,8 @@ The quick brown fox jumps over the lazy dog 0123456789 (de-CH Layout-Härte-Prob
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Log messages (RUST_LOG, default info) for diagnosing providers.
+    ikk_ffi::engine::init_logging();
     match Cli::parse().cmd {
         Cmd::Doctor => {
             println!("ikk core {}", ikk_ffi::core_version());
@@ -432,6 +434,12 @@ async fn main() -> anyhow::Result<()> {
                         }
                         Some(EngineEvent::Command(c)) => eprintln!("\n[command] {c:?}"),
                         Some(EngineEvent::FallbackRequired { reason, .. }) => eprintln!("\n[fallback] {reason:?}"),
+                        Some(EngineEvent::State(state)) if !stopping || state != ikk_engine::EngineState::Idle => {
+                            eprintln!("\n[state] {state:?}");
+                            if state == ikk_engine::EngineState::Error {
+                                break;
+                            }
+                        }
                         Some(EngineEvent::State(ikk_engine::EngineState::Idle)) if stopping => break,
                         Some(EngineEvent::State(ikk_engine::EngineState::Error)) => break,
                         Some(_) => {}
