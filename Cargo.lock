@@ -1176,6 +1176,7 @@ dependencies = [
  "ikk-settings",
  "ikk-stt",
  "ikk-wake",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

@@ -21,6 +21,13 @@ pub fn default_config_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("ch", "ikk", "ikk-stt").map(|d| d.config_dir().to_path_buf())
 }
 
+/// Platform directory for data that stays on this machine: on Windows
+/// `%LOCALAPPDATA%` (not the roaming profile, which a domain may copy to
+/// other PCs), elsewhere the same place as the config.
+pub fn default_local_data_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("ch", "ikk", "ikk-stt").map(|d| d.data_local_dir().to_path_buf())
+}
+
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, SettingsError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(serde_json::from_str(&s)?)),

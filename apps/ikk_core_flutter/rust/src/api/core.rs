@@ -75,6 +75,28 @@ pub fn config_dir() -> Option<String> {
     ikk_ffi::config_dir()
 }
 
+/// Directory for data that stays on this machine (Windows: %LOCALAPPDATA%);
+/// `None` on mobile (use the app's support dir).
+#[flutter_rust_bridge::frb(sync)]
+pub fn local_data_dir() -> Option<String> {
+    ikk_ffi::local_data_dir()
+}
+
+/// A new random key for [`sealed_save`], hex, to keep in the secure store.
+#[flutter_rust_bridge::frb(sync)]
+pub fn sealed_new_key() -> Result<String, String> {
+    ikk_ffi::sealed::new_key()
+}
+/// Write `plain` encrypted (AES-256-GCM) to `path`.
+pub fn sealed_save(path: String, key_hex: String, plain: String) -> Result<(), String> {
+    ikk_ffi::sealed::save(&path, &key_hex, &plain)
+}
+/// Read an encrypted file; `None` when it does not exist, an error when
+/// the key does not fit.
+pub fn sealed_load(path: String, key_hex: String) -> Result<Option<String>, String> {
+    ikk_ffi::sealed::load(&path, &key_hex)
+}
+
 pub fn settings_load(path: String) -> Result<String, String> {
     ikk_ffi::settings_load(&path)
 }

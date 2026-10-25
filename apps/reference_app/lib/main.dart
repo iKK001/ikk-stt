@@ -61,7 +61,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   late String _settingsPath;
   late String _consentPath;
+  // Plain file of earlier versions; moved into _voiceFile once.
   late String _voicePath;
+  // The recorded voice commands, encrypted; the key is in the secure store.
+  late String _voiceFile;
   late String _uiPath;
   Map<String, dynamic> _settings = {};
   List<String> _providers = [];
@@ -108,6 +111,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _settingsPath = '$dir${Platform.pathSeparator}settings.json';
     _consentPath = '$dir${Platform.pathSeparator}consent.json';
     _voicePath = '$dir${Platform.pathSeparator}voice_commands.json';
+    // Windows: %LOCALAPPDATA%, so the recordings never roam to other PCs.
+    _voiceFile = '${localDataDir() ?? dir}${Platform.pathSeparator}voice_commands.bin';
     _uiPath = '$dir${Platform.pathSeparator}ui.json';
     _settings = jsonDecode(await settingsLoad(path: _settingsPath)) as Map<String, dynamic>;
     _providers = about().providers;
@@ -374,19 +379,48 @@ class _HomeScreenState extends State<HomeScreen> {
         'stop ${d(j['stop'])} (limit ${(j['stop_threshold'] as num).toStringAsFixed(1)}) -> $result';
   }
 
+  /// Key of the encrypted voice commands file, created on first use.
+  Future<String> _voiceKey() async {
+    const name = 'file_key:voice_commands';
+    final stored = await _secure.read(key: name);
+    if (stored != null && stored.isNotEmpty) return stored;
+    final k = sealedNewKey();
+    await _secure.write(key: name, value: k);
+    return k;
+  }
+
   Future<void> _loadVoice() async {
     try {
-      final f = File(_voicePath);
-      if (!await f.exists()) return;
-      final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      String? json;
+      final legacy = File(_voicePath);
+      if (await File(_voiceFile).exists()) {
+        json = await sealedLoad(path: _voiceFile, keyHex: await _voiceKey());
+      } else if (await legacy.exists()) {
+        json = await legacy.readAsString();
+      }
+      if (json == null) return;
+      final j = jsonDecode(json) as Map<String, dynamic>;
       _voiceModel = j['model'] as String?;
       _voiceOn = (j['enabled'] as bool? ?? false) && _voiceModel != null;
       _applyVoice();
+    } catch (e) {
+      _snack('Voice commands could not be read ($e). Please record them again.');
+      return;
+    }
+    // A plain file of an earlier version: encrypt it, then remove it. If
+    // that fails, the plain file stays and is tried again next start.
+    try {
+      final legacy = File(_voicePath);
+      if (await legacy.exists()) {
+        await _saveVoice();
+        await legacy.delete();
+      }
     } catch (_) {}
   }
 
   Future<void> _saveVoice() async {
-    await File(_voicePath).writeAsString(jsonEncode({'enabled': _voiceOn, 'model': _voiceModel}));
+    final json = jsonEncode({'enabled': _voiceOn, 'model': _voiceModel});
+    await sealedSave(path: _voiceFile, keyHex: await _voiceKey(), plain: json);
   }
 
   /// Tell the engine; a voice start dictates with the current settings.

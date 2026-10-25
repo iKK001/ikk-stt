@@ -5,6 +5,7 @@
 //! texts every shell must show (settings → About / Licenses).
 
 pub mod engine;
+pub mod sealed;
 pub mod voice;
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,11 @@ pub fn list_mics() -> Result<Vec<ikk_audio::InputDevice>, String> {
 /// Platform config directory (desktop); mobile shells pass their own paths.
 pub fn config_dir() -> Option<String> {
     ikk_settings::store::default_config_dir().map(|p| p.display().to_string())
+}
+
+/// Directory for data that stays on this machine (voice commands).
+pub fn local_data_dir() -> Option<String> {
+    ikk_settings::store::default_local_data_dir().map(|p| p.display().to_string())
 }
 
 pub fn settings_load(path: &str) -> Result<String, String> {

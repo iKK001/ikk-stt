@@ -23,6 +23,29 @@ Future<List<InputDevice>> listMics() =>
 /// Desktop config directory; `None` on mobile (pass the app's documents dir).
 String? configDir() => RustLib.instance.api.crateApiCoreConfigDir();
 
+/// Directory for data that stays on this machine (Windows: %LOCALAPPDATA%);
+/// `None` on mobile (use the app's support dir).
+String? localDataDir() => RustLib.instance.api.crateApiCoreLocalDataDir();
+
+/// A new random key for [`sealed_save`], hex, to keep in the secure store.
+String sealedNewKey() => RustLib.instance.api.crateApiCoreSealedNewKey();
+
+/// Write `plain` encrypted (AES-256-GCM) to `path`.
+Future<void> sealedSave({
+  required String path,
+  required String keyHex,
+  required String plain,
+}) => RustLib.instance.api.crateApiCoreSealedSave(
+  path: path,
+  keyHex: keyHex,
+  plain: plain,
+);
+
+/// Read an encrypted file; `None` when it does not exist, an error when
+/// the key does not fit.
+Future<String?> sealedLoad({required String path, required String keyHex}) =>
+    RustLib.instance.api.crateApiCoreSealedLoad(path: path, keyHex: keyHex);
+
 Future<String> settingsLoad({required String path}) =>
     RustLib.instance.api.crateApiCoreSettingsLoad(path: path);
 
