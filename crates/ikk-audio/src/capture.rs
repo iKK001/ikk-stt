@@ -6,7 +6,7 @@
 //! triggers device re-selection and stream rebuild, bounded by a retry
 //! limit, so a hot-plug never leaves the session silently dead.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -22,7 +22,11 @@ use crate::{AudioError, AudioFrame, Capture, CaptureConfig, InputDevice, PIPELIN
 
 const REBUILD_MAX_ATTEMPTS: u32 = 10;
 const REBUILD_RETRY: Duration = Duration::from_millis(300);
-const FRAME_CHANNEL_CAPACITY: usize = 64;
+/// Frames waiting for the engine. Large enough to bridge a provider's
+/// connection set-up (a second or more) without losing the first words.
+const FRAME_CHANNEL_CAPACITY: usize = 512;
+/// Log only every n-th of a frequent, harmless event.
+const LOG_EVERY: u64 = 200;
 
 /// Pure selection logic: requested id present → that device; requested
 /// but missing → default with `fell_back`; nothing requested → default.
@@ -139,6 +143,17 @@ fn open_stream(
             // activation) through the error callback; the stream keeps running.
             if msg.to_lowercase().contains("route") {
                 info!(%msg, "audio route changed; stream continues");
+                return;
+            }
+            // A buffer over- or underrun loses a few milliseconds; the stream
+            // keeps running. Reopening the device for it would cause the next
+            // one (seen on Windows: a reopen loop many times per second).
+            if err.kind() == cpal::ErrorKind::Xrun {
+                static XRUNS: AtomicU64 = AtomicU64::new(0);
+                let n = XRUNS.fetch_add(1, Ordering::Relaxed);
+                if n % LOG_EVERY == 0 {
+                    warn!(count = n + 1, "audio buffer over/underrun; stream continues");
+                }
                 return;
             }
             error!(%err, "capture stream error");
@@ -281,7 +296,11 @@ fn run_capture(
             offset,
         };
         if frame_tx.try_send(frame).is_err() {
-            warn!("audio consumer too slow, dropping frame");
+            static DROPPED: AtomicU64 = AtomicU64::new(0);
+            let n = DROPPED.fetch_add(1, Ordering::Relaxed);
+            if n % LOG_EVERY == 0 {
+                warn!(count = n + 1, "audio consumer too slow, dropping frames");
+            }
         }
     };
 
