@@ -67,6 +67,8 @@ class _HomeScreenState extends State<HomeScreen> {
   List<String> _providers = [];
   List<InputDevice> _mics = [];
   final _keyCtl = TextEditingController();
+  // Azure keys belong to a region (where the Speech resource was created).
+  final _regionCtl = TextEditingController(text: 'switzerlandnorth');
   bool _keyStored = false;
 
   String _state = 'Idle';
@@ -115,13 +117,48 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _error = 'Keychain read failed: $e';
     }
+    if (_provider == 'azure' && k.isNotEmpty) {
+      final i = k.indexOf(':');
+      if (i > 0) {
+        _regionCtl.text = k.substring(0, i);
+      } else {
+        // Saved before the region field existed: add the region shown.
+        k = '${_regionCtl.text.trim()}:$k';
+      }
+    }
     _keyStored = k.isNotEmpty;
     if (k.isNotEmpty) _engine.setCredential(provider: _provider, secret: k);
     _keyCtl.text = '';
   }
 
+  /// Azure: "REGION:KEY" from the two fields. A pasted "REGION:KEY" is
+  /// kept; an empty key field with a stored key changes only the region.
+  Future<String?> _azureCredential(String key) async {
+    final region = _regionCtl.text.trim().toLowerCase();
+    if (key.contains(':')) return key;
+    if (!RegExp(r'^[a-z0-9]+$').hasMatch(region)) {
+      _snack('Enter the Azure region, e.g. switzerlandnorth (Azure portal > Speech resource > Keys and Endpoint)');
+      return null;
+    }
+    if (key.isEmpty) {
+      String stored = '';
+      try {
+        stored = await _secure.read(key: 'api_key:azure') ?? '';
+      } catch (_) {}
+      final i = stored.indexOf(':');
+      key = i >= 0 ? stored.substring(i + 1) : stored;
+      if (key.isEmpty) return null;
+    }
+    return '$region:$key';
+  }
+
   Future<void> _saveKey() async {
-    final k = _keyCtl.text.trim();
+    var k = _keyCtl.text.trim();
+    if (_provider == 'azure') {
+      final c = await _azureCredential(k);
+      if (c == null) return;
+      k = c;
+    }
     if (k.isEmpty) return;
     // The engine gets the key first; keychain storage is best effort.
     _engine.setCredential(provider: _provider, secret: k);
@@ -630,6 +667,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            if (_provider == 'azure')
+              TextField(
+                controller: _regionCtl,
+                decoration: const InputDecoration(
+                  labelText: 'Azure region',
+                  helperText: 'Where your Speech resource is, e.g. switzerlandnorth or westeurope '
+                      '(Azure portal > Speech resource > Keys and Endpoint > Location/Region)',
+                ),
+              ),
             Row(
               children: [
                 Expanded(
@@ -640,7 +686,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       labelText: _keyStored ? 'API key stored · enter to replace' : 'API key for $_provider',
                       helperText: switch (_provider) {
                         'voiceitt' => 'Format: APP_ID:API_KEY',
-                        'azure' => 'Format: REGION:KEY, e.g. westeurope:abc123… (Azure portal, Speech resource)',
+                        'azure' => 'KEY 1 or KEY 2 of the Speech resource',
                         _ => null,
                       },
                     ),

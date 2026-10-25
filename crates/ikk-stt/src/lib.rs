@@ -268,6 +268,9 @@ pub enum SttError {
     Unsupported,
     #[error("no credential for provider")]
     MissingCredential,
+    /// A credential is set but not in the provider's format.
+    #[error("credential not usable: {0}")]
+    BadCredential(&'static str),
 }
 
 /// A live session. Audio goes in, events come out. Implemented by

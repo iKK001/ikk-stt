@@ -47,11 +47,15 @@ pub fn locale(iso639_3: &str) -> &'static str {
 
 /// `REGION:KEY` → (region, key).
 pub fn split_credential(credential: &str) -> Result<(String, String), SttError> {
-    let (region, key) = credential.trim().split_once(':').ok_or(SttError::MissingCredential)?;
+    const FORMAT: &str = "Azure needs region and key, e.g. switzerlandnorth:KEY";
+    let (region, key) = credential
+        .trim()
+        .split_once(':')
+        .ok_or(SttError::BadCredential(FORMAT))?;
     let region = region.trim().to_lowercase();
     let key = key.trim().to_string();
     if region.is_empty() || key.is_empty() || !region.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(SttError::MissingCredential);
+        return Err(SttError::BadCredential(FORMAT));
     }
     Ok((region, key))
 }
