@@ -7,7 +7,7 @@
 //! Speech resource in the Azure portal). Swiss German (`gsw`) uses Azure's
 //! `de-CH` model, which writes standard German from Swiss speech.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -160,7 +160,8 @@ fn config_message(request_id: &str) -> String {
 #[derive(Debug, PartialEq)]
 pub enum Incoming {
     Event(TranscriptEvent),
-    /// Recognition of this connection is complete.
+    /// The service ended the current turn (after a long pause, or after
+    /// the empty audio message of `finish`).
     TurnEnd,
     Ignore,
 }
@@ -316,10 +317,17 @@ impl Provider for Azure {
             .await
             .map_err(|e| SttError::Provider(ErrorClass::from_message(&e.to_string())))?;
 
+        let sink = Arc::new(Mutex::new(sink));
+        let request_id = Arc::new(std::sync::Mutex::new(request_id));
+        let finishing = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = mpsc::channel(64);
         let recv_task = {
             let event_tx = event_tx.clone();
+            let sink = sink.clone();
+            let request_id = request_id.clone();
+            let finishing = finishing.clone();
             tokio::spawn(async move {
+                let mut failed = false;
                 while let Some(msg) = source.next().await {
                     match msg {
                         Ok(Message::Text(t)) => match parse_message(t.as_str()) {
@@ -328,7 +336,29 @@ impl Provider for Azure {
                                     break;
                                 }
                             }
-                            Incoming::TurnEnd => break,
+                            Incoming::TurnEnd if finishing.load(Ordering::SeqCst) => break,
+                            // Azure ends a turn after a long pause (or ~15 s
+                            // of silence at the start) but keeps the
+                            // connection: open the next turn and go on.
+                            Incoming::TurnEnd => {
+                                let id = new_id();
+                                if let Ok(mut r) = request_id.lock() {
+                                    *r = id.clone();
+                                }
+                                debug!("azure turn ended; next turn");
+                                let sent = sink
+                                    .lock()
+                                    .await
+                                    .send(Message::binary(audio_message(&id, &wav_header())))
+                                    .await;
+                                if let Err(e) = sent {
+                                    let _ = event_tx
+                                        .send(TranscriptEvent::Error(ErrorClass::from_message(&e.to_string())))
+                                        .await;
+                                    failed = true;
+                                    break;
+                                }
+                            }
                             Incoming::Ignore => {}
                         },
                         Ok(Message::Close(frame)) => {
@@ -338,6 +368,7 @@ impl Provider for Azure {
                                     let _ = event_tx
                                         .send(TranscriptEvent::Error(ErrorClass::from_message(f.reason.as_str())))
                                         .await;
+                                    failed = true;
                                 }
                             }
                             break;
@@ -347,20 +378,28 @@ impl Provider for Azure {
                             let _ = event_tx
                                 .send(TranscriptEvent::Error(ErrorClass::from_message(&e.to_string())))
                                 .await;
+                            failed = true;
                             break;
                         }
                     }
+                }
+                // Closed by the service while still dictating: say so, or
+                // the app keeps showing "listening" with nothing arriving.
+                if !failed && !finishing.load(Ordering::SeqCst) {
+                    warn!("azure closed the connection during dictation");
+                    let _ = event_tx.send(TranscriptEvent::Closed).await;
                 }
                 debug!("azure ws receiver finished");
             })
         };
 
         Ok(Box::new(AzureSession {
-            sink: Arc::new(Mutex::new(sink)),
+            sink,
             events: event_rx,
             event_tx,
             recv_task,
             request_id,
+            finishing,
         }))
     }
 }
@@ -375,7 +414,15 @@ pub struct AzureSession {
     events: mpsc::Receiver<TranscriptEvent>,
     event_tx: mpsc::Sender<TranscriptEvent>,
     recv_task: tokio::task::JoinHandle<()>,
-    request_id: String,
+    /// Changes with every turn.
+    request_id: Arc<std::sync::Mutex<String>>,
+    finishing: Arc<AtomicBool>,
+}
+
+impl AzureSession {
+    fn request_id(&self) -> String {
+        self.request_id.lock().map(|r| r.clone()).unwrap_or_default()
+    }
 }
 
 #[async_trait::async_trait]
@@ -389,7 +436,7 @@ impl StreamingSession for AzureSession {
         self.sink
             .lock()
             .await
-            .send(Message::binary(audio_message(&self.request_id, &pcm)))
+            .send(Message::binary(audio_message(&self.request_id(), &pcm)))
             .await
             .map_err(|e| SttError::Provider(ErrorClass::from_message(&e.to_string())))
     }
@@ -401,11 +448,12 @@ impl StreamingSession for AzureSession {
     async fn finish(&mut self) -> Result<(), SttError> {
         // An empty audio message ends the stream; the last phrase and
         // `turn.end` follow.
+        self.finishing.store(true, Ordering::SeqCst);
         let _ = self
             .sink
             .lock()
             .await
-            .send(Message::binary(audio_message(&self.request_id, &[])))
+            .send(Message::binary(audio_message(&self.request_id(), &[])))
             .await;
         if tokio::time::timeout(CLOSE_GRACE, &mut self.recv_task).await.is_err() {
             warn!("azure did not end the turn within the grace period");
