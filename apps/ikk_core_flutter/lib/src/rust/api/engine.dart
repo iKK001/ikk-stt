@@ -40,8 +40,10 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// dictation with the remembered settings; red while listening.
   void showFloatingButton({required bool show_});
 
+  /// The app's dictate button: a click, so the voice listener is on again.
   void start({required String settingsJson});
 
+  /// The app's stop button: a click, so the voice listener goes off too.
   void stop();
 
   void transferToTarget();

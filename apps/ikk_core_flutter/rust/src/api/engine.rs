@@ -115,6 +115,11 @@ impl IkkEngine {
             ikk_wake::VoiceCommands::from_json(json).map_err(|e| e.to_string())?;
         }
         self.inner.remember_settings(&settings_json);
+        if commands_json.is_some() {
+            // Switching voice commands on means: listen for the start word,
+            // even if the microphone was switched off by click before.
+            self.inner.set_mic_off(false);
+        }
         self.inner.remember_voice(commands_json.as_deref());
         Ok(())
     }

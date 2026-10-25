@@ -68,6 +68,13 @@ impl Segmenter {
         None
     }
 
+    /// Forget an utterance in progress (it began before the caller was
+    /// ready); what the detector learned about the room stays.
+    pub fn discard_current(&mut self) {
+        self.current = None;
+        self.too_long = false;
+    }
+
     fn remember(&mut self, samples: &[f32]) {
         for &s in samples {
             if self.preroll.len() == PREROLL_SAMPLES {

@@ -16,6 +16,11 @@ Future<Float32List> voiceRecordTake({
   timeoutSecs: timeoutSecs,
 );
 
+/// Check one word's takes right after recording them (error text if the
+/// takes differ too much, e.g. noise or a cough among them).
+Future<void> voiceCheckWord({required List<Float32List> takes}) =>
+    RustLib.instance.api.crateApiVoiceVoiceCheckWord(takes: takes);
+
 /// Train both words from their takes; returns the model JSON to store.
 Future<String> voiceTrain({
   required List<Float32List> startTakes,

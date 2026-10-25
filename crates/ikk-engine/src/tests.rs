@@ -520,11 +520,17 @@ async fn voice_commands_start_and_stop_dictation() {
     assert!(ev
         .iter()
         .any(|e| matches!(e, EngineEvent::State(EngineState::Listening))));
+    // Buttons go straight from waiting to dictating: "standby off" only
+    // after "listening".
+    assert!(
+        !ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(false))),
+        "standby off before listening: {ev:?}"
+    );
 
     say(&mic, &word(STOP_WORD, 0.95, 1.2)).await;
     let ev = collect(
         &mut handle,
-        |e| matches!(e, EngineEvent::VoiceStandby(true)),
+        |e| matches!(e, EngineEvent::State(EngineState::Idle)),
         Duration::from_secs(10),
     )
     .await;
@@ -533,11 +539,11 @@ async fn voice_commands_start_and_stop_dictation() {
             .any(|e| matches!(e, EngineEvent::VoiceCommand(ikk_wake::Command::Stop))),
         "stop word: {ev:?}"
     );
-    assert!(ev.iter().any(|e| matches!(e, EngineEvent::State(EngineState::Idle))));
-    assert!(
-        ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(true))),
-        "back to standby"
-    );
+    // And straight back from dictating to waiting: "standby on" before "idle".
+    let pos = |f: fn(&EngineEvent) -> bool| ev.iter().position(f);
+    let standby_on = pos(|e| matches!(e, EngineEvent::VoiceStandby(true))).expect("back to standby");
+    let idle = pos(|e| matches!(e, EngineEvent::State(EngineState::Idle))).expect("idle");
+    assert!(standby_on < idle, "standby on after idle: {ev:?}");
 }
 
 /// Provider that records the microphone itself (like Windows' recognizer).

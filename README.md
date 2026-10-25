@@ -9,7 +9,9 @@ Developed within a [HackaHealth Go!](https://hackahealth.ch) project.
 ## Build (Windows)
 
 Needs Rust (stable), Flutter (stable) and Visual Studio with the
-"Desktop development with C++" workload.
+"Desktop development with C++" workload plus the individual component
+"C++ ATL for latest build tools (x86 & x64)" (the key storage plugin needs
+ATL; without it the build fails with `atlstr.h` not found).
 
 ```
 cargo test --workspace

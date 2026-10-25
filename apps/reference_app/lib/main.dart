@@ -179,6 +179,10 @@ class _HomeScreenState extends State<HomeScreen> {
           _askConsent(v as Map<String, dynamic>);
         case 'VoiceStandby':
           _voiceStandby = v as bool;
+        case 'VoiceHeard':
+          _voiceHeard = _describeHeard(v as Map<String, dynamic>);
+        case 'VoiceStandbyLevel':
+          _standbyLevel = (v as num).toDouble();
         case 'VoiceCommand':
           _snack(v == 'Start' ? 'Voice command: start' : 'Voice command: stop');
         case 'SetupRequired':
@@ -281,6 +285,19 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _voiceModel;
   bool _voiceOn = false;
   bool _voiceStandby = false;
+  // Diagnosis: the listener's last utterance and its loudest recent level.
+  String? _voiceHeard;
+  double? _standbyLevel;
+
+  String _describeHeard(Map<String, dynamic> e) {
+    final j = e['judgement'] as Map<String, dynamic>;
+    String d(Object? v) => v == null ? 'length off' : (v as num).toStringAsFixed(1);
+    final result = switch (j['command']) { 'Start' => 'START', 'Stop' => 'STOP', _ => 'nothing' };
+    return '${e['standby'] == true ? 'While waiting' : 'While dictating'}: '
+        '${(j['secs'] as num).toStringAsFixed(2)} s, ${(j['level_dbfs'] as num).toStringAsFixed(0)} dBFS, '
+        'start ${d(j['start'])} (limit ${(j['start_threshold'] as num).toStringAsFixed(1)}), '
+        'stop ${d(j['stop'])} (limit ${(j['stop_threshold'] as num).toStringAsFixed(1)}) -> $result';
+  }
 
   Future<void> _loadVoice() async {
     try {
@@ -310,7 +327,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_voiceOn) _voiceStandby = false;
   }
 
-  /// Three takes of the start word, then three of the stop word.
+  /// Guided recording: three takes of the start word, then three of the
+  /// stop word. Every take is confirmed or repeated with a clear message;
+  /// each word is checked right after its takes.
   Future<void> _trainVoice() async {
     final denied = await ensureMicPermission();
     if (denied != null) {
@@ -319,54 +338,99 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     // Free the microphone for the recordings.
     _engine.setVoiceCommands(commandsJson: null, settingsJson: jsonEncode(_settings));
-    final prompt = ValueNotifier<String>('');
-    final takes = <String, List<Float32List>>{'start': [], 'stop': []};
-    String? error;
+    final step = ValueNotifier<_VoiceStep>(const _VoiceStep('Get ready …', _StepKind.info));
+    var cancelled = false;
+    var detail = '';
     if (!mounted) return;
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         title: const Text('Record your voice commands'),
-        content: ValueListenableBuilder<String>(
-          valueListenable: prompt,
-          builder: (_, text, _) => Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(text, style: Theme.of(context).textTheme.titleMedium, textAlign: TextAlign.center),
+        content: ValueListenableBuilder<_VoiceStep>(
+          valueListenable: step,
+          builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(st.icon, size: 48, color: st.color(Theme.of(ctx).colorScheme)),
+            const SizedBox(height: 12),
+            Text(st.text, style: Theme.of(ctx).textTheme.titleMedium, textAlign: TextAlign.center),
             const SizedBox(height: 16),
-            const LinearProgressIndicator(),
+            if (st.kind == _StepKind.listening) const LinearProgressIndicator(),
           ]),
         ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Close'),
+          ),
+        ],
       ),
     );
+    Future<void> show(String text, _StepKind kind, [int ms = 0]) async {
+      step.value = _VoiceStep(text, kind);
+      if (ms > 0) await Future<void>.delayed(Duration(milliseconds: ms));
+    }
+
+    final takes = <String, List<Float32List>>{'start': [], 'stop': []};
     for (final word in ['start', 'stop']) {
       final label = word == 'start' ? 'START' : 'STOP';
-      while (takes[word]!.length < 3) {
-        prompt.value = 'Say your $label word now (${takes[word]!.length + 1} of 3)';
+      if (word == 'stop') {
+        await show('✓ START word learned.\nNext: your STOP word – a different word.', _StepKind.ok, 2500);
+      }
+      var retry = false;
+      while (!cancelled && takes[word]!.length < 3) {
+        final n = takes[word]!.length + 1;
+        await show(
+          retry
+              ? 'Didn\'t catch that clearly ($detail).\nPlease say your $label word again ($n of 3).'
+              : n == 1
+                  ? 'Say your $label word now ($n of 3).'
+                  : 'Say your $label word once more ($n of 3).',
+          retry ? _StepKind.retry : _StepKind.listening,
+        );
         try {
-          takes[word]!.add(await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 6));
-          prompt.value = 'Got it.';
-          await Future<void>.delayed(const Duration(milliseconds: 700));
+          final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 8);
+          if (cancelled) break;
+          takes[word]!.add(take);
+          retry = false;
+          await show('✓ Understood ($n of 3).', _StepKind.ok, 1300);
         } catch (e) {
-          prompt.value = 'Nothing heard, once more …';
-          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          if (cancelled) break;
+          retry = true;
+          detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
+          await show('Didn\'t catch that clearly.\n($detail)', _StepKind.retry, 2000);
+        }
+        if (!cancelled && takes[word]!.length == 3) {
+          try {
+            await voiceCheckWord(takes: takes[word]!);
+          } catch (_) {
+            takes[word]!.clear();
+            retry = false;
+            await show('Those three sounded too different.\nLet\'s record your $label word again.', _StepKind.retry, 2500);
+          }
         }
       }
+      if (cancelled) break;
     }
-    prompt.value = 'Learning your words …';
+    if (cancelled) {
+      _applyVoice();
+      return;
+    }
+    await show('Learning your words …', _StepKind.listening);
     try {
       _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
       _voiceOn = true;
       await _saveVoice();
+      await show('✓ Done. Say your START word to dictate,\nyour STOP word to stop.', _StepKind.ok, 2500);
+      if (mounted && !cancelled) Navigator.of(context).pop();
     } catch (e) {
-      error = '$e';
+      // Stays visible until closed: the reason matters for the next try.
+      final msg = '$e'.replaceFirst(RegExp(r'^.*?Error:\s*'), '');
+      await show('Could not learn your words:\n$msg\n\nClose and record them again.', _StepKind.retry);
     }
-    if (mounted) Navigator.of(context).pop();
     _applyVoice();
-    if (error != null) {
-      _snack('Voice commands: $error');
-    } else {
-      _snack('Voice commands ready: say your start word to dictate');
-    }
     setState(() {});
   }
 
@@ -399,6 +463,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       setState(() {});
                     },
             ),
+            if (_voiceOn && (_voiceHeard != null || _standbyLevel != null))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  [
+                    if (_standbyLevel != null) 'Waiting listener level: ${_standbyLevel!.toStringAsFixed(0)} dBFS',
+                    if (_voiceHeard != null) 'Last heard. $_voiceHeard',
+                  ].join('\n'),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
             OutlinedButton(
               onPressed: _trainVoice,
               child: Text(_voiceModel == null ? 'Record start and stop word' : 'Record them again'),
@@ -747,4 +822,27 @@ class LicensesScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+enum _StepKind { info, listening, ok, retry }
+
+/// One message of the guided recording.
+class _VoiceStep {
+  const _VoiceStep(this.text, this.kind);
+  final String text;
+  final _StepKind kind;
+
+  IconData get icon => switch (kind) {
+        _StepKind.listening => Icons.mic,
+        _StepKind.ok => Icons.check_circle,
+        _StepKind.retry => Icons.replay,
+        _StepKind.info => Icons.info_outline,
+      };
+
+  Color color(ColorScheme c) => switch (kind) {
+        _StepKind.listening => c.primary,
+        _StepKind.ok => Colors.green.shade700,
+        _StepKind.retry => Colors.orange.shade800,
+        _StepKind.info => c.onSurfaceVariant,
+      };
 }

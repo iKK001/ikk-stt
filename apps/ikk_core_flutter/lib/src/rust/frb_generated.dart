@@ -71,7 +71,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1304952635;
+  int get rustContentHash => 175414808;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -168,6 +168,8 @@ abstract class RustLibApi extends BaseApi {
   });
 
   String crateApiCoreThirdPartyText();
+
+  Future<void> crateApiVoiceVoiceCheckWord({required List<Float32List> takes});
 
   Future<Float32List> crateApiVoiceVoiceRecordTake({
     required String settingsJson,
@@ -972,6 +974,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "third_party_text", argNames: []);
 
   @override
+  Future<void> crateApiVoiceVoiceCheckWord({required List<Float32List> takes}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_list_prim_f_32_strict(takes, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 28,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiVoiceVoiceCheckWordConstMeta,
+        argValues: [takes],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVoiceVoiceCheckWordConstMeta =>
+      const TaskConstMeta(debugName: "voice_check_word", argNames: ["takes"]);
+
+  @override
   Future<Float32List> crateApiVoiceVoiceRecordTake({
     required String settingsJson,
     required int timeoutSecs,
@@ -985,7 +1015,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1020,7 +1050,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1657,9 +1687,11 @@ class IkkEngineImpl extends RustOpaque implements IkkEngine {
   void showFloatingButton({required bool show_}) => RustLib.instance.api
       .crateApiEngineIkkEngineShowFloatingButton(that: this, show_: show_);
 
+  /// The app's dictate button: a click, so the voice listener is on again.
   void start({required String settingsJson}) => RustLib.instance.api
       .crateApiEngineIkkEngineStart(that: this, settingsJson: settingsJson);
 
+  /// The app's stop button: a click, so the voice listener goes off too.
   void stop() => RustLib.instance.api.crateApiEngineIkkEngineStop(that: this);
 
   void transferToTarget() =>

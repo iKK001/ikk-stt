@@ -148,6 +148,15 @@ pub enum EngineEvent {
     VoiceCommand(ikk_wake::Command),
     /// Listening locally for the start word (true) or not (false).
     VoiceStandby(bool),
+    /// Diagnosis: what the voice command listener made of one utterance
+    /// (`standby`: heard while waiting for the start word).
+    VoiceHeard {
+        standby: bool,
+        judgement: ikk_wake::Judgement,
+    },
+    /// Diagnosis: loudest input level of the start-word listener over the
+    /// last few seconds, in dBFS (shows whether it gets real sound).
+    VoiceStandbyLevel(f32),
     /// A spoken command was recognised and executed.
     Command(Intent),
     Error(String),
@@ -205,9 +214,13 @@ struct Voice {
     standby: Option<Box<dyn Capture>>,
     /// Opening the standby stream failed; retried after the next command.
     standby_failed: bool,
+    /// Loudest standby frame since the last VoiceStandbyLevel event.
+    standby_peak: f32,
+    standby_level_at: Instant,
 }
 
 const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
+const STANDBY_LEVEL_INTERVAL: Duration = Duration::from_secs(3);
 const FINISH_GRACE: Duration = Duration::from_secs(8);
 
 pub struct Engine {
@@ -387,6 +400,8 @@ impl Engine {
                     start: v.start,
                     standby: None,
                     standby_failed: false,
+                    standby_peak: f32::NEG_INFINITY,
+                    standby_level_at: Instant::now(),
                 });
                 Ok(())
             }
@@ -418,9 +433,19 @@ impl Engine {
     }
 
     async fn close_standby(&mut self) {
-        if let Some(c) = self.voice.as_mut().and_then(|v| v.standby.take()) {
-            c.stop();
+        if self.take_standby() {
             let _ = self.events.send(EngineEvent::VoiceStandby(false)).await;
+        }
+    }
+
+    /// Close the standby stream without telling anyone; true if it was open.
+    fn take_standby(&mut self) -> bool {
+        match self.voice.as_mut().and_then(|v| v.standby.take()) {
+            Some(c) => {
+                c.stop();
+                true
+            }
+            None => false,
         }
     }
 
@@ -429,10 +454,21 @@ impl Engine {
         if frame.sample_rate_hz != ikk_wake::SAMPLE_RATE_HZ {
             return;
         }
+        voice.standby_peak = voice.standby_peak.max(frame.level_dbfs());
+        if voice.standby_level_at.elapsed() >= STANDBY_LEVEL_INTERVAL {
+            voice.standby_level_at = Instant::now();
+            let peak = std::mem::replace(&mut voice.standby_peak, f32::NEG_INFINITY);
+            let _ = self.events.try_send(EngineEvent::VoiceStandbyLevel(peak));
+        }
         let Some(utterance) = voice.segmenter.push(&frame.samples) else {
             return;
         };
-        let heard = voice.spotter.detect(&utterance);
+        let judgement = voice.spotter.judge(&utterance);
+        let heard = judgement.command;
+        let _ = self.events.try_send(EngineEvent::VoiceHeard {
+            standby: true,
+            judgement,
+        });
         // During a session with its own microphone this listener hears the
         // stop word; otherwise it waits for the start word.
         if self.session.is_some() {
@@ -538,9 +574,10 @@ impl Engine {
         // with their own microphone run next to it (Windows and macOS let
         // several readers share a microphone), so the stop word works with
         // every provider, like Dragon's always-available commands.
-        if !caps.own_audio {
-            self.close_standby().await;
-        }
+        // Its "standby off" is sent after "listening", so a button goes
+        // straight from waiting to dictating. Should the start fail, the
+        // loop reopens the listener and the button never left "waiting".
+        let standby_closed = !caps.own_audio && self.take_standby();
         // System recognizers record the microphone themselves.
         let capture = if caps.own_audio {
             None
@@ -564,6 +601,9 @@ impl Engine {
         self.text_cfg = cfg.text;
         self.command_locale = cfg.command_locale;
         self.set_state(EngineState::Listening).await;
+        if standby_closed {
+            let _ = self.events.send(EngineEvent::VoiceStandby(false)).await;
+        }
         info!(provider = %cfg.session.provider.0, mode = ?self.output_mode, "session started");
         Ok(())
     }
@@ -572,7 +612,13 @@ impl Engine {
         if let Some(voice) = self.voice.as_mut() {
             if frame.sample_rate_hz == ikk_wake::SAMPLE_RATE_HZ {
                 if let Some(utterance) = voice.segmenter.push(&frame.samples) {
-                    if voice.spotter.detect(&utterance) == Some(ikk_wake::Command::Stop) {
+                    let judgement = voice.spotter.judge(&utterance);
+                    let heard = judgement.command;
+                    let _ = self.events.try_send(EngineEvent::VoiceHeard {
+                        standby: false,
+                        judgement,
+                    });
+                    if heard == Some(ikk_wake::Command::Stop) {
                         let secs = utterance.len() as f32 / ikk_wake::SAMPLE_RATE_HZ as f32;
                         self.stop_by_voice(secs).await;
                         return;
@@ -775,6 +821,9 @@ impl Engine {
                 }
             }
         }
+        // The listener is waiting again before "idle" goes out, so a button
+        // goes straight from dictating to waiting.
+        self.maintain_standby().await;
         self.set_state(EngineState::Idle).await;
     }
 

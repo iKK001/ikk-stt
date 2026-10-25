@@ -100,6 +100,18 @@ fn refuses_identical_words_and_too_few_takes() {
 }
 
 #[test]
+fn one_bad_take_among_good_ones_is_caught() {
+    let mut set = takes(START);
+    set[2] = speak(OTHER, 1.0, 1.0, 0.003, 51);
+    assert!(matches!(
+        VoiceCommands::check_word(&set),
+        Err(WakeError::TakesInconsistent)
+    ));
+    assert!(VoiceCommands::check_word(&takes(START)).is_ok());
+    assert!(VoiceCommands::check_word(&takes(STOP)).is_ok());
+}
+
+#[test]
 fn stores_and_loads() {
     let c = VoiceCommands::train(&takes(START), &takes(STOP)).unwrap();
     let back = VoiceCommands::from_json(&c.to_json()).unwrap();

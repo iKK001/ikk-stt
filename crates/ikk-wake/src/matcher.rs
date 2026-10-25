@@ -13,6 +13,9 @@ const MIN_FRAMES: usize = 25;
 const THRESHOLD_FACTOR: f32 = 1.35;
 /// The winning word must be this much closer than the other one.
 const AMBIGUITY_MARGIN: f32 = 0.85;
+/// One take much further from the others than they are from each other
+/// (noise, a cough, a different word) makes the set unusable.
+const CONSISTENCY_RATIO: f32 = 2.2;
 /// Utterances much shorter or longer than the takes are not the word.
 const DURATION_RANGE: (f32, f32) = (0.5, 2.0);
 
@@ -54,6 +57,12 @@ impl VoiceCommands {
         Ok(Self { start, stop })
     }
 
+    /// Check the takes of one word right after recording them, so a bad
+    /// take can be repeated before the other word is recorded.
+    pub fn check_word(takes: &[Vec<f32>]) -> Result<(), WakeError> {
+        CommandModel::train(&Extractor::new(), takes).map(|_| ())
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -77,12 +86,15 @@ impl CommandModel {
             templates.push(f.into_iter().map(|fr| fr.to_vec()).collect::<Vec<_>>());
         }
         let mut worst = 0f32;
+        let mut best = f32::INFINITY;
         for i in 0..templates.len() {
             for j in i + 1..templates.len() {
-                worst = worst.max(dtw(&templates[i], &templates[j]));
+                let d = dtw(&templates[i], &templates[j]);
+                worst = worst.max(d);
+                best = best.min(d);
             }
         }
-        if !worst.is_finite() {
+        if !worst.is_finite() || worst > best.max(1e-3) * CONSISTENCY_RATIO {
             return Err(WakeError::TakesInconsistent);
         }
         let mean_frames = templates.iter().map(|t| t.len() as f32).sum::<f32>() / templates.len() as f32;
@@ -123,27 +135,80 @@ impl Spotter {
     }
 
     pub fn detect(&self, utterance: &[f32]) -> Option<Command> {
+        self.judge(utterance).command
+    }
+
+    /// The decision with its numbers, for diagnosing words that are never
+    /// (or too often) recognised.
+    pub fn judge(&self, utterance: &[f32]) -> Judgement {
         let frames: Vec<Vec<f32>> = self
             .extractor
             .utterance(utterance)
             .into_iter()
             .map(|f| f.to_vec())
             .collect();
+        let rms = (utterance.iter().map(|x| x * x).sum::<f32>() / utterance.len().max(1) as f32).sqrt();
+        let mut j = Judgement {
+            command: None,
+            secs: utterance.len() as f32 / crate::SAMPLE_RATE_HZ as f32,
+            level_dbfs: 20.0 * rms.max(1e-9).log10(),
+            frames: frames.len(),
+            start: None,
+            start_threshold: self.commands.start.threshold,
+            stop: None,
+            stop_threshold: self.commands.stop.threshold,
+        };
         if frames.len() < MIN_FRAMES {
-            return None;
+            return j;
         }
-        let start = self.commands.start.distance(&frames);
-        let stop = self.commands.stop.distance(&frames);
+        j.start = self.commands.start.distance(&frames);
+        j.stop = self.commands.stop.distance(&frames);
         let accept = |d: Option<f32>, model: &CommandModel, other: Option<f32>| {
             d.is_some_and(|d| d <= model.threshold && other.is_none_or(|o| d <= o * AMBIGUITY_MARGIN))
         };
-        if accept(start, &self.commands.start, stop) {
+        j.command = if accept(j.start, &self.commands.start, j.stop) {
             Some(Command::Start)
-        } else if accept(stop, &self.commands.stop, start) {
+        } else if accept(j.stop, &self.commands.stop, j.start) {
             Some(Command::Stop)
         } else {
             None
-        }
+        };
+        j
+    }
+}
+
+/// What the spotter made of one utterance. A distance is None when the
+/// utterance's length rules that word out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Judgement {
+    pub command: Option<Command>,
+    pub secs: f32,
+    pub level_dbfs: f32,
+    pub frames: usize,
+    pub start: Option<f32>,
+    pub start_threshold: f32,
+    pub stop: Option<f32>,
+    pub stop_threshold: f32,
+}
+
+impl Judgement {
+    /// One line for a log or a status text.
+    pub fn summary(&self) -> String {
+        let d = |v: Option<f32>| v.map_or("length off".to_string(), |v| format!("{v:.1}"));
+        format!(
+            "{:.2} s, {:.0} dBFS, start {} (limit {:.1}), stop {} (limit {:.1}) -> {}",
+            self.secs,
+            self.level_dbfs,
+            d(self.start),
+            self.start_threshold,
+            d(self.stop),
+            self.stop_threshold,
+            match self.command {
+                Some(Command::Start) => "START",
+                Some(Command::Stop) => "STOP",
+                None => "nothing",
+            }
+        )
     }
 }
 

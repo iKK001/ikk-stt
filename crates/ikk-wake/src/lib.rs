@@ -15,7 +15,7 @@ pub mod features;
 pub mod matcher;
 pub mod segment;
 
-pub use matcher::{Command, CommandModel, Spotter, VoiceCommands};
+pub use matcher::{Command, CommandModel, Judgement, Spotter, VoiceCommands};
 pub use segment::Segmenter;
 
 /// Sample rate of the audio pipeline the features are computed at.
