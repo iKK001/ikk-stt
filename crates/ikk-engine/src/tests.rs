@@ -665,3 +665,65 @@ async fn stop_word_works_with_providers_that_own_the_microphone() {
     assert!(ev.iter().any(|e| matches!(e, EngineEvent::State(EngineState::Idle))));
     assert_eq!(*opens.lock().unwrap(), 1, "one listener for the whole cycle");
 }
+
+#[tokio::test]
+async fn settings_change_keeps_the_start_word_listener() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(FakeProvider));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opens = Arc::new(StdMutex::new(0usize));
+    let (opener_mic, opener_opens) = (mic.clone(), opens.clone());
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        *opener_opens.lock().unwrap() += 1;
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog::default(),
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    let takes = |w| vec![word(w, 1.0, 1.0), word(w, 0.9, 0.7), word(w, 1.12, 1.3)];
+    let commands = ikk_wake::VoiceCommands::train(&takes(START_WORD), &takes(STOP_WORD)).unwrap();
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    handle
+        .send(EngineCommand::SetVoiceCommands(Some(Box::new(VoiceSetup {
+            commands: commands.clone(),
+            start: start_cfg(),
+        }))))
+        .await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::VoiceStandby(true)),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    // Another language (or provider): same microphone settings.
+    let mut changed = start_cfg();
+    changed.session.language = "gsw".into();
+    handle
+        .send(EngineCommand::SetVoiceCommands(Some(Box::new(VoiceSetup {
+            commands,
+            start: changed,
+        }))))
+        .await;
+    say(&mic, &word(START_WORD, 1.05, 0.8)).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::State(EngineState::Listening))),
+        "start word after a settings change: {ev:?}"
+    );
+    assert!(
+        !ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(false))),
+        "listener closed: {ev:?}"
+    );
+}

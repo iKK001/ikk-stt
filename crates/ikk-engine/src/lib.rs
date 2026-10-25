@@ -398,6 +398,17 @@ impl Engine {
                 Ok(())
             }
             EngineCommand::SetVoiceCommands(setup) => {
+                // Only the provider, language or similar changed: keep the
+                // open microphone. Closing and at once reopening it lost
+                // the start word on Windows until voice was switched off
+                // and on again.
+                if let (Some(v), Some(new)) = (self.voice.as_mut(), setup.as_ref()) {
+                    if v.standby.is_some() && same_standby_capture(&v.start, &new.start) {
+                        v.spotter = ikk_wake::Spotter::new(new.commands.clone());
+                        v.start = new.start.clone();
+                        return Ok(());
+                    }
+                }
                 self.close_standby().await;
                 self.voice = setup.map(|v| Voice {
                     spotter: ikk_wake::Spotter::new(v.commands),
@@ -424,12 +435,7 @@ impl Engine {
         if !idle || voice.standby.is_some() || voice.standby_failed {
             return;
         }
-        // The words were recorded without AGC and preamp (ikk-ffi
-        // record_take); the start word must be heard the same way.
-        let mut capture = voice.start.capture.clone();
-        capture.agc = false;
-        capture.preamp_gain_db = 0.0;
-        match (self.open_capture)(&capture) {
+        match (self.open_capture)(&standby_capture(&voice.start)) {
             Ok(c) => {
                 voice.standby = Some(c);
                 voice.segmenter = ikk_wake::Segmenter::new();
@@ -475,6 +481,7 @@ impl Engine {
         };
         let judgement = voice.spotter.judge(&utterance);
         let heard = judgement.command;
+        info!(judgement = %judgement.summary(), "start word listener heard");
         let _ = self.events.try_send(EngineEvent::VoiceHeard {
             standby: true,
             judgement,
@@ -497,6 +504,7 @@ impl Engine {
             .send(EngineEvent::VoiceCommand(ikk_wake::Command::Start))
             .await;
         if let Err(e) = self.start(cfg).await {
+            warn!(%e, "start word heard, but dictation did not start");
             let _ = self.events.send(EngineEvent::Error(e.to_string())).await;
         }
     }
@@ -954,6 +962,21 @@ impl Engine {
             let _ = self.events.send(EngineEvent::State(s)).await;
         }
     }
+}
+
+/// The microphone settings of the start word listener. The words were
+/// recorded without AGC and preamp (ikk-ffi record_take); the start word
+/// must be heard the same way.
+fn standby_capture(start: &StartConfig) -> ikk_audio::CaptureConfig {
+    let mut capture = start.capture.clone();
+    capture.agc = false;
+    capture.preamp_gain_db = 0.0;
+    capture
+}
+
+/// CaptureConfig has no PartialEq (floats); its Debug text covers every field.
+fn same_standby_capture(a: &StartConfig, b: &StartConfig) -> bool {
+    format!("{:?}", standby_capture(a)) == format!("{:?}", standby_capture(b))
 }
 
 #[cfg(test)]
