@@ -16,7 +16,9 @@ use windows::Media::SpeechRecognition::{
     SpeechRecognitionHypothesisGeneratedEventArgs, SpeechRecognitionResultStatus, SpeechRecognitionScenario,
     SpeechRecognitionTopicConstraint, SpeechRecognizer,
 };
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
 
 use crate::{language_tag, PROVIDER_ID};
 
@@ -25,6 +27,8 @@ const HRESULT_PRIVACY_NOT_ACCEPTED: i32 = 0x8004_5509_u32 as i32;
 const PRIVACY_SETTINGS: &str = "ms-settings:privacy-speech";
 const PRIVACY_MESSAGE: &str = "Windows speech recognition needs \"Online speech recognition\" switched on in the \
      Windows privacy settings (Privacy & security > Speech).";
+
+static FIRST_HYPOTHESIS: std::sync::Once = std::sync::Once::new();
 
 /// 100-ns ticks for a WinRT TimeSpan.
 fn span_ms(ms: i64) -> TimeSpan {
@@ -149,6 +153,10 @@ fn run(
     ready: std_mpsc::Sender<Result<(), SttError>>,
     stop: std_mpsc::Receiver<()>,
 ) {
+    // Windows delivers the recognizer's results and completions through the
+    // message queue of the thread that owns it, like a window thread: so
+    // this thread is a single-threaded apartment and keeps pumping.
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     let session = match start(tag.as_deref(), &events) {
         Ok(s) => {
             let _ = ready.send(Ok(()));
@@ -156,15 +164,62 @@ fn run(
         }
         Err(e) => {
             let _ = ready.send(Err(e));
+            if com.is_ok() {
+                unsafe { CoUninitialize() };
+            }
             return;
         }
     };
-    let _ = stop.recv();
+    while stop.try_recv() == Err(std_mpsc::TryRecvError::Empty) {
+        pump();
+        std::thread::sleep(PUMP_INTERVAL);
+    }
     if let Ok(op) = session.1.StopAsync() {
-        let _ = op.join();
+        if wait(|| op.Status().map(|s| s.0 != 0).unwrap_or(true), STOP_TIMEOUT) {
+            let _ = op.GetResults();
+        } else {
+            warn!("Windows speech: stop not confirmed in time");
+        }
     }
     drop(session);
     let _ = events.blocking_send(TranscriptEvent::Closed);
+    if com.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+}
+
+const PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Process this thread's pending window messages (results, completions).
+fn pump() {
+    let mut msg = MSG::default();
+    unsafe {
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Wait for a Windows operation while pumping messages; false on timeout.
+fn wait(done: impl Fn() -> bool, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        pump();
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(PUMP_INTERVAL);
+    }
+}
+
+fn timeout_err(what: &str) -> SttError {
+    SttError::Provider(ErrorClass::Other(format!("Windows speech: {what} timed out")))
 }
 
 fn win_err(e: windows::core::Error) -> SttError {
@@ -197,10 +252,11 @@ fn start(
         .Constraints()
         .and_then(|c| c.Append(&topic.cast::<ISpeechRecognitionConstraint>()?))
         .map_err(win_err)?;
-    let compiled = recognizer
-        .CompileConstraintsAsync()
-        .and_then(|op| op.join())
-        .map_err(win_err)?;
+    let op = recognizer.CompileConstraintsAsync().map_err(win_err)?;
+    if !wait(|| op.Status().map(|s| s.0 != 0).unwrap_or(true), SETUP_TIMEOUT) {
+        return Err(timeout_err("preparing dictation"));
+    }
+    let compiled = op.GetResults().map_err(win_err)?;
     let status = compiled.Status().map_err(win_err)?;
     tracing::info!(status = status_text(status), "Windows speech: dictation prepared");
     if status != SpeechRecognitionResultStatus::Success {
@@ -221,6 +277,7 @@ fn start(
             SpeechRecognitionHypothesisGeneratedEventArgs,
         >::new(move |_, args| {
             if let Ok(text) = args.ok().and_then(|a| a.Hypothesis()).and_then(|h| h.Text()) {
+                FIRST_HYPOTHESIS.call_once(|| tracing::info!("Windows speech: first live text arrived"));
                 let _ = tx.try_send(TranscriptEvent::Interim(text.to_string()));
             }
             Ok(())
@@ -279,7 +336,11 @@ fn start(
         }))
         .map_err(win_err)?;
 
-    session.StartAsync().and_then(|op| op.join()).map_err(win_err)?;
+    let op = session.StartAsync().map_err(win_err)?;
+    if !wait(|| op.Status().map(|s| s.0 != 0).unwrap_or(true), SETUP_TIMEOUT) {
+        return Err(timeout_err("starting"));
+    }
+    op.GetResults().map_err(win_err)?;
     tracing::info!("Windows speech: listening (default microphone)");
     Ok((recognizer, session))
 }

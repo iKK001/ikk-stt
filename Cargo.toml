@@ -12,7 +12,7 @@ publish = false
 
 # Core build number, shown in About next to the version. Bump for each build you hand out.
 [workspace.metadata.ikk]
-build_number = 28
+build_number = 29
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
