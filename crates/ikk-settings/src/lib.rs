@@ -43,7 +43,7 @@ pub enum TransferMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderOptions {
-    /// Model id, e.g. "nova-3", "whisper-1", "scribe_v1".
+    /// Model id, e.g. "nova-3", "whisper-1", "scribe_v2".
     pub model: Option<String>,
     pub transfer: TransferMode,
     /// Bias terms (Deepgram keywords / keyterms, OpenAI prompt).

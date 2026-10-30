@@ -7,7 +7,8 @@ use reqwest::multipart::{Form, Part};
 
 const URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 const RATE_HZ: u32 = 16_000;
-const DEFAULT_MODEL: &str = "scribe_v1";
+// Scribe v1 is deprecated; v2 is its replacement (same endpoint).
+const DEFAULT_MODEL: &str = "scribe_v2";
 
 /// Scribe's `language_code` for a settings language (ISO-639-3). Scribe has
 /// no code for Swiss German; its German model writes Swiss speech as
