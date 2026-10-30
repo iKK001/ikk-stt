@@ -95,7 +95,8 @@ pub struct VadSettings {
     pub silence_duration_ms: u32,
     /// Silence this long starts a new paragraph / entry.
     pub long_pause_ms: u32,
-    /// Chunked-batch mode: snapshot interval.
+    /// Batch mode: a chunk longer than this is cut at the next gap between
+    /// words (at four times this length regardless).
     pub chunk_interval_ms: u32,
 }
 

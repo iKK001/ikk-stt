@@ -136,6 +136,9 @@ pub enum EngineEvent {
     HostText {
         text: String,
         rhythm: bool,
+        /// With `rhythm`: the pause after each character, in ms, from the
+        /// shared typing rhythm, so every platform types alike.
+        pauses_ms: Vec<u16>,
     },
     /// The provider needs a setting outside the app first (after consent).
     /// `settings_url` is a page the shell can open, or empty.
@@ -244,6 +247,8 @@ pub struct Engine {
     live: LiveTyper,
     /// How text goes into the target in this session.
     insert_style: ikk_output::InsertStyle,
+    /// Typing rhythm for hosts that type the text themselves (Android).
+    host_rhythm: ikk_output::rhythm::Rhythm,
     voice: Option<Voice>,
     /// When and how much text went into the target in this session; lets a
     /// spoken stop word take back what was typed for it.
@@ -283,6 +288,7 @@ impl Engine {
             last_level: Instant::now(),
             live: LiveTyper::default(),
             insert_style: ikk_output::InsertStyle::default(),
+            host_rhythm: ikk_output::rhythm::Rhythm::default(),
             voice: None,
             typed_log: Vec::new(),
             discard_pending: false,
@@ -337,7 +343,7 @@ impl Engine {
                     Some(ev) => self.on_transcript(ev).await,
                     None => self.stop().await,
                 },
-                _ = tokio::time::sleep(Duration::from_millis(self.live.flow_rate_ms().max(1) as u64)), if self.live.flow_has_pending() => {
+                _ = tokio::time::sleep(self.live.next_delay()), if self.live.flow_has_pending() => {
                     self.flow_tick().await;
                 }
             }
@@ -861,6 +867,7 @@ impl Engine {
                 .send(EngineEvent::HostText {
                     text: text.clone(),
                     rhythm: false,
+                    pauses_ms: Vec::new(),
                 })
                 .await;
         }
@@ -920,11 +927,21 @@ impl Engine {
         self.typed_log.push((Instant::now(), n));
         if self.sink.access_level() == AccessLevel::Host {
             let rhythm = self.insert_style == ikk_output::InsertStyle::Rhythm;
+            let pauses_ms = if rhythm {
+                self.host_rhythm
+                    .plan(text)
+                    .iter()
+                    .map(|d| d.as_millis().min(u16::MAX as u128) as u16)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let _ = self
                 .events
                 .send(EngineEvent::HostText {
                     text: text.to_string(),
                     rhythm,
+                    pauses_ms,
                 })
                 .await;
         }

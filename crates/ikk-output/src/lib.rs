@@ -21,6 +21,7 @@ pub mod guard;
 pub mod live;
 pub mod queue;
 pub mod reconcile;
+pub mod rhythm;
 
 pub mod desktop;
 

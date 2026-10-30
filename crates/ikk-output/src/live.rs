@@ -12,9 +12,12 @@
 
 use std::ops::Range;
 
+use std::time::Duration;
+
 use crate::guard::{AllowAllGuard, ForegroundGuard};
 use crate::queue::{TypingQueue, VisibleEdit};
 use crate::reconcile::{compose_segment, reconcile};
+use crate::rhythm::{Rhythm, RhythmConfig};
 use crate::{OutputError, TextSink};
 
 /// Floor for the flow rate; below this SendInput loses characters.
@@ -37,6 +40,11 @@ pub struct LiveTyper {
     next_id: SegmentId,
     flow: Option<TypingQueue>,
     flow_rate_ms: u32,
+    /// Sets the pause before each character of the flow.
+    rhythm: Rhythm,
+    /// Pause before the next character; zero when text just arrived, so
+    /// its first character appears at once.
+    next_delay: Duration,
 }
 
 impl Default for LiveTyper {
@@ -57,7 +65,26 @@ impl LiveTyper {
             next_id: 1,
             flow: (flow_ms > 0).then(TypingQueue::new),
             flow_rate_ms: if flow_ms > 0 { flow_ms.max(FLOW_FLOOR_MS) } else { 0 },
+            rhythm: Rhythm::new(
+                RhythmConfig {
+                    floor_ms: flow_ms.max(FLOW_FLOOR_MS),
+                    ..RhythmConfig::default()
+                },
+                0x5EED_1234_ABCD_0001,
+            ),
+            next_delay: Duration::ZERO,
         }
+    }
+
+    /// Own rhythm (tests, settings).
+    pub fn with_rhythm(mut self, rhythm: Rhythm) -> Self {
+        self.rhythm = rhythm;
+        self
+    }
+
+    /// How long the writer should wait before the next [`Self::flow_tick`].
+    pub fn next_delay(&self) -> Duration {
+        self.next_delay
     }
 
     pub fn flow_rate_ms(&self) -> u32 {
@@ -93,6 +120,10 @@ impl LiveTyper {
             span: 0..0,
         });
         self.reindex();
+        // Nothing was waiting: the new text starts without a pause.
+        if !self.flow_has_pending() {
+            self.next_delay = Duration::ZERO;
+        }
         self.drive(sink)?;
         Ok(id)
     }
@@ -160,6 +191,9 @@ impl LiveTyper {
         let n = chunk.chars().count();
         sink.type_text(&chunk)?;
         self.typed.push_str(&chunk);
+        if let (Some(last), Some(queue)) = (chunk.chars().last(), self.flow.as_ref()) {
+            self.next_delay = self.rhythm.delay_after(last, queue.pending_len());
+        }
         Ok(n)
     }
 
@@ -178,6 +212,7 @@ impl LiveTyper {
         self.committed.clear();
         self.typed.clear();
         self.deferred = false;
+        self.next_delay = Duration::ZERO;
         if let Some(q) = self.flow.as_mut() {
             q.discard();
         }
@@ -248,6 +283,30 @@ mod tests {
         assert_eq!(s.ops, vec!["type:hal"], "correction landed invisibly in the queue");
         lt.flush(&mut s).unwrap();
         assert_eq!(lt.typed(), "hallo Welt!");
+    }
+
+    #[test]
+    fn flow_starts_at_once_then_breathes_and_catches_up() {
+        let mut lt = LiveTyper::new(Box::new(AllowAllGuard), 5);
+        let mut s = RecordingSink::default();
+        lt.append("Hallo Welt. Noch ein Satz", &mut s).unwrap();
+        // New text with nothing waiting: the first character comes at once.
+        assert_eq!(lt.next_delay(), Duration::ZERO);
+        let mut delays = Vec::new();
+        while lt.flow_has_pending() {
+            lt.flow_tick(1, &mut s).unwrap();
+            delays.push(lt.next_delay());
+        }
+        assert_eq!(lt.typed(), "Hallo Welt. Noch ein Satz");
+        // Never below the floor, never a dead stop, and not one fixed pace.
+        assert!(delays.iter().all(|d| *d >= Duration::from_millis(5)));
+        let distinct: std::collections::HashSet<_> = delays.iter().collect();
+        assert!(distinct.len() > 5, "{delays:?}");
+        // A long backlog is typed within the budget: 120 characters waiting
+        // give at most 10 ms each.
+        lt.append(&"x".repeat(121), &mut s).unwrap();
+        lt.flow_tick(1, &mut s).unwrap();
+        assert!(lt.next_delay() <= Duration::from_millis(10), "{:?}", lt.next_delay());
     }
 
     #[test]

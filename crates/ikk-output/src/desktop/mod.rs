@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 use crate::budget::{with_budget, PROBE_BUDGET};
 use crate::chunk::{chunk_plan, is_typewriter, MIN_SAFE_CHAR_DELAY_MS};
+use crate::rhythm::Rhythm;
 use crate::{AccessLevel, InsertStyle, OutputError, TargetStatus, TextSink, Verification};
 
 /// Special keys the platform layer must be able to press.
@@ -40,6 +41,9 @@ pub struct DesktopSink {
     /// shows the previous one (read back through the accessibility API).
     confirm_typing: bool,
     last_level: AccessLevel,
+    /// Pauses between the characters of a whole segment (the per-character
+    /// flow sets its own pauses before calling in).
+    rhythm: Rhythm,
 }
 
 impl Default for DesktopSink {
@@ -61,6 +65,7 @@ impl DesktopSink {
             // character, measured 2026-10-24 even at 20 ms per character).
             confirm_typing: cfg!(target_os = "windows"),
             last_level: AccessLevel::BasicTyping,
+            rhythm: Rhythm::default(),
         }
     }
 
@@ -89,32 +94,38 @@ impl DesktopSink {
     /// caret is not at the end) are typed at the paced delay instead. If a
     /// character never shows up, the typed part is deleted and the whole
     /// text is pasted, so the result is still exact.
-    fn type_confirmed(&self, text: &str) -> Result<(), OutputError> {
-        let delay = Duration::from_millis(self.typing_delay_ms.max(MIN_SAFE_CHAR_DELAY_MS) as u64);
+    fn type_confirmed(&mut self, text: &str) -> Result<(), OutputError> {
+        let total = text.chars().count();
         let mut typed = String::new();
         let mut verifiable = true;
         for (i, ch) in text.chars().enumerate() {
+            let sent = std::time::Instant::now();
             platform::type_text(&ch.to_string())?;
             typed.push(ch);
-            if !verifiable {
-                std::thread::sleep(delay);
-                continue;
-            }
-            match wait_until_shown(&typed) {
-                Verification::Confirmed => {}
-                // Nothing to read, or other text after the caret: pace instead.
-                _ if i == 0 => verifiable = false,
-                _ => {
-                    warn!(typed = i + 1, "typing not confirmed; replacing it by a paste");
-                    platform::press(Key::Backspace, i + 1)?;
-                    return platform::paste_clipboard(text);
+            if verifiable {
+                match wait_until_shown(&typed) {
+                    Verification::Confirmed => {}
+                    // Nothing to read, or other text after the caret: pace instead.
+                    _ if i == 0 => verifiable = false,
+                    _ => {
+                        warn!(typed = i + 1, "typing not confirmed; replacing it by a paste");
+                        platform::press(Key::Backspace, i + 1)?;
+                        return platform::paste_clipboard(text);
+                    }
                 }
             }
+            // The rhythm's pause, less what the confirmation already took.
+            let pause = self.rhythm.delay_after(ch, total - i - 1);
+            std::thread::sleep(pause.saturating_sub(sent.elapsed()).max(self.min_delay()));
         }
         Ok(())
     }
 
-    fn type_chunked(&self, text: &str) -> Result<(), OutputError> {
+    fn min_delay(&self) -> Duration {
+        Duration::from_millis(self.typing_delay_ms.max(MIN_SAFE_CHAR_DELAY_MS) as u64)
+    }
+
+    fn type_chunked(&mut self, text: &str) -> Result<(), OutputError> {
         if self.paste_mode {
             return platform::paste_clipboard(text);
         }
@@ -122,6 +133,13 @@ impl DesktopSink {
             return self.type_confirmed(text);
         }
         let delay = self.typing_delay_ms.max(MIN_SAFE_CHAR_DELAY_MS);
+        // One character at a time from the engine's flow: it keeps the
+        // rhythm itself (never below the floor), so no pause here.
+        if text.chars().count() == 1 {
+            return platform::type_text(text);
+        }
+        let total = text.chars().count();
+        let mut done = 0;
         for chunk in chunk_plan(text) {
             if is_typewriter(delay) {
                 for ch in chunk.chars() {
@@ -129,7 +147,8 @@ impl DesktopSink {
                     if self.sync_typing {
                         platform::wait_input_idle();
                     }
-                    std::thread::sleep(Duration::from_millis(delay as u64));
+                    done += 1;
+                    std::thread::sleep(self.rhythm.delay_after(ch, total - done).max(self.min_delay()));
                 }
             } else {
                 platform::type_text(&chunk)?;
