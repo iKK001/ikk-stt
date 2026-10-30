@@ -81,6 +81,8 @@ struct Diag {
     finals: u32,
     final_chars: usize,
     typed: usize,
+    /// Intervals in a row with nothing to report.
+    quiet: u32,
 }
 
 impl Default for Diag {
@@ -93,6 +95,7 @@ impl Default for Diag {
             finals: 0,
             final_chars: 0,
             typed: 0,
+            quiet: 0,
         }
     }
 }
@@ -250,8 +253,10 @@ struct Voice {
 }
 
 const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
-/// One diagnosis line per this interval while a session runs.
+/// One diagnosis line per this interval while a session runs and
+/// something happened; quiet stretches are summarised every tenth one.
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(2);
+const QUIET_SUMMARIES: u32 = 10;
 const STANDBY_LEVEL_INTERVAL: Duration = Duration::from_secs(3);
 const FINISH_GRACE: Duration = Duration::from_secs(8);
 
@@ -698,22 +703,30 @@ impl Engine {
         self.diag.frames += 1;
         self.diag.audio_ms += frame.duration().as_millis() as u32;
         if self.session.is_some() && self.diag.since.elapsed() >= SUMMARY_INTERVAL {
+            let quiet = self.diag.quiet;
             let d = std::mem::take(&mut self.diag);
-            info!(
-                frames = d.frames,
-                audio_ms = d.audio_ms,
-                interims = d.interims,
-                finals = d.finals,
-                final_chars = d.final_chars,
-                typed = d.typed,
-                waiting = self
-                    .live
-                    .text()
-                    .chars()
-                    .count()
-                    .saturating_sub(self.live.typed().chars().count()),
-                "dictation last 2 s"
-            );
+            let waiting = self
+                .live
+                .text()
+                .chars()
+                .count()
+                .saturating_sub(self.live.typed().chars().count());
+            let something = d.interims + d.finals > 0 || d.typed > 0 || waiting > 0;
+            if something || quiet + 1 >= QUIET_SUMMARIES {
+                info!(
+                    frames = d.frames,
+                    audio_ms = d.audio_ms,
+                    interims = d.interims,
+                    finals = d.finals,
+                    final_chars = d.final_chars,
+                    typed = d.typed,
+                    waiting,
+                    quiet_intervals = quiet,
+                    "dictation last 2 s"
+                );
+            } else {
+                self.diag.quiet = quiet + 1;
+            }
         }
         let ended = match self.vad.as_mut().map(|v| v.process(&frame.samples)) {
             Some(Some(VadEvent::SpeechStarted)) => {
