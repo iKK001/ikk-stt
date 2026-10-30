@@ -209,8 +209,14 @@ pub enum ErrorClass {
 }
 
 impl ErrorClass {
-    /// Map an HTTP status to a class.
+    /// Map an HTTP status to a class. The provider's reason is logged
+    /// (shortened, never the request), because the class alone cannot
+    /// tell a wrong key from a key without the needed permission.
     pub fn from_status(status: u16, body: &str) -> Self {
+        if status != 200 {
+            let reason: String = body.chars().filter(|c| !c.is_control()).take(240).collect();
+            tracing::warn!(status, reason, "provider refused the request");
+        }
         match status {
             401 | 403 => Self::Unauthorized,
             429 | 402 => Self::Throttled,

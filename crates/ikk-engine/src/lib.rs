@@ -70,6 +70,33 @@ pub enum FallbackReason {
     VerificationMismatch,
 }
 
+/// Counters for the periodic diagnosis line (where time is lost: audio,
+/// provider or typing).
+#[derive(Debug)]
+struct Diag {
+    since: Instant,
+    frames: u32,
+    audio_ms: u32,
+    interims: u32,
+    finals: u32,
+    final_chars: usize,
+    typed: usize,
+}
+
+impl Default for Diag {
+    fn default() -> Self {
+        Self {
+            since: Instant::now(),
+            frames: 0,
+            audio_ms: 0,
+            interims: 0,
+            finals: 0,
+            final_chars: 0,
+            typed: 0,
+        }
+    }
+}
+
 /// Everything a session needs; built from settings via [`config`].
 #[derive(Debug, Clone)]
 pub struct StartConfig {
@@ -223,6 +250,8 @@ struct Voice {
 }
 
 const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
+/// One diagnosis line per this interval while a session runs.
+const SUMMARY_INTERVAL: Duration = Duration::from_secs(2);
 const STANDBY_LEVEL_INTERVAL: Duration = Duration::from_secs(3);
 const FINISH_GRACE: Duration = Duration::from_secs(8);
 
@@ -243,6 +272,8 @@ pub struct Engine {
     text_cfg: TextConfig,
     command_locale: String,
     last_level: Instant,
+    /// Diagnosis: what happened since the last summary line.
+    diag: Diag,
     /// Owner of the physical target text while injecting.
     live: LiveTyper,
     /// How text goes into the target in this session.
@@ -286,6 +317,7 @@ impl Engine {
             text_cfg: TextConfig::default(),
             command_locale: String::new(),
             last_level: Instant::now(),
+            diag: Diag::default(),
             live: LiveTyper::default(),
             insert_style: ikk_output::InsertStyle::default(),
             host_rhythm: ikk_output::rhythm::Rhythm::default(),
@@ -343,7 +375,9 @@ impl Engine {
                     Some(ev) => self.on_transcript(ev).await,
                     None => self.stop().await,
                 },
-                _ = tokio::time::sleep(self.live.next_delay()), if self.live.flow_has_pending() => {
+                // A fixed deadline: the audio frames that wake this loop
+                // every few milliseconds must not restart the pause.
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.live.due())), if self.live.flow_has_pending() => {
                     self.flow_tick().await;
                 }
             }
@@ -574,15 +608,10 @@ impl Engine {
             cfg.session.credential = self.credentials.get(&cfg.session.provider).cloned();
         }
         self.session_text.clear();
-        // Streaming text is typed in rhythm at the cursor; batch chunks are
-        // pasted in one piece (open_session streams exactly when asked and
-        // supported).
-        let streaming = caps.streaming && (cfg.session.transfer == ikk_stt::TransferMode::Streaming || !caps.batch);
-        self.insert_style = if streaming {
-            ikk_output::InsertStyle::Rhythm
-        } else {
-            ikk_output::InsertStyle::Paste
-        };
+        // Dictated text is typed in rhythm at the cursor, whether it comes
+        // from a live stream or from batch chunks. Only a finished text
+        // moved from the dictation window is pasted in one piece.
+        self.insert_style = ikk_output::InsertStyle::Rhythm;
         self.sink.set_insert_style(self.insert_style);
         // A sink that pastes or sets its own rhythm wants whole segments; a
         // character flow would mean one paste per character.
@@ -654,6 +683,26 @@ impl Engine {
             self.last_level = Instant::now();
             let _ = self.events.try_send(EngineEvent::Level(frame.level_dbfs()));
         }
+        self.diag.frames += 1;
+        self.diag.audio_ms += frame.duration().as_millis() as u32;
+        if self.session.is_some() && self.diag.since.elapsed() >= SUMMARY_INTERVAL {
+            let d = std::mem::take(&mut self.diag);
+            info!(
+                frames = d.frames,
+                audio_ms = d.audio_ms,
+                interims = d.interims,
+                finals = d.finals,
+                final_chars = d.final_chars,
+                typed = d.typed,
+                waiting = self
+                    .live
+                    .text()
+                    .chars()
+                    .count()
+                    .saturating_sub(self.live.typed().chars().count()),
+                "dictation last 2 s"
+            );
+        }
         let ended = match self.vad.as_mut().map(|v| v.process(&frame.samples)) {
             Some(Some(VadEvent::SpeechStarted)) => {
                 let _ = self.events.try_send(EngineEvent::Speech(true));
@@ -681,6 +730,8 @@ impl Engine {
     async fn on_transcript(&mut self, ev: TranscriptEvent) {
         match ev {
             TranscriptEvent::Final(text) => {
+                self.diag.finals += 1;
+                self.diag.final_chars += text.chars().count();
                 let processed = ikk_text::process(&self.text_cfg, &text);
                 if processed.is_empty() {
                     return;
@@ -730,6 +781,9 @@ impl Engine {
                     .await;
             }
             other => {
+                if matches!(other, TranscriptEvent::Interim(_)) {
+                    self.diag.interims += 1;
+                }
                 let _ = self.events.send(EngineEvent::Transcript(other)).await;
             }
         }
@@ -742,6 +796,7 @@ impl Engine {
         }
         match self.live.flow_tick(1, &mut *self.sink) {
             Ok(n) if n > 0 => {
+                self.diag.typed += n;
                 let _ = self.events.try_send(EngineEvent::Typed(n));
             }
             Ok(_) => {}

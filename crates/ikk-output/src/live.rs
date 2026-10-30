@@ -12,7 +12,7 @@
 
 use std::ops::Range;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::guard::{AllowAllGuard, ForegroundGuard};
 use crate::queue::{TypingQueue, VisibleEdit};
@@ -45,6 +45,9 @@ pub struct LiveTyper {
     /// Pause before the next character; zero when text just arrived, so
     /// its first character appears at once.
     next_delay: Duration,
+    /// When the next character is due. A fixed point in time, so a writer
+    /// loop that wakes for other reasons does not restart the pause.
+    due: Instant,
 }
 
 impl Default for LiveTyper {
@@ -73,6 +76,7 @@ impl LiveTyper {
                 0x5EED_1234_ABCD_0001,
             ),
             next_delay: Duration::ZERO,
+            due: Instant::now(),
         }
     }
 
@@ -85,6 +89,16 @@ impl LiveTyper {
     /// How long the writer should wait before the next [`Self::flow_tick`].
     pub fn next_delay(&self) -> Duration {
         self.next_delay
+    }
+
+    /// When the next [`Self::flow_tick`] is due.
+    pub fn due(&self) -> Instant {
+        self.due
+    }
+
+    fn set_delay(&mut self, delay: Duration) {
+        self.next_delay = delay;
+        self.due = Instant::now() + delay;
     }
 
     pub fn flow_rate_ms(&self) -> u32 {
@@ -122,7 +136,7 @@ impl LiveTyper {
         self.reindex();
         // Nothing was waiting: the new text starts without a pause.
         if !self.flow_has_pending() {
-            self.next_delay = Duration::ZERO;
+            self.set_delay(Duration::ZERO);
         }
         self.drive(sink)?;
         Ok(id)
@@ -192,7 +206,8 @@ impl LiveTyper {
         sink.type_text(&chunk)?;
         self.typed.push_str(&chunk);
         if let (Some(last), Some(queue)) = (chunk.chars().last(), self.flow.as_ref()) {
-            self.next_delay = self.rhythm.delay_after(last, queue.pending_len());
+            let delay = self.rhythm.delay_after(last, queue.pending_len());
+            self.set_delay(delay);
         }
         Ok(n)
     }
@@ -212,7 +227,7 @@ impl LiveTyper {
         self.committed.clear();
         self.typed.clear();
         self.deferred = false;
-        self.next_delay = Duration::ZERO;
+        self.set_delay(Duration::ZERO);
         if let Some(q) = self.flow.as_mut() {
             q.discard();
         }
