@@ -6,9 +6,10 @@ use ikk_stt::*;
 use reqwest::multipart::{Form, Part};
 
 const URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
-/// Scribe gets the microphone's full bandwidth; downsampled audio
-/// recognised dialect noticeably worse.
-const RATE_HZ: u32 = 48_000;
+/// Pipeline rate: speech models work at 16 kHz internally, and a 48 kHz
+/// upload is three times the data per chunk, which on a slow line delays
+/// every result (tried 2026-10-30).
+const RATE_HZ: u32 = 16_000;
 // Scribe v1 is deprecated; v2 is its replacement (same endpoint).
 const DEFAULT_MODEL: &str = "scribe_v2";
 
@@ -42,7 +43,6 @@ impl Provider for ElevenLabs {
             batch: true,
             requires_network: true,
             own_audio: false,
-            required_sample_rate_hz: Some(RATE_HZ),
             ..Default::default()
         }
     }
