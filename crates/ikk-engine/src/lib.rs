@@ -253,8 +253,8 @@ struct Voice {
 }
 
 const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
-/// One diagnosis line per this interval while a session runs and
-/// something happened; quiet stretches are summarised every tenth one.
+/// One diagnosis line (debug level) per this interval while a session
+/// runs and something happened; quiet stretches every tenth one.
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(2);
 const QUIET_SUMMARIES: u32 = 10;
 const STANDBY_LEVEL_INTERVAL: Duration = Duration::from_secs(3);
@@ -712,8 +712,9 @@ impl Engine {
                 .count()
                 .saturating_sub(self.live.typed().chars().count());
             let something = d.interims + d.finals > 0 || d.typed > 0 || waiting > 0;
+            // Debug level: visible with RUST_LOG=ikk_engine=debug, quiet otherwise.
             if something || quiet + 1 >= QUIET_SUMMARIES {
-                info!(
+                tracing::debug!(
                     frames = d.frames,
                     audio_ms = d.audio_ms,
                     interims = d.interims,
