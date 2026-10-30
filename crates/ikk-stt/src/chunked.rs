@@ -1,8 +1,9 @@
 //! Chunked batch session: works with any provider that has `transcribe`.
 //!
-//! Audio is cut into chunks at pauses (`cut_segment`), at the first quiet
-//! moment once a chunk is longer than `chunk_interval`, or at a hard
-//! maximum. Chunks are numbered and sent the moment they exist: the number
+//! Audio is cut into chunks every `chunk_interval` (a timer, whatever is
+//! being said) and at pauses (`cut_segment`). The fixed interval is what
+//! keeps the first text coming within a couple of seconds; the recogniser
+//! copes with the cuts, as long experience with the same recipe shows. Chunks are numbered and sent the moment they exist: the number
 //! in flight follows the backlog, limited only by what the provider
 //! tolerates. That limit is learnt the way TCP does it: halved when the
 //! provider says "too many" (429), raised by one after a round of clean
@@ -28,12 +29,6 @@ const INITIAL_IN_FLIGHT: usize = 4;
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// Pauses before the second and third attempt of a chunk.
 const RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
-/// A chunk may grow to this many `chunk_interval`s before it is cut
-/// regardless of what is being said.
-const HARD_MAX_FACTOR: u32 = 4;
-/// A frame this far below the chunk's loudest frame counts as a gap
-/// between words: the place to cut without splitting one.
-const QUIET_BELOW_PEAK_DB: f32 = 20.0;
 /// Shorter chunks are clicks, not words.
 const MIN_CHUNK: Duration = Duration::from_millis(250);
 /// A chunk that never got louder than this holds no speech.
@@ -53,8 +48,7 @@ pub struct ChunkedBatchSession {
     buffer: Vec<AudioFrame>,
     buffered: Duration,
     peak_dbfs: f32,
-    soft_max: Duration,
-    hard_max: Duration,
+    interval: Duration,
     next_seq: u64,
     uploads: mpsc::Sender<(u64, AudioClip)>,
     events: mpsc::Receiver<TranscriptEvent>,
@@ -65,14 +59,13 @@ impl ChunkedBatchSession {
     pub fn new(provider: Arc<dyn Provider>, cfg: SessionConfig) -> Self {
         let (upload_tx, upload_rx) = mpsc::channel::<(u64, AudioClip)>(64);
         let (event_tx, event_rx) = mpsc::channel(64);
-        let soft_max = cfg.chunk_interval.max(Duration::from_millis(250));
+        let interval = cfg.chunk_interval.max(MIN_CHUNK);
         let worker = tokio::spawn(run_ordered(provider, cfg, upload_rx, event_tx));
         Self {
             buffer: Vec::new(),
             buffered: Duration::ZERO,
             peak_dbfs: f32::NEG_INFINITY,
-            soft_max,
-            hard_max: soft_max * HARD_MAX_FACTOR,
+            interval,
             next_seq: 0,
             uploads: upload_tx,
             events: event_rx,
@@ -218,13 +211,10 @@ async fn transcribe_chunk(
 #[async_trait::async_trait]
 impl StreamingSession for ChunkedBatchSession {
     async fn push(&mut self, frame: AudioFrame) -> Result<(), SttError> {
-        let level = frame.level_dbfs();
         self.buffered += frame.duration();
-        self.peak_dbfs = self.peak_dbfs.max(level);
-        // Between words the level drops well below the loudest syllable.
-        let quiet = level < self.peak_dbfs - QUIET_BELOW_PEAK_DB;
+        self.peak_dbfs = self.peak_dbfs.max(frame.level_dbfs());
         self.buffer.push(frame);
-        if self.buffered >= self.hard_max || (self.buffered >= self.soft_max && quiet) {
+        if self.buffered >= self.interval {
             self.rotate().await;
         }
         Ok(())
@@ -473,24 +463,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cuts_at_a_quiet_moment_after_the_interval_and_at_the_hard_maximum() {
+    async fn cuts_every_interval_and_at_pauses() {
         let fake = Arc::new(Fake::new(|_| 1));
         let mut s = open_session(fake.clone(), &config()).await.unwrap();
-        // 1.2 s of loud speech, then a quiet frame: cut there, not in a word.
-        for _ in 0..12 {
+        // 2.5 s of speech: one chunk at the 1 s interval, another at 2 s,
+        // the rest at the pause.
+        for _ in 0..25 {
             s.push(frame(100, 0.3)).await.unwrap();
         }
-        s.push(frame(100, 0.001)).await.unwrap();
-        // Loud without a gap: the hard maximum (4 s) cuts anyway.
-        for _ in 0..45 {
-            s.push(frame(100, 0.3)).await.unwrap();
-        }
+        s.cut_segment().await.unwrap();
         s.finish().await.unwrap();
         assert_eq!(
             drain(&mut s).await,
             vec![
-                TranscriptEvent::Final("1300ms".into()),
-                TranscriptEvent::Final("4000ms".into()),
+                TranscriptEvent::Final("1000ms".into()),
+                TranscriptEvent::Final("1000ms".into()),
                 TranscriptEvent::Final("500ms".into()),
             ]
         );

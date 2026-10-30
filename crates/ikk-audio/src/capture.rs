@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use crate::chain::{CaptureChain, ChainConfig};
 use crate::dsp::{downmix_mono, resample_linear, rms, rms_to_dbfs};
 use crate::mmcss::elevate_audio_thread;
-use crate::{AudioError, AudioFrame, Capture, CaptureConfig, InputDevice, PIPELINE_SAMPLE_RATE_HZ};
+use crate::{AudioError, AudioFrame, Capture, CaptureConfig, InputDevice};
 
 const REBUILD_MAX_ATTEMPTS: u32 = 10;
 const REBUILD_RETRY: Duration = Duration::from_millis(300);
@@ -273,26 +273,27 @@ fn run_capture(
         preamp_gain_db: cfg.preamp_gain_db,
         denoise: cfg.denoise,
         agc: cfg.agc,
-        agc_target_dbfs: -20.0,
-        sample_rate_hz: PIPELINE_SAMPLE_RATE_HZ,
+        agc_target_dbfs: -16.0,
+        sample_rate_hz: cfg.sample_rate_hz,
     });
+    let out_hz = cfg.sample_rate_hz.max(8_000);
     let mut samples_sent: u64 = 0;
     let mut rebuild_attempts = 0u32;
 
     let mut consume = |buf: Vec<f32>, open: &OpenStream| {
         let mono = downmix_mono(&buf, open.channels);
-        let res = resample_linear(&mono, open.rate_hz, PIPELINE_SAMPLE_RATE_HZ);
+        let res = resample_linear(&mono, open.rate_hz, out_hz);
         let processed = chain.process(&res);
         if processed.is_empty() {
             return;
         }
         let dbfs = rms_to_dbfs(rms(&processed));
         level.store(((dbfs + 200.0) * 1000.0).max(0.0) as u32, Ordering::Relaxed);
-        let offset = Duration::from_secs_f64(samples_sent as f64 / PIPELINE_SAMPLE_RATE_HZ as f64);
+        let offset = Duration::from_secs_f64(samples_sent as f64 / out_hz as f64);
         samples_sent += processed.len() as u64;
         let frame = AudioFrame {
             samples: processed.into_owned(),
-            sample_rate_hz: PIPELINE_SAMPLE_RATE_HZ,
+            sample_rate_hz: out_hz,
             offset,
         };
         if frame_tx.try_send(frame).is_err() {

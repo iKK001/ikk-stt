@@ -85,6 +85,14 @@ pub struct CaptureConfig {
     pub denoise: bool,
     pub agc: bool,
     pub ios_mode: IosSessionMode,
+    /// Rate the frames leave the capture at. The pipeline's 16 kHz unless
+    /// a provider wants the microphone's full bandwidth (48 kHz).
+    #[serde(default = "pipeline_rate")]
+    pub sample_rate_hz: u32,
+}
+
+fn pipeline_rate() -> u32 {
+    PIPELINE_SAMPLE_RATE_HZ
 }
 
 impl Default for CaptureConfig {
@@ -95,6 +103,7 @@ impl Default for CaptureConfig {
             denoise: false,
             agc: false,
             ios_mode: IosSessionMode::Default,
+            sample_rate_hz: PIPELINE_SAMPLE_RATE_HZ,
         }
     }
 }

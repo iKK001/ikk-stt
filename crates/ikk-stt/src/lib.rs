@@ -96,8 +96,8 @@ pub struct SessionConfig {
     pub endpointing: Duration,
     /// Provider-side utterance end signal (Deepgram `utterance_end_ms`).
     pub utterance_end: Duration,
-    /// Batch mode: a chunk longer than this is cut at the next gap between
-    /// words; chunks are transcribed in parallel and released in order.
+    /// Batch mode: chunk length (a timer; pauses cut as well); chunks are
+    /// transcribed in parallel and released in order.
     pub chunk_interval: Duration,
 }
 

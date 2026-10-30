@@ -82,6 +82,10 @@ pub enum IosSessionMode {
 pub struct SoundSettings {
     /// Software gain before any filter, 0..=24 dB.
     pub preamp_gain_db: f32,
+    /// Automatic gain: speech is brought to a steady level before it is
+    /// sent, whatever the microphone and distance.
+    #[serde(default = "default_true")]
+    pub agc: bool,
     pub denoise: Denoise,
     pub ios_session_mode: IosSessionMode,
     pub vad: VadSettings,
@@ -95,9 +99,13 @@ pub struct VadSettings {
     pub silence_duration_ms: u32,
     /// Silence this long starts a new paragraph / entry.
     pub long_pause_ms: u32,
-    /// Batch mode: a chunk longer than this is cut at the next gap between
-    /// words (at four times this length regardless).
+    /// Batch mode: audio is cut into chunks of this length (a timer),
+    /// and at pauses.
     pub chunk_interval_ms: u32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // --------------------------------------------------------------- microphone
@@ -128,6 +136,7 @@ impl Default for SoundSettings {
     fn default() -> Self {
         Self {
             preamp_gain_db: 0.0,
+            agc: true,
             denoise: Denoise::Off,
             ios_session_mode: IosSessionMode::Default,
             vad: VadSettings::default(),
@@ -150,7 +159,7 @@ impl Default for VadSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             providers: ProviderSettings::default(),
             sound: SoundSettings::default(),
             microphone: MicrophoneSettings::default(),
@@ -168,7 +177,7 @@ pub enum SettingsError {
 
 /// Current on-disk schema. Bump when a field changes meaning; `migrate`
 /// upgrades older files in place.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 impl Settings {
     pub fn to_json(&self) -> Result<String, SettingsError> {
@@ -198,6 +207,11 @@ impl Settings {
 
     /// Upgrade older schemas. Unknown newer versions are kept as they are.
     pub fn migrate(&mut self) {
+        // Up to v3: a short-lived default of 12 s chunks is taken back
+        // (files stamped v2 by that build included).
+        if self.schema_version < 3 && self.sound.vad.chunk_interval_ms == 12000 {
+            self.sound.vad.chunk_interval_ms = Self::default().sound.vad.chunk_interval_ms;
+        }
         if self.schema_version < SCHEMA_VERSION {
             self.schema_version = SCHEMA_VERSION;
         }
@@ -257,5 +271,27 @@ mod tests {
         s.providers.active = "voiceitt".into();
         assert_eq!(s.active_options().transfer, TransferMode::Batch);
         assert!(s.active_options().capitalisation);
+    }
+
+    #[test]
+    fn old_chunk_interval_is_migrated() {
+        for stamped in [1, 2] {
+            let mut s = Settings {
+                schema_version: stamped,
+                ..Default::default()
+            };
+            s.sound.vad.chunk_interval_ms = 12000;
+            s.migrate();
+            assert_eq!(s.sound.vad.chunk_interval_ms, 2000);
+            assert_eq!(s.schema_version, SCHEMA_VERSION);
+        }
+        // A value the user chose on purpose stays.
+        let mut s = Settings {
+            schema_version: 1,
+            ..Default::default()
+        };
+        s.sound.vad.chunk_interval_ms = 3000;
+        s.migrate();
+        assert_eq!(s.sound.vad.chunk_interval_ms, 3000);
     }
 }

@@ -14,10 +14,22 @@ pub fn downmix_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
 
 /// Linear-interpolation resampler. Good enough for speech to 16 kHz; no
 /// anti-alias filter, so only use for downsampling from ≤ 48 kHz voice input.
+/// Resample by linear interpolation. Going down (48 kHz microphones to
+/// the 16 kHz pipeline) the input is low-pass filtered first; without
+/// that, everything above the new Nyquist frequency folds back into the
+/// speech band as noise on exactly the sharp consonants a recogniser
+/// listens for.
 pub fn resample_linear(input: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
     if from_hz == to_hz || input.is_empty() || from_hz == 0 || to_hz == 0 {
         return input.to_vec();
     }
+    let filtered;
+    let input = if to_hz < from_hz {
+        filtered = anti_alias(input, from_hz, to_hz);
+        &filtered[..]
+    } else {
+        input
+    };
     let ratio = to_hz as f64 / from_hz as f64;
     let out_len = ((input.len() as f64) * ratio).round() as usize;
     let last = input.len() - 1;
@@ -31,6 +43,41 @@ pub fn resample_linear(input: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
         out.push(s0 + (s1 - s0) * frac);
     }
     out
+}
+
+/// Windowed-sinc low-pass at 0.45 × the new sample rate (31 taps,
+/// Blackman window): cheap, linear phase, about −60 dB in the stop band.
+fn anti_alias(input: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
+    const TAPS: usize = 31;
+    let cutoff = 0.45 * to_hz as f64 / from_hz as f64; // cycles per input sample
+    let mid = (TAPS / 2) as f64;
+    let mut taps = [0f32; TAPS];
+    let mut sum = 0f64;
+    for (i, tap) in taps.iter_mut().enumerate() {
+        let n = i as f64 - mid;
+        let sinc = if n == 0.0 {
+            2.0 * cutoff
+        } else {
+            (2.0 * std::f64::consts::PI * cutoff * n).sin() / (std::f64::consts::PI * n)
+        };
+        let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (TAPS - 1) as f64).cos()
+            + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / (TAPS - 1) as f64).cos();
+        *tap = (sinc * w) as f32;
+        sum += sinc * w;
+    }
+    for tap in taps.iter_mut() {
+        *tap /= sum as f32;
+    }
+    let half = TAPS / 2;
+    let last = input.len() - 1;
+    (0..input.len())
+        .map(|i| {
+            taps.iter()
+                .enumerate()
+                .map(|(k, t)| t * input[(i + k).saturating_sub(half).min(last)])
+                .sum()
+        })
+        .collect()
 }
 
 /// Root mean square of a block (linear amplitude).
@@ -93,5 +140,23 @@ mod tests {
         let mut s = vec![0.5, -0.9];
         apply_gain(&mut s, db_to_linear(12.0));
         assert_eq!(s, vec![1.0, -1.0]);
+    }
+
+    #[test]
+    fn downsampling_removes_what_would_alias() {
+        // A 20 kHz tone at 48 kHz has no place in a 16 kHz signal; after
+        // resampling it must be nearly gone. A 1 kHz tone must survive.
+        let n = 4800;
+        let tone = |f: f32| -> Vec<f32> {
+            (0..n)
+                .map(|i| (2.0 * std::f32::consts::PI * f * i as f32 / 48_000.0).sin())
+                .collect()
+        };
+        let high = resample_linear(&tone(20_000.0), 48_000, 16_000);
+        let low = resample_linear(&tone(1_000.0), 48_000, 16_000);
+        let core = |v: &[f32]| rms(&v[v.len() / 4..v.len() * 3 / 4]);
+        assert!(core(&high) < 0.02, "alias left: {}", core(&high));
+        assert!(core(&low) > 0.6, "speech band damaged: {}", core(&low));
+        assert_eq!(low.len(), 1600);
     }
 }

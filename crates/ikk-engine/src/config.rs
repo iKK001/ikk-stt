@@ -43,12 +43,14 @@ pub fn start_config(settings: &Settings) -> StartConfig {
         device_id: settings.microphone.device_id.clone(),
         preamp_gain_db: settings.sound.preamp_gain_db,
         denoise: settings.sound.denoise != Denoise::Off,
-        agc: false,
+        agc: settings.sound.agc,
         ios_mode: match settings.sound.ios_session_mode {
             SettingsIosMode::Measurement => IosSessionMode::Measurement,
             SettingsIosMode::Default => IosSessionMode::Default,
             SettingsIosMode::VoiceChat => IosSessionMode::VoiceChat,
         },
+        // The engine raises this for providers that want full bandwidth.
+        sample_rate_hz: ikk_audio::PIPELINE_SAMPLE_RATE_HZ,
     };
     let vad_mode = if settings.sound.vad.silence_threshold_db > -35.0 {
         VadMode::Aggressive

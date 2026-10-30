@@ -632,6 +632,9 @@ impl Engine {
         // loop reopens the listener and the button never left "waiting".
         let standby_closed = !caps.own_audio && self.take_standby();
         // System recognizers record the microphone themselves.
+        // Providers that want the microphone's full bandwidth get it; the
+        // others get the pipeline rate (their wire rate anyway).
+        cfg.capture.sample_rate_hz = caps.required_sample_rate_hz.unwrap_or(PIPELINE_SAMPLE_RATE_HZ);
         let capture = if caps.own_audio {
             None
         } else {
@@ -646,7 +649,7 @@ impl Engine {
                 return Err(e.into());
             }
         };
-        let mut vad = VoiceActivityDetector::new(cfg.vad_mode, PIPELINE_SAMPLE_RATE_HZ);
+        let mut vad = VoiceActivityDetector::new(cfg.vad_mode, cfg.capture.sample_rate_hz);
         vad.set_pause_duration_ms(cfg.pause.as_millis().max(100) as u32);
         self.capture = capture;
         self.session = Some(session);
@@ -663,8 +666,17 @@ impl Engine {
 
     async fn on_frame(&mut self, frame: ikk_audio::AudioFrame) {
         if let Some(voice) = self.voice.as_mut() {
-            if frame.sample_rate_hz == ikk_wake::SAMPLE_RATE_HZ {
-                if let Some(utterance) = voice.segmenter.push(&frame.samples) {
+            // The stop word listener works at 16 kHz whatever the session's rate.
+            let wake_samples;
+            let samples = if frame.sample_rate_hz == ikk_wake::SAMPLE_RATE_HZ {
+                &frame.samples
+            } else {
+                wake_samples =
+                    ikk_audio::dsp::resample_linear(&frame.samples, frame.sample_rate_hz, ikk_wake::SAMPLE_RATE_HZ);
+                &wake_samples
+            };
+            {
+                if let Some(utterance) = voice.segmenter.push(samples) {
                     let judgement = voice.spotter.judge(&utterance);
                     let heard = judgement.command;
                     let _ = self.events.try_send(EngineEvent::VoiceHeard {

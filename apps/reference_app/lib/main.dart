@@ -897,6 +897,16 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
+              title: const Text('Automatic gain'),
+              subtitle: const Text('Brings your voice to a steady level before it is sent'),
+              value: sound['agc'] as bool? ?? true,
+              onChanged: (b) {
+                sound['agc'] = b;
+                _saveSettings();
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
               title: const Text('Noise reduction (RNNoise)'),
               value: sound['denoise'] != 'Off',
               onChanged: (b) {
