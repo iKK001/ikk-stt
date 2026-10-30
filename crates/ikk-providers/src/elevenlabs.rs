@@ -9,6 +9,17 @@ const URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 const RATE_HZ: u32 = 16_000;
 const DEFAULT_MODEL: &str = "scribe_v1";
 
+/// Scribe's `language_code` for a settings language (ISO-639-3). Scribe has
+/// no code for Swiss German; its German model writes Swiss speech as
+/// Standard German, like the other providers do. Empty = let Scribe detect.
+fn scribe_language(iso639_3: &str) -> Option<String> {
+    match iso639_3.trim() {
+        "" => None,
+        "gsw" => Some("deu".into()),
+        other => Some(other.to_string()),
+    }
+}
+
 pub struct ElevenLabs;
 
 fn err(e: impl ToString) -> SttError {
@@ -55,8 +66,8 @@ impl Provider for ElevenLabs {
                     .mime_str("audio/wav")
                     .map_err(err)?,
             );
-        if !cfg.language.trim().is_empty() {
-            form = form.text("language_code", cfg.language.trim().to_string());
+        if let Some(code) = scribe_language(&cfg.language) {
+            form = form.text("language_code", code);
         }
         let r = crate::http::client()
             .post(URL)
@@ -80,5 +91,17 @@ impl Provider for ElevenLabs {
 
     async fn stream(&self, _cfg: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError> {
         Err(SttError::Unsupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swiss_german_goes_to_the_german_model() {
+        assert_eq!(scribe_language("gsw").as_deref(), Some("deu"));
+        assert_eq!(scribe_language("deu").as_deref(), Some("deu"));
+        assert_eq!(scribe_language(" "), None);
     }
 }
