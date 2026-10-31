@@ -3,5 +3,6 @@ library;
 
 export 'src/rust/api/core.dart';
 export 'src/rust/api/engine.dart';
+export 'src/rust/api/training.dart';
 export 'src/rust/api/voice.dart';
 export 'src/rust/frb_generated.dart' show RustLib;

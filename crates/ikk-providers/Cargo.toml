@@ -36,7 +36,8 @@ ikk-stt-windows.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
-default = ["deepgram", "voiceitt", "openai", "elevenlabs", "azure"]
+default = ["deepgram", "voiceitt", "openai", "elevenlabs", "azure", "languagetool"]
+languagetool = []
 azure = []
 deepgram = []
 voiceitt = []

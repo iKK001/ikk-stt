@@ -6,8 +6,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:ikk_core_flutter/ikk_core_flutter.dart';
@@ -72,6 +72,13 @@ class _HomeScreenState extends State<HomeScreen> {
   final _keyCtl = TextEditingController();
   // Azure keys belong to a region (where the Speech resource was created).
   final _regionCtl = TextEditingController(text: 'switzerlandnorth');
+  final _replayCtl = TextEditingController();
+  final _vocabCtl = TextEditingController();
+  final _vocabFocus = FocusNode();
+  bool get _vocabFocused => _vocabFocus.hasFocus;
+  bool _vocabDirty = false;
+  Timer? _vocabTimer;
+  static const _replayPrefix = 'file:';
   bool _keyStored = false;
   // Last four characters of the stored key, so the user can tell which key
   // it is; null when none is stored. Set when the secure store failed.
@@ -96,13 +103,22 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _speech = false;
   String _interim = '';
   final List<String> _finals = [];
+  final _trainCtl = TextEditingController();
+  // Tap-to-teach: selected stretch of the last recognised text.
+  int? _teachFrom;
+  int? _teachTo;
+  int _teachFinals = -1;
   String? _fallbackReason;
   String _fallbackText = '';
   String? _error;
+  String _suggestion = '';
 
   @override
   void initState() {
     super.initState();
+    _vocabFocus.addListener(() {
+      if (!_vocabFocus.hasFocus) _saveVocab();
+    });
     _init();
   }
 
@@ -123,6 +139,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _mics = await listMics();
     } catch (_) {}
     await _loadKey();
+    await _loadLtKey();
     _events = _engine.events().listen(_onEvent);
     _engine.rememberSettings(settingsJson: jsonEncode(_settings));
     await _loadVoice();
@@ -219,8 +236,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveSettings() async {
     final json = jsonEncode(_settings);
-    await settingsSave(path: _settingsPath, json: json);
-    _engine.rememberSettings(settingsJson: json);
+    try {
+      await settingsSave(path: _settingsPath, json: json);
+      _engine.rememberSettings(settingsJson: json);
+    } catch (e) {
+      _snack('Settings not saved: $e');
+      return;
+    }
     _applyVoice();
     setState(() {});
   }
@@ -252,7 +274,15 @@ class _HomeScreenState extends State<HomeScreen> {
           if (t.containsKey('Final')) {
             _interim = '';
             _finals.add(t['Final'] as String);
+            // Test builds: the typed text in the device log (adb logcat, tag flutter).
+            if (kDebugMode) debugPrint('ikk final [${DateTime.now().toIso8601String()}]: ${t['Final']}');
             if (_fallbackReason != null) _fallbackText = '${_fallbackText.trimRight()} ${t['Final']}'.trim();
+          }
+          if (t.containsKey('Replace')) {
+            // Live correction or batch pass: the text so far, corrected.
+            _finals
+              ..clear()
+              ..add(t['Replace'] as String);
           }
           if (t.containsKey('Error')) _error = 'Provider: ${t['Error']}';
         case 'ConsentRequired':
@@ -279,6 +309,8 @@ class _HomeScreenState extends State<HomeScreen> {
           _snack('Inserted into target');
         case 'Error':
           _error = v as String;
+        case 'Suggestion':
+          _suggestion = v as String;
         case 'Command':
           _snack('Command: $v');
         default:
@@ -288,16 +320,21 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _askConsent(Map<String, dynamic> r) async {
-    final uses = (r['uses'] as List).join(', ');
+    final usesList = (r['uses'] as List).cast<String>();
+    final uses = usesList.join(', ');
+    // A text checker gets the dictated text, not the recordings.
+    final textOnly = usesList.every((u) => u == 'Correction');
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Send audio to ${r['name']}?'),
+        title: Text(textOnly ? 'Send text to ${r['name']}?' : 'Send audio to ${r['name']}?'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Your recordings leave this device and are processed by ${r['name']} for: $uses.'),
+            Text(textOnly
+                ? 'Your dictated text leaves this device and is checked by ${r['name']} for: $uses.'
+                : 'Your recordings leave this device and are processed by ${r['name']} for: $uses.'),
             const SizedBox(height: 12),
             TextButton(
               onPressed: () => launchUrl(Uri.parse(r['privacy_url'] as String)),
@@ -633,6 +670,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _error = null;
       _finals.clear();
+      _suggestion = '';
       _fallbackReason = null;
       _fallbackText = '';
     });
@@ -670,7 +708,12 @@ class _HomeScreenState extends State<HomeScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _voiceModeSection(),
+          const SizedBox(height: 16),
           _providerSection(),
+          _trainingSection(),
+          const SizedBox(height: 16),
+          _correctionSection(),
           const SizedBox(height: 16),
           _soundSection(),
           const SizedBox(height: 16),
@@ -686,6 +729,16 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: listening ? _stop : _start,
               icon: Icon(listening ? Icons.stop : Icons.mic),
               label: Text(listening ? 'Stop' : 'Dictate', style: const TextStyle(fontSize: 20)),
+            ),
+          ),
+          const SizedBox(height: 6),
+          // What the next session will actually use, so stale settings
+          // never go unnoticed.
+          Center(
+            child: Text(
+              _activeSummary(),
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
           const SizedBox(height: 8),
@@ -725,9 +778,292 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// The training-mode settings (`text.training`), created when missing.
+  Map<String, dynamic> _training() {
+    final text = (_settings['text'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+    final t = (text['training'] ??= <String, dynamic>{'enabled': true, 'words': <dynamic>[]}) as Map<String, dynamic>;
+    t['words'] ??= <dynamic>[];
+    t['enabled'] ??= true;
+    return t;
+  }
+
+  static String _normWord(String s) => s.toLowerCase().replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
+
+  /// Store what the recogniser heard for [word] (nothing when it heard
+  /// the word itself).
+  void _learn(String word, String heard) {
+    final words = _training()['words'] as List;
+    var entry = words.cast<Map<String, dynamic>>().where((e) => _normWord(e['word'] as String) == _normWord(word)).firstOrNull;
+    if (entry == null) {
+      entry = <String, dynamic>{'word': word, 'heard': <dynamic>[], 'always': false};
+      words.add(entry);
+    }
+    final h = heard.trim().replaceAll(RegExp(r'[.,!?;:]+$'), '');
+    if (h.isEmpty || _normWord(h) == _normWord(word)) return;
+    final forms = (entry['heard'] ??= <dynamic>[]) as List;
+    final same = forms.cast<Map<String, dynamic>>().where((f) => _normWord(f['text'] as String) == _normWord(h)).firstOrNull;
+    if (same != null) {
+      same['count'] = ((same['count'] as num?) ?? 0) + 1;
+    } else {
+      forms.add(<String, dynamic>{'text': h, 'count': 1});
+    }
+  }
+
+  /// Say [word] [takes] times; each take goes to the recogniser without
+  /// hints and the answers become the word's heard forms.
+  Future<void> _trainWord(String word, {int takes = 5}) async {
+    if (word.isEmpty) return;
+    String key = '';
+    try {
+      key = await _secure.read(key: 'api_key:$_provider') ?? '';
+    } catch (_) {}
+    if (key.isEmpty) {
+      _snack('No API key for $_provider – enter it first.');
+      return;
+    }
+    final denied = await ensureMicPermission();
+    if (denied != null) {
+      _snack(denied);
+      return;
+    }
+    // Nothing may dictate while the takes are recorded.
+    _engine.setVoiceTraining(active: true);
+    final step = ValueNotifier<_VoiceStep>(_VoiceStep('Get ready to say «$word» …', _StepKind.info));
+    var cancelled = false;
+    final heardAll = <String>[];
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Text('Training «$word»'),
+        content: ValueListenableBuilder<_VoiceStep>(
+          valueListenable: step,
+          builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(st.icon, size: 48, color: st.color(Theme.of(ctx).colorScheme)),
+            const SizedBox(height: 12),
+            Text(st.text, style: Theme.of(ctx).textTheme.titleMedium, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            if (st.kind == _StepKind.listening) const LinearProgressIndicator(),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    ).then((_) => cancelled = true);
+    Future<void> show(String text, _StepKind kind, [int ms = 0]) async {
+      step.value = _VoiceStep(text, kind);
+      if (ms > 0) await Future<void>.delayed(Duration(milliseconds: ms));
+    }
+
+    try {
+      await show('Get ready …', _StepKind.info, 1200);
+      var n = 1;
+      var failures = 0;
+      while (!cancelled && n <= takes) {
+        await show('Say «$word» now ($n of $takes).', _StepKind.listening);
+        try {
+          final heard = await trainingTake(settingsJson: jsonEncode(_settings), credential: key, timeoutSecs: 10);
+          if (cancelled) break;
+          heardAll.add(heard);
+          _learn(word, heard);
+          await show(heard.isEmpty ? 'Heard nothing in that take.' : 'Heard: „$heard“ ($n of $takes)', _StepKind.ok, 1400);
+          n++;
+        } catch (e) {
+          if (cancelled) break;
+          failures++;
+          await show('Didn\'t catch that.\n($e)', _StepKind.retry, 1800);
+          if (failures >= 3) break;
+        }
+      }
+      if (heardAll.isNotEmpty) {
+        await _saveSettings();
+        final forms = heardAll.where((h) => h.isNotEmpty && _normWord(h) != _normWord(word)).toSet();
+        final hits = heardAll.where((h) => _normWord(h) == _normWord(word)).length;
+        await show(
+          forms.isEmpty
+              ? '✓ «$word» was recognised $hits of ${heardAll.length} times as it is.'
+              : '✓ Learned. «$word» is heard as:\n${forms.join(', ')}\n\nFrom now on these are written as «$word».',
+          _StepKind.ok,
+          3500,
+        );
+      }
+    } finally {
+      _engine.setVoiceTraining(active: false);
+      if (!cancelled && mounted) Navigator.of(context, rootNavigator: true).pop();
+      _applyVoice();
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// Teach from the last recognised text: tap the first and the last wrong
+  /// word, enter (or pick) the right one, Teach. The tapped stretch becomes
+  /// a heard form of the word — as it comes back inside a sentence, which
+  /// differs from the word said alone.
+  List<Widget> _teachFromText(List<Map<String, dynamic>> learned) {
+    if (_finals.isEmpty) return const [];
+    if (_teachFinals != _finals.length) {
+      _teachFinals = _finals.length;
+      _teachFrom = _teachTo = null;
+    }
+    final all = _finals.join(' ').split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final words = all.length > 40 ? all.sublist(all.length - 40) : all;
+    final from = _teachFrom, to = _teachTo;
+    final selected = from == null || to == null ? '' : words.sublist(from, to + 1).join(' ');
+    return [
+      const SizedBox(height: 8),
+      Text('Teach from the last text', style: Theme.of(context).textTheme.titleSmall),
+      const Text('Tap the first and the last wrong word, then enter the right word above and press Teach.'),
+      Wrap(
+        spacing: 4,
+        runSpacing: 0,
+        children: [
+          for (var i = 0; i < words.length; i++)
+            FilterChip(
+              label: Text(words[i]),
+              selected: from != null && to != null && i >= from && i <= to,
+              onSelected: (_) => setState(() {
+                if (from == null || to == null || i < from || (from != to)) {
+                  _teachFrom = _teachTo = i;
+                } else {
+                  _teachTo = i;
+                }
+              }),
+            ),
+        ],
+      ),
+      if (selected.isNotEmpty)
+        Row(children: [
+          Expanded(child: Text('„$selected“ → «${_trainCtl.text.trim().isEmpty ? '…' : _trainCtl.text.trim()}»')),
+          FilledButton.tonal(
+            onPressed: _trainCtl.text.trim().isEmpty
+                ? null
+                : () {
+                    final word = _trainCtl.text.trim();
+                    _learn(word, selected);
+                    _saveSettings();
+                    _snack('«$word» is now written for „$selected“');
+                    setState(() => _teachFrom = _teachTo = null);
+                  },
+            child: const Text('Teach'),
+          ),
+        ]),
+      if (selected.isNotEmpty && learned.isNotEmpty)
+        Wrap(
+          spacing: 4,
+          children: [
+            for (final e in learned)
+              ActionChip(
+                label: Text(e['word'] as String),
+                onPressed: () => setState(() => _trainCtl.text = e['word'] as String),
+              ),
+          ],
+        ),
+    ];
+  }
+
+  Widget _trainingSection() {
+    final t = _training();
+    final words = (t['words'] as List).cast<Map<String, dynamic>>();
+    final hasKey = _keyTail != null;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Training', style: Theme.of(context).textTheme.titleMedium),
+            const Text(
+              'A word the recogniser never gets right: enter it once, say it five times. What the recogniser hears '
+              'for it is remembered, and written as the word wherever the recogniser was unsure. A similar word it '
+              'hears clearly stays as it is. Stays on this device.',
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Use learned words'),
+              value: t['enabled'] as bool? ?? true,
+              onChanged: (b) {
+                t['enabled'] = b;
+                _saveSettings();
+                setState(() {});
+              },
+            ),
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _trainCtl,
+                  decoration: const InputDecoration(labelText: 'Word to train', hintText: 'e.g. Bildschirmtastatur'),
+                  onChanged: (_) => setState(() {}),
+                  onSubmitted: (_) => hasKey ? _trainWord(_trainCtl.text.trim()) : null,
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: hasKey && _state != 'Listening' ? () => _trainWord(_trainCtl.text.trim()) : null,
+                icon: const Icon(Icons.mic),
+                label: const Text('Say it 5×'),
+              ),
+            ]),
+            if (!hasKey) const Padding(padding: EdgeInsets.only(top: 4), child: Text('Enter the API key of the recogniser first.')),
+            ..._teachFromText(words),
+            for (final e in words)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text(e['word'] as String),
+                subtitle: Text(
+                  ((e['heard'] as List?) ?? const []).isEmpty
+                      ? 'recognised as it is so far'
+                      : 'heard as: ${((e['heard'] as List).cast<Map<String, dynamic>>()).map((f) => '${f['text']} ×${f['count'] ?? 1}').join(', ')}',
+                ),
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Replace even when heard clearly'),
+                    subtitle: const Text('Off: a heard form is replaced only where the recogniser was unsure, so a similar real word '
+                        'still gets through. On: replaced always – only for a word whose mishearings are never real words.'),
+                    value: e['always'] as bool? ?? false,
+                    onChanged: (b) {
+                      e['always'] = b;
+                      _saveSettings();
+                      setState(() {});
+                    },
+                  ),
+                  Row(children: [
+                    TextButton.icon(
+                      onPressed: hasKey && _state != 'Listening' ? () => _trainWord(e['word'] as String) : null,
+                      icon: const Icon(Icons.mic),
+                      label: const Text('Say it again'),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {
+                        (t['words'] as List).remove(e);
+                        _saveSettings();
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Remove'),
+                    ),
+                  ]),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _providerSection() {
     final opts = (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
-    final batch = opts['transfer'] == 'Batch';
+    final batch = (opts['transfer'] ?? 'Batch') == 'Batch';
+    final vocab = ((opts['keywords'] as List?) ?? const []).join(', ');
+    if (_vocabCtl.text != vocab && !_vocabFocused) _vocabCtl.text = vocab;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -758,13 +1094,38 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Batch upload (higher accuracy, slower)'),
+              title: const Text('Batch upload'),
+              subtitle: const Text('Chunks cut between words instead of a live stream: more accurate, a little later. Needed for slow or unclear speech.'),
               value: batch,
               onChanged: (b) {
                 final o = Map<String, dynamic>.from(opts);
                 o['transfer'] = b ? 'Batch' : 'Streaming';
                 (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
                 _saveSettings();
+              },
+            ),
+            TextField(
+              controller: _vocabCtl,
+              focusNode: _vocabFocus,
+              decoration: const InputDecoration(
+                labelText: 'Personal vocabulary',
+                helperText: 'Names, places, special words, separated by commas. The recogniser is told to expect them '
+                    '(OpenAI prompt, Deepgram keywords).',
+              ),
+              onChanged: (v) {
+                final o = Map<String, dynamic>.from(opts);
+                o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
+                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+                _vocabDirty = true;
+                // Saved while typing, so no Enter or click elsewhere is needed.
+                _vocabTimer?.cancel();
+                _vocabTimer = Timer(const Duration(milliseconds: 600), _saveVocab);
+              },
+              onSubmitted: (_) => _saveVocab(),
+              onEditingComplete: _saveVocab,
+              onTapOutside: (_) {
+                _vocabFocus.unfocus();
+                _saveVocab();
               },
             ),
             _keyStatus(),
@@ -876,6 +1237,124 @@ class _HomeScreenState extends State<HomeScreen> {
     ]);
   }
 
+  // ------------------------------------------------ live correction
+  // LanguageTool account (optional): "e-mail:key", stored like a provider key.
+  final _ltUserCtl = TextEditingController();
+  final _ltKeyCtl = TextEditingController();
+  bool _ltStored = false;
+  String? _ltTail;
+
+  Future<void> _loadLtKey() async {
+    try {
+      final k = await _secure.read(key: 'api_key:languagetool') ?? '';
+      _ltStored = k.isNotEmpty;
+      _ltTail = k.isEmpty ? null : k.substring(k.length > 4 ? k.length - 4 : 0);
+      final i = k.lastIndexOf(':');
+      if (i > 0) _ltUserCtl.text = k.substring(0, i);
+      if (k.isNotEmpty) _engine.setCredential(provider: 'languagetool', secret: k);
+    } catch (_) {}
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveLtKey() async {
+    final user = _ltUserCtl.text.trim();
+    final key = _ltKeyCtl.text.trim();
+    if (user.isEmpty || key.isEmpty) {
+      _snack('E-mail and API key are both needed');
+      return;
+    }
+    final k = '$user:$key';
+    try {
+      _engine.setCredential(provider: 'languagetool', secret: k);
+      await _secure.write(key: 'api_key:languagetool', value: k);
+      _ltKeyCtl.text = '';
+      await _loadLtKey();
+    } catch (e) {
+      _snack('Saving failed: $e');
+    }
+  }
+
+  Future<void> _removeLtKey() async {
+    try {
+      await _secure.delete(key: 'api_key:languagetool');
+      _engine.setCredential(provider: 'languagetool', secret: '');
+    } catch (_) {}
+    _ltUserCtl.text = '';
+    await _loadLtKey();
+  }
+
+  Widget _correctionSection() {
+    final on = (_settings['text'] as Map<String, dynamic>?)?['live_correction'] as bool? ?? false;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Live correction', style: Theme.of(context).textTheme.titleMedium),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Correct grammar and spelling while dictating'),
+              subtitle: InkWell(
+                onTap: () => launchUrl(Uri.parse('https://languagetool.org')),
+                child: const Text('Checked by LanguageTool (languagetool.org) with your own account; the dictated text is sent there'),
+              ),
+              value: on,
+              onChanged: (b) {
+                (_settings['text'] ??= <String, dynamic>{})['live_correction'] = b;
+                _saveSettings();
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Write corrections into the text'),
+              subtitle: const Text('Off: corrections are only shown here as a suggestion, nothing typed is deleted. '
+                  'On: the typed text is replaced by the corrected one.'),
+              value: (_settings['text'] as Map<String, dynamic>?)?['correction_rewrites'] as bool? ?? false,
+              onChanged: on
+                  ? (b) {
+                      (_settings['text'] ??= <String, dynamic>{})['correction_rewrites'] = b;
+                      _saveSettings();
+                      setState(() {});
+                    }
+                  : null,
+            ),
+            if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Suggested: $_suggestion')),
+            Row(children: [
+              Icon(_ltStored ? Icons.check_circle : Icons.info_outline,
+                  size: 18, color: _ltStored ? Colors.green : Colors.grey),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(_ltStored
+                    ? 'LanguageTool account found in $_keyStoreName: ••••$_ltTail (own limits)'
+                    : 'No account yet: enter your LanguageTool e-mail and API key below, then corrections start'),
+              ),
+              if (_ltStored) TextButton(onPressed: _removeLtKey, child: const Text('Remove')),
+            ]),
+            TextField(
+              controller: _ltUserCtl,
+              decoration: const InputDecoration(labelText: 'LanguageTool account e-mail'),
+            ),
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _ltKeyCtl,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'API key',
+                    hintText: 'From languagetool.org > Account > API',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(onPressed: _saveLtKey, child: const Text('Save')),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _soundSection() {
     final sound = _settings['sound'] as Map<String, dynamic>;
     final vad = sound['vad'] as Map<String, dynamic>;
@@ -907,6 +1386,16 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
+              title: const Text('Steady-noise filter (ventilator, fan)'),
+              subtitle: const Text('Learns the room\'s steady noise from the pauses and takes it out under the words. Leaves the voice alone.'),
+              value: sound['noise_profile'] != false,
+              onChanged: (b) {
+                sound['noise_profile'] = b;
+                _saveSettings();
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
               title: const Text('Noise reduction (RNNoise)'),
               value: sound['denoise'] != 'Off',
               onChanged: (b) {
@@ -914,14 +1403,96 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            const SizedBox(height: 8),
+            const Text('Speech rhythm'),
+            const SizedBox(height: 4),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'fluent', label: Text('Fluent'), tooltip: 'Text appears every 2 s; a 0.9 s pause ends a chunk'),
+                ButtonSegment(value: 'words', label: Text('Word by word'), tooltip: 'Agreed words only: the last 12 s are transcribed every second and a word is typed once three of the last four readings agree on it, never changed. Batch upload, noise reduction off.'),
+              ],
+              selected: {_rhythmPreset(vad)},
+              emptySelectionAllowed: true,
+              showSelectedIcon: false,
+              onSelectionChanged: (sel) {
+                if (sel.isEmpty) return;
+                setState(() {
+                  final words = sel.first == 'words';
+                  vad['chunk_interval_ms'] = words ? 3000 : 2000;
+                  vad['silence_duration_ms'] = words ? 4000 : 900;
+                  vad['refine'] = words;
+                  vad['type_quick_text'] = true;
+                  vad['agreement'] = words;
+                  // Measured on impaired speech: RNNoise removes the soft
+                  // consonants and makes every provider worse.
+                  if (words) sound['denoise'] = 'Off';
+                  // Live streams of unclear speech come back empty or as
+                  // word salad; chunks between words carry the context.
+                  final options = _settings['providers']['options'] as Map<String, dynamic>;
+                  final o = Map<String, dynamic>.from(options[_provider] as Map<String, dynamic>? ?? {});
+                  o['transfer'] = words ? 'Batch' : 'Streaming';
+                  options[_provider] = o;
+                });
+                _saveSettings();
+              },
+            ),
+            _stepper(
+              label: 'Chunk length',
+              value: (vad['chunk_interval_ms'] as num) / 1000,
+              min: 1,
+              max: 60,
+              step: 1,
+              unit: 's',
+              onChanged: (v) => vad['chunk_interval_ms'] = (v * 1000).round(),
+            ),
             _stepper(
               label: 'Pause',
               value: vad['silence_duration_ms'] as num,
               min: 300,
-              max: 3000,
+              max: 6000,
               step: 100,
               unit: 'ms',
               onChanged: (v) => vad['silence_duration_ms'] = v.round(),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Agreed words only (no corrections)'),
+              subtitle: const Text('The last 12 s are transcribed every second; a word is typed once three of the last four readings agree on it, '
+                  'and never changed. The rest comes at the pause. Measured 100% with OpenAI (whisper-1) and your phrases in the vocabulary.'),
+              value: vad['agreement'] == true,
+              onChanged: (b) {
+                vad['agreement'] = b;
+                _saveSettings();
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Re-check whole thoughts'),
+              subtitle: const Text('After a pause the whole thought is transcribed again in one piece and replaces the quick text. '
+                  'Needed for slow or unclear speech; the recording is sent twice.'),
+              value: vad['refine'] == true,
+              onChanged: (b) {
+                vad['refine'] = b;
+                _saveSettings();
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Type the quick text too'),
+              subtitle: const Text('Off: the quick chunks only show up here while you speak and each thought is typed once, when it is known. '
+                  'On: they are typed at once and replaced afterwards (fluent speakers).'),
+              value: vad['type_quick_text'] == true,
+              onChanged: vad['refine'] == true
+                  ? (b) {
+                      vad['type_quick_text'] = b;
+                      _saveSettings();
+                    }
+                  : null,
+            ),
+            Text(
+              'Chunks are cut only between words, at the first gap after the chunk length; a pause always ends one. '
+              'Quick chunks give fast text, the whole thought gives the right text.',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
         ),
@@ -929,10 +1500,119 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Master switch between the released pipeline for clear speech and the
+  /// impaired-voice setup under development. Each side writes its whole
+  /// profile, so later experiments change only the impaired side.
+  Widget _voiceModeSection() {
+    final sound = _settings['sound'] as Map<String, dynamic>;
+    final impaired = sound['impaired_voice'] != false;
+    return Card(
+      child: SwitchListTile(
+        title: const Text('Impaired voice'),
+        subtitle: Text(impaired
+            ? 'On: agreed words only, batch upload, steady-noise filter, 4 s pause — the setup for slow or unclear speech (in development).'
+            : 'Off: the released setup for clear speech (v0.0.1(51)): quick 2 s chunks, 0.9 s pause, live stream where available, no filters.'),
+        value: impaired,
+        onChanged: (b) {
+          setState(() => _applyVoiceProfile(b));
+          _saveSettings();
+        },
+      ),
+    );
+  }
+
+  void _applyVoiceProfile(bool impaired) {
+    final sound = _settings['sound'] as Map<String, dynamic>;
+    final vad = sound['vad'] as Map<String, dynamic>;
+    final options = _settings['providers']['options'] as Map<String, dynamic>;
+    final o = Map<String, dynamic>.from(options[_provider] as Map<String, dynamic>? ?? {});
+    sound['impaired_voice'] = impaired;
+    // Common to both: automatic gain, no RNNoise, no tone shaping.
+    sound['agc'] = true;
+    sound['denoise'] = 'Off';
+    sound['gate'] = false;
+    sound['highpass_hz'] = 0.0;
+    sound['presence_db'] = 0.0;
+    sound['compressor'] = false;
+    sound['trill_filler'] = false;
+    if (impaired) {
+      sound['noise_profile'] = true;
+      vad['chunk_interval_ms'] = 3000;
+      vad['silence_duration_ms'] = 4000;
+      vad['refine'] = true;
+      vad['type_quick_text'] = true;
+      vad['agreement'] = true;
+      vad['agreement_step_ms'] = 1000;
+      vad['agreement_windows'] = 4;
+      o['transfer'] = 'Batch';
+    } else {
+      // v0.0.1(51), the release for clear speech.
+      sound['noise_profile'] = false;
+      vad['chunk_interval_ms'] = 2000;
+      vad['silence_duration_ms'] = 900;
+      vad['refine'] = false;
+      vad['agreement'] = false;
+      o['transfer'] = 'Streaming';
+    }
+    options[_provider] = o;
+  }
+
+  /// One line with the settings the next session runs with.
+  String _activeSummary() {
+    final opts = (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
+    final sound = _settings['sound'] as Map<String, dynamic>;
+    final vad = sound['vad'] as Map<String, dynamic>;
+    final mic = (_settings['microphone'] as Map<String, dynamic>)['device_label'] as String? ?? 'default microphone';
+    final chunk = ((vad['chunk_interval_ms'] as num) / 1000).toStringAsFixed(0);
+    final pause = ((vad['silence_duration_ms'] as num) / 1000).toStringAsFixed(1);
+    final vocab = ((opts['keywords'] as List?) ?? const []).length;
+    return [
+      sound['impaired_voice'] != false ? 'IMPAIRED VOICE setup' : 'normal voice setup (v0.0.1(51))',
+      // No saved options yet means the engine's default: batch.
+      '$_provider · ${(opts['transfer'] ?? 'Batch') == 'Batch' ? 'batch' : 'stream'} · ${kLanguages[_settings['providers']['language']] ?? _settings['providers']['language']} · vocabulary: $vocab',
+      vad['agreement'] == true
+          ? 'agreed words only · every ${((vad['agreement_step_ms'] as num? ?? 1000) / 1000).toStringAsFixed(1)} s · pause $pause s'
+          : 'chunks $chunk s · pause $pause s · re-check ${vad['refine'] == true ? 'on' : 'off'}',
+      'steady-noise filter ${sound['noise_profile'] != false ? 'on' : 'off'} · noise reduction ${sound['denoise'] != 'Off' ? 'on' : 'off'} · gain ${sound['agc'] == false ? 'fixed' : 'auto'} · $mic',
+    ].join('\n');
+  }
+
+  /// Which preset the two VAD values match, '' when neither.
+  String _rhythmPreset(Map<String, dynamic> vad) {
+    final chunk = vad['chunk_interval_ms'], pause = vad['silence_duration_ms'];
+    if (chunk == 2000 && pause == 900) return 'fluent';
+    if (chunk == 3000 && pause == 4000 && vad['refine'] == true && vad['agreement'] == true) return 'words';
+    if (vad['refine'] == true || vad['agreement'] == true) return '';
+    return '';
+  }
+
+  /// The vocabulary field saves when it loses focus too: a user who
+  /// clicks away instead of pressing Enter must not dictate without it.
+  void _saveVocab() {
+    if (!_vocabDirty) return;
+    _vocabDirty = false;
+    _saveSettings();
+    _snack('Vocabulary saved');
+  }
+
+  void _saveReplayPath() {
+    final path = _replayCtl.text.trim();
+    if (path.isEmpty) {
+      _snack('Enter the path of a WAV file');
+      return;
+    }
+    final mic = _settings['microphone'] as Map<String, dynamic>;
+    mic['device_id'] = _replayPrefix + path;
+    mic['device_label'] = path.split(Platform.pathSeparator).last;
+    _saveSettings();
+  }
+
   Widget _micSection() {
     final mic = _settings['microphone'] as Map<String, dynamic>;
     final current = mic['device_id'] as String?;
     final ids = _mics.map((m) => m.id).toList();
+    final replaying = current != null && current.startsWith(_replayPrefix);
+    if (replaying && _replayCtl.text.isEmpty) _replayCtl.text = current.substring(_replayPrefix.length);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -941,19 +1621,45 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Text('Microphone', style: Theme.of(context).textTheme.titleMedium),
             DropdownButton<String?>(
-              value: ids.contains(current) ? current : null,
+              value: replaying
+                  ? _replayPrefix
+                  : ids.contains(current)
+                      ? current
+                      : null,
               isExpanded: true,
               hint: const Text('System default'),
               items: [
                 const DropdownMenuItem<String?>(value: null, child: Text('System default')),
                 ..._mics.map((m) => DropdownMenuItem<String?>(value: m.id, child: Text(m.isDefault ? '${m.name} (default)' : m.name))),
+                const DropdownMenuItem<String?>(value: _replayPrefix, child: Text('Replay a recording (test)')),
               ],
               onChanged: (id) {
-                mic['device_id'] = id;
-                mic['device_label'] = _mics.where((m) => m.id == id).map((m) => m.name).firstOrNull;
+                if (id == _replayPrefix) {
+                  // The path field below completes the device id.
+                  mic['device_id'] = _replayPrefix + _replayCtl.text.trim();
+                  mic['device_label'] = 'Recording';
+                } else {
+                  mic['device_id'] = id;
+                  mic['device_label'] = _mics.where((m) => m.id == id).map((m) => m.name).firstOrNull;
+                }
                 _saveSettings();
               },
             ),
+            if (replaying) ...[
+              TextField(
+                controller: _replayCtl,
+                decoration: const InputDecoration(
+                  labelText: 'WAV file (16-bit PCM)',
+                  helperText: 'Played through the same chain as a microphone, in real time, then silence until you stop. '
+                      'The same sample on every device and provider.',
+                ),
+                onSubmitted: (_) => _saveReplayPath(),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton(onPressed: _saveReplayPath, child: const Text('Use this file')),
+              ),
+            ],
           ],
         ),
       ),

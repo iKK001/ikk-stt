@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use ikk_audio::chain::{CaptureChain, ChainConfig};
 use ikk_audio::vad::{VadEvent, VadMode, VoiceActivityDetector};
 use ikk_audio::{AudioFrame, CaptureConfig, PIPELINE_SAMPLE_RATE_HZ};
 use ikk_engine::{Engine, EngineCommand, EngineEvent};
 use ikk_output::{AccessLevel, OutputError, TargetStatus, TextSink};
-use ikk_stt::{ProviderId, ProviderRegistry, Secret, TranscriptEvent};
+use ikk_stt::{ProviderId, ProviderRegistry, Secret, SessionConfig, TranscriptEvent};
 
 #[derive(Parser)]
 #[command(name = "ikk-cli", about = "ikk-stt headless reference")]
@@ -57,18 +58,163 @@ enum Cmd {
         #[arg(long, default_value = "ikk-record.wav")]
         out: PathBuf,
     },
+    /// Training mode: say a word a few times; what the recogniser hears for
+    /// it is stored as its heard forms in the settings file, and from then
+    /// on written as the word. Say it after each "Say «word» …" prompt.
+    Train {
+        /// The word (or short phrase) as it must be written.
+        word: String,
+        #[arg(long, default_value_t = 5)]
+        takes: u32,
+        #[arg(long, default_value = "elevenlabs")]
+        provider: String,
+        #[arg(long)]
+        key_env: Option<String>,
+        /// Use the key the app saved for this provider (macOS).
+        #[arg(long)]
+        key_from_app: bool,
+        /// Microphone id (default: the settings file); `file:<wav>` replays a
+        /// recording as one take.
+        #[arg(long)]
+        mic: Option<String>,
+        /// Seconds to wait for each take.
+        #[arg(long, default_value_t = 10)]
+        timeout: u32,
+        /// Teach a heard form without recording (what the app's "Teach from
+        /// the last text" does); repeatable. With it, no takes are recorded.
+        #[arg(long)]
+        heard: Vec<String>,
+        /// Mark the word "always replace": a one-word heard form is swapped
+        /// even when every reading agrees on it.
+        #[arg(long)]
+        always: bool,
+    },
+    /// Transcribe a WAV recording the way the app would: through the capture
+    /// chain, cut at gaps and pauses, chunks uploaded in parallel and printed
+    /// in order. For comparing providers and settings on the same sample.
+    /// RUST_LOG=ikk_stt=debug shows every cut and why it was made.
+    Transcribe {
+        /// 16-bit PCM WAV, mono or stereo, any rate.
+        file: PathBuf,
+        #[arg(long, default_value = "deepgram")]
+        provider: String,
+        /// Environment variable holding the API key (default: <PROVIDER>_API_KEY).
+        #[arg(long)]
+        key_env: Option<String>,
+        /// Use the key the app saved for this provider (macOS login keychain
+        /// of a debug build) instead of an environment variable.
+        #[arg(long)]
+        key_from_app: bool,
+        /// ISO-639-3 language, empty = auto-detect.
+        #[arg(long, default_value = "deu")]
+        language: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Send the whole file as one request instead of chunks.
+        #[arg(long)]
+        whole: bool,
+        /// Stream it live (provider's own segmentation), paced in real time
+        /// as a microphone would deliver it.
+        #[arg(long)]
+        live: bool,
+        #[arg(long)]
+        denoise: bool,
+        #[arg(long)]
+        agc: bool,
+        /// Turn the pauses between words down (breathing, ventilator).
+        #[arg(long)]
+        gate: bool,
+        /// High-pass cutoff in Hz (portable tone shaping).
+        #[arg(long, default_value_t = 0.0)]
+        highpass: f32,
+        /// Presence lift at 3 kHz in dB.
+        #[arg(long, default_value_t = 0.0)]
+        presence: f32,
+        /// Fast compressor (flattens a rolled R's flutter).
+        #[arg(long)]
+        compress: bool,
+        /// Trill filler (lifts the closures of a rolled R).
+        #[arg(long)]
+        trill: bool,
+        /// Learnt steady-noise profile subtracted (ventilator, fan).
+        #[arg(long)]
+        profile: bool,
+        /// Microphone-path equaliser: 18 third-octave gains in dB, comma-separated.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        path_eq: Vec<f32>,
+        /// After a pause, transcribe the whole thought again in one piece
+        /// and replace the chunk texts.
+        #[arg(long)]
+        refine: bool,
+        /// Agreed words only: transcribe the thought so far every this many
+        /// ms and type only words the last --agree results agree on.
+        #[arg(long)]
+        agreement_ms: Option<u32>,
+        #[arg(long, default_value_t = 3)]
+        agree: usize,
+        /// Earliest cut at a gap between words, ms (default: the settings file).
+        #[arg(long)]
+        chunk_ms: Option<u32>,
+        /// Pause that cuts a chunk, ms (default: the settings file).
+        #[arg(long)]
+        pause_ms: Option<u32>,
+        /// Words to bias the recogniser towards (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        keywords: Vec<String>,
+    },
     /// Dictate from the microphone to stdout: live interim line, finals appended.
+    /// `--mic file:/path/to.wav` replays a recording as the microphone.
     Dictate {
         #[arg(long, default_value = "deepgram")]
         provider: String,
         /// Environment variable holding the API key (default: <PROVIDER>_API_KEY).
         #[arg(long)]
         key_env: Option<String>,
+        /// Use the key the app saved for this provider (macOS).
+        #[arg(long)]
+        key_from_app: bool,
         /// ISO-639-3 language, empty = auto-detect.
         #[arg(long, default_value = "deu")]
         language: String,
         #[arg(long)]
         model: Option<String>,
+        /// Earliest cut at a gap between words, ms (default: the settings file).
+        #[arg(long)]
+        chunk_ms: Option<u32>,
+        /// Pause that cuts a chunk, ms (default: the settings file).
+        #[arg(long)]
+        pause_ms: Option<u32>,
+        /// Turn the pauses between words down (breathing, ventilator).
+        #[arg(long)]
+        gate: bool,
+        /// High-pass cutoff in Hz (portable tone shaping).
+        #[arg(long, default_value_t = 0.0)]
+        highpass: f32,
+        /// Presence lift at 3 kHz in dB.
+        #[arg(long, default_value_t = 0.0)]
+        presence: f32,
+        /// Fast compressor (flattens a rolled R's flutter).
+        #[arg(long)]
+        compress: bool,
+        /// Trill filler (lifts the closures of a rolled R).
+        #[arg(long)]
+        trill: bool,
+        /// Learnt steady-noise profile subtracted (ventilator, fan).
+        #[arg(long)]
+        profile: bool,
+        /// Microphone-path equaliser: 18 third-octave gains in dB, comma-separated.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        path_eq: Vec<f32>,
+        /// After a pause, transcribe the whole thought again in one piece.
+        #[arg(long)]
+        refine: bool,
+        /// Agreed words only (see `transcribe --agreement-ms`); 0 turns the
+        /// settings file's agreement mode off.
+        #[arg(long)]
+        agreement_ms: Option<u32>,
+        /// Words and phrases to bias the recogniser towards (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        keywords: Vec<String>,
         /// Chunked batch upload instead of live streaming.
         #[arg(long)]
         batch: bool,
@@ -280,6 +426,89 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::Train {
+            word,
+            takes,
+            provider,
+            key_env,
+            key_from_app,
+            mic,
+            timeout,
+            heard,
+            always,
+        } => {
+            if !heard.is_empty() || always {
+                let path = settings_path()?;
+                let mut stored = ikk_settings::Settings::load(&path).unwrap_or_default();
+                for h in &heard {
+                    stored.text.training.learn(&word, h);
+                }
+                if always {
+                    stored.text.training.learn(&word, "");
+                    if let Some(e) = stored.text.training.words.iter_mut().find(|e| e.word == word) {
+                        e.always = true;
+                    }
+                }
+                stored.save(&path)?;
+                if let Some(e) = stored.text.training.words.iter().find(|e| e.word == word) {
+                    let forms: Vec<String> = e.heard.iter().map(|h| format!("{} ×{}", h.text, h.count)).collect();
+                    println!("«{word}»: heard as {}", forms.join(", "));
+                }
+                return Ok(());
+            }
+            let key = if key_from_app {
+                credential_from_app(&provider)?
+            } else {
+                credential_from_env(&provider, key_env.as_deref())?
+            };
+            let path = settings_path()?;
+            let mut settings = ikk_settings::Settings::load(&path).unwrap_or_default();
+            settings.providers.active = provider.clone();
+            if let Some(m) = mic {
+                settings.microphone.device_id = Some(m);
+            }
+            let mut reg = ProviderRegistry::new();
+            ikk_providers::register_all(&mut reg);
+            let Some(prov) = reg.get(&ProviderId(provider.clone())) else {
+                anyhow::bail!("unknown provider {provider}");
+            };
+            for n in 1..=takes {
+                println!("Say «{word}» … ({n} of {takes})");
+                match ikk_engine::training::take(
+                    prov.clone(),
+                    &settings,
+                    Secret::new(key.clone()),
+                    Duration::from_secs(timeout as u64),
+                )
+                .await
+                {
+                    Ok(heard) if heard.is_empty() => println!("  heard nothing in it"),
+                    Ok(heard) => {
+                        println!("  heard: {heard}");
+                        settings.text.training.learn(&word, &heard);
+                    }
+                    Err(e) => println!("  {e}"),
+                }
+            }
+            // Only the learned words are written back; provider and
+            // microphone chosen for the takes stay as the app has them.
+            let mut stored = ikk_settings::Settings::load(&path).unwrap_or_default();
+            stored.text.training = settings.text.training.clone();
+            stored.save(&path)?;
+            if let Some(e) = settings.text.training.words.iter().find(|e| e.word == word) {
+                let forms: Vec<String> = e.heard.iter().map(|h| format!("{} ×{}", h.text, h.count)).collect();
+                println!(
+                    "«{word}»: heard as {}",
+                    if forms.is_empty() {
+                        "— (always recognised)".to_string()
+                    } else {
+                        forms.join(", ")
+                    }
+                );
+            }
+            println!("saved to {}", path.display());
+            Ok(())
+        }
         Cmd::Record {
             seconds,
             mic,
@@ -297,7 +526,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let frames = capture_for(seconds, &cfg, true).await?;
             let samples: Vec<f32> = frames.iter().flat_map(|f| f.samples.iter().copied()).collect();
-            write_wav(&out, &samples, PIPELINE_SAMPLE_RATE_HZ)?;
+            ikk_audio::wav::write(&out, &samples, PIPELINE_SAMPLE_RATE_HZ)?;
             println!(
                 "\nwrote {} ({:.2} s)",
                 out.display(),
@@ -305,11 +534,157 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::Transcribe {
+            file,
+            provider,
+            key_env,
+            key_from_app,
+            language,
+            model,
+            whole,
+            live,
+            denoise,
+            agc,
+            gate,
+            highpass,
+            presence,
+            compress,
+            trill,
+            profile,
+            path_eq,
+            refine,
+            agreement_ms,
+            agree,
+            chunk_ms,
+            pause_ms,
+            keywords,
+        } => {
+            let key = if key_from_app {
+                credential_from_app(&provider)?
+            } else {
+                credential_from_env(&provider, key_env.as_deref())?
+            };
+            let mut reg = ProviderRegistry::new();
+            ikk_providers::register_all(&mut reg);
+            let pid = ProviderId(provider.clone());
+            let Some(prov) = reg.get(&pid) else {
+                anyhow::bail!("unknown provider {provider}");
+            };
+            let settings = settings_path()
+                .and_then(|p| Ok(ikk_settings::Settings::load(&p)?))
+                .unwrap_or_default();
+            let mut cfg = SessionConfig::new(provider.clone());
+            cfg.credential = Some(Secret::new(key));
+            cfg.language = language;
+            cfg.model = model;
+            cfg.transfer = if live {
+                ikk_stt::TransferMode::Streaming
+            } else {
+                ikk_stt::TransferMode::Batch
+            };
+            cfg.refine = refine;
+            cfg.agreement = agreement_ms.map(|ms| ikk_stt::Agreement {
+                step: Duration::from_millis(ms as u64),
+                windows: agree,
+            });
+            cfg.keywords = keywords.into_iter().filter(|k| !k.is_empty()).map(|k| (k, 5)).collect();
+            cfg.learned = settings.text.training.learned_words();
+            cfg.chunk_interval = Duration::from_millis(chunk_ms.unwrap_or(settings.sound.vad.chunk_interval_ms) as u64);
+            let pause = pause_ms.unwrap_or(settings.sound.vad.silence_duration_ms);
+            cfg.endpointing = Duration::from_millis(pause as u64);
+
+            let frames = wav_frames(
+                &file,
+                denoise,
+                agc,
+                gate,
+                Shaping {
+                    highpass,
+                    presence,
+                    compress,
+                    trill,
+                    profile,
+                    path_eq: path_eq.clone(),
+                },
+            )?;
+            let total: f64 = frames.iter().map(|f| f.duration().as_secs_f64()).sum();
+            eprintln!(
+                "{} ({total:.1} s) → {provider}, {}{}{}{}",
+                file.display(),
+                if whole {
+                    "whole file".to_string()
+                } else if live {
+                    format!("live stream, pause {pause} ms")
+                } else {
+                    format!("chunks ≥ {} ms, pause {pause} ms", cfg.chunk_interval.as_millis())
+                },
+                if denoise { ", denoise" } else { "" },
+                if agc { ", agc" } else { "" },
+                if gate { ", gate" } else { "" },
+            );
+            let started = Instant::now();
+            if whole {
+                let t = prov.transcribe(ikk_stt::AudioClip { frames }, &cfg).await?;
+                println!("{}", t.text.trim());
+                eprintln!("done in {:.1} s", started.elapsed().as_secs_f32());
+                return Ok(());
+            }
+            let mut session = ikk_stt::open_session(prov, &cfg).await?;
+            let mut vad = VoiceActivityDetector::new(VadMode::Normal, PIPELINE_SAMPLE_RATE_HZ);
+            vad.set_pause_duration_ms(pause.max(100));
+            let print = |ev: TranscriptEvent, at: Duration| match ev {
+                TranscriptEvent::Final(t) => println!("[{:5.1}s] {t}", at.as_secs_f32()),
+                TranscriptEvent::Refined { segments, text } => {
+                    println!("[{:5.1}s] ⟲ replaces last {segments}: {text}", at.as_secs_f32())
+                }
+                TranscriptEvent::Error(e) => eprintln!("[provider error] {e:?}"),
+                TranscriptEvent::Interim(_) | TranscriptEvent::SegmentRefine(_) => {}
+                other => eprintln!("[{other:?}]"),
+            };
+            let mut clock = started;
+            for frame in frames {
+                if live {
+                    // Real-time pacing: the provider segments by its own clock.
+                    clock += frame.duration();
+                    tokio::time::sleep_until(clock.into()).await;
+                }
+                if vad.process(&frame.samples) == Some(VadEvent::SpeechEnded) {
+                    session.cut_segment().await?;
+                }
+                session.push(frame).await?;
+                while let Ok(ev) = session.events().try_recv() {
+                    print(ev, started.elapsed());
+                }
+            }
+            session.finish().await?;
+            while let Some(ev) = session.events().recv().await {
+                let closed = matches!(ev, TranscriptEvent::Closed);
+                print(ev, started.elapsed());
+                if closed {
+                    break;
+                }
+            }
+            eprintln!("done in {:.1} s", started.elapsed().as_secs_f32());
+            Ok(())
+        }
         Cmd::Dictate {
             provider,
             key_env,
+            key_from_app,
             language,
             model,
+            chunk_ms,
+            pause_ms,
+            gate,
+            highpass,
+            presence,
+            compress,
+            trill,
+            profile,
+            path_eq,
+            refine,
+            agreement_ms,
+            keywords,
             batch,
             seconds,
             mic,
@@ -319,24 +694,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             // Windows' own recognizer (test only) needs no key.
             let keyless = provider == "windows";
-            let env_name = key_env.unwrap_or_else(|| format!("{}_API_KEY", provider.to_uppercase()));
-            let mut key = if keyless {
+            let key = if keyless {
                 String::new()
+            } else if key_from_app {
+                credential_from_app(&provider)?
             } else {
-                std::env::var(&env_name).map_err(|_| anyhow::anyhow!("set {env_name} to your {provider} API key"))?
+                credential_from_env(&provider, key_env.as_deref())?
             };
-            if provider == "azure" && !key.contains(':') {
-                // Azure needs the region of the Speech resource too.
-                let region = std::env::var("AZURE_REGION")
-                    .map_err(|_| anyhow::anyhow!("set AZURE_REGION as well, e.g. westeurope"))?;
-                key = format!("{region}:{key}");
-            }
-            if provider == "voiceitt" {
-                // Voiceitt needs App ID + API key; the credential is "APP_ID:API_KEY".
-                let app_id =
-                    std::env::var("VOICEITT_APP_ID").map_err(|_| anyhow::anyhow!("set VOICEITT_APP_ID as well"))?;
-                key = format!("{app_id}:{key}");
-            }
             let mut reg = ProviderRegistry::new();
             ikk_providers::register_all(&mut reg);
             let pid = ProviderId(provider.clone());
@@ -351,6 +715,22 @@ async fn main() -> anyhow::Result<()> {
             settings.providers.active = provider.clone();
             settings.providers.language = language;
             settings.microphone.device_id = mic;
+            if let Some(ms) = chunk_ms {
+                settings.sound.vad.chunk_interval_ms = ms;
+            }
+            if let Some(ms) = pause_ms {
+                settings.sound.vad.silence_duration_ms = ms;
+            }
+            if refine {
+                settings.sound.vad.refine = true;
+                settings.sound.vad.agreement = false;
+            }
+            if let Some(ms) = agreement_ms {
+                settings.sound.vad.agreement = ms > 0;
+                if ms > 0 {
+                    settings.sound.vad.agreement_step_ms = ms;
+                }
+            }
             settings.sound.denoise = if denoise {
                 ikk_settings::Denoise::RnNoise
             } else {
@@ -358,6 +738,13 @@ async fn main() -> anyhow::Result<()> {
             };
             let mut opts = settings.active_options();
             opts.model = model;
+            if !keywords.is_empty() {
+                opts.keywords = keywords
+                    .into_iter()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+                    .collect();
+            }
             opts.transfer = if batch {
                 ikk_settings::TransferMode::Batch
             } else {
@@ -366,12 +753,21 @@ async fn main() -> anyhow::Result<()> {
             settings.providers.options.insert(provider.clone(), opts);
             let mut start = ikk_engine::config::start_config(&settings);
             start.capture.agc = agc;
+            start.capture.gate = gate;
+            start.capture.highpass_hz = highpass;
+            start.capture.presence_db = presence;
+            start.capture.compressor = compress;
+            start.capture.trill_filler = trill;
+            start.capture.noise_profile = profile;
+            start.capture.path_eq_db = path_eq;
             start.flow_ms = if to_cursor { 10 } else { 0 };
 
             let sink: Box<dyn TextSink> = if to_cursor {
                 ikk_output::default_sink()
             } else {
-                Box::new(StdoutSink)
+                Box::new(StdoutSink {
+                    started: Instant::now(),
+                })
             };
             let mut engine = Engine::spawn(reg, sink);
             if !keyless {
@@ -502,30 +898,110 @@ async fn capture_for(seconds: u64, cfg: &CaptureConfig, show_meter: bool) -> any
 }
 
 /// Minimal 16-bit PCM WAV writer (no dependency).
-fn write_wav(path: &PathBuf, samples: &[f32], rate: u32) -> anyhow::Result<()> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut w = std::fs::File::create(path)?;
-    w.write_all(b"RIFF")?;
-    w.write_all(&(36 + data_len).to_le_bytes())?;
-    w.write_all(b"WAVEfmt ")?;
-    w.write_all(&16u32.to_le_bytes())?;
-    w.write_all(&1u16.to_le_bytes())?; // PCM
-    w.write_all(&1u16.to_le_bytes())?; // mono
-    w.write_all(&rate.to_le_bytes())?;
-    w.write_all(&(rate * 2).to_le_bytes())?;
-    w.write_all(&2u16.to_le_bytes())?;
-    w.write_all(&16u16.to_le_bytes())?;
-    w.write_all(b"data")?;
-    w.write_all(&data_len.to_le_bytes())?;
-    for s in samples {
-        w.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
+/// The API key from `<PROVIDER>_API_KEY` (or `key_env`), completed with the
+/// second part some providers need: Azure's region, Voiceitt's App ID.
+fn credential_from_env(provider: &str, key_env: Option<&str>) -> anyhow::Result<String> {
+    let env_name = key_env
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}_API_KEY", provider.to_uppercase()));
+    let mut key = std::env::var(&env_name).map_err(|_| anyhow::anyhow!("set {env_name} to your {provider} API key"))?;
+    if provider == "azure" && !key.contains(':') {
+        let region =
+            std::env::var("AZURE_REGION").map_err(|_| anyhow::anyhow!("set AZURE_REGION as well, e.g. westeurope"))?;
+        key = format!("{region}:{key}");
     }
-    Ok(())
+    if provider == "voiceitt" {
+        let app_id = std::env::var("VOICEITT_APP_ID").map_err(|_| anyhow::anyhow!("set VOICEITT_APP_ID as well"))?;
+        key = format!("{app_id}:{key}");
+    }
+    Ok(key)
+}
+
+/// The credential the app saved for `provider` (`api_key:<provider>` in
+/// flutter_secure_storage, already in the provider's own format such as
+/// REGION:KEY). macOS debug builds keep it in the login keychain, which the
+/// `security` tool can read; the key never touches the terminal.
+fn credential_from_app(provider: &str) -> anyhow::Result<String> {
+    if !cfg!(target_os = "macos") {
+        anyhow::bail!(
+            "--key-from-app is only available on macOS; set {}_API_KEY",
+            provider.to_uppercase()
+        );
+    }
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-a", &format!("api_key:{provider}"), "-w"])
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!("no key for {provider} in the app's keychain (save one in the app first)");
+    }
+    let key = String::from_utf8(out.stdout)?.trim().to_string();
+    if key.is_empty() {
+        anyhow::bail!("the app's key for {provider} is empty");
+    }
+    Ok(key)
+}
+
+/// A WAV file as the capture would deliver it: mono 16 kHz, through the
+/// capture chain (noise model listening, so chunks cut at real gaps), in
+/// 20 ms frames.
+/// Tone shaping flags shared by the file replay commands.
+struct Shaping {
+    highpass: f32,
+    presence: f32,
+    compress: bool,
+    trill: bool,
+    profile: bool,
+    path_eq: Vec<f32>,
+}
+
+fn wav_frames(
+    path: &std::path::Path,
+    denoise: bool,
+    agc: bool,
+    gate: bool,
+    shape: Shaping,
+) -> anyhow::Result<Vec<AudioFrame>> {
+    let pcm = ikk_audio::wav::read_mono(path, PIPELINE_SAMPLE_RATE_HZ)?;
+    let mut chain = CaptureChain::new(ChainConfig {
+        denoise,
+        listen: true,
+        gate,
+        highpass_hz: shape.highpass,
+        presence_db: shape.presence,
+        compressor: shape.compress,
+        trill_filler: shape.trill,
+        noise_profile: shape.profile,
+        path_eq_db: shape.path_eq,
+        agc,
+        agc_target_dbfs: -16.0,
+        sample_rate_hz: PIPELINE_SAMPLE_RATE_HZ,
+        ..Default::default()
+    });
+    let block = PIPELINE_SAMPLE_RATE_HZ as usize / 50;
+    let mut frames = Vec::with_capacity(pcm.len() / block + 1);
+    let mut sent = 0usize;
+    for chunk in pcm.chunks(block) {
+        let processed = chain.process(chunk).into_owned();
+        if processed.is_empty() {
+            continue;
+        }
+        let offset = Duration::from_secs_f64(sent as f64 / PIPELINE_SAMPLE_RATE_HZ as f64);
+        sent += processed.len();
+        frames.push(AudioFrame {
+            samples: processed,
+            sample_rate_hz: PIPELINE_SAMPLE_RATE_HZ,
+            offset,
+            speech: chain.speech_probability(),
+        });
+    }
+    Ok(frames)
 }
 
 /// Sink that prints finals to stdout (the CLI's "cursor"): a line per final,
 /// the interim preview is cleared first by the event loop.
-struct StdoutSink;
+struct StdoutSink {
+    started: Instant,
+}
 
 impl TextSink for StdoutSink {
     fn access_level(&self) -> AccessLevel {
@@ -535,7 +1011,13 @@ impl TextSink for StdoutSink {
         TargetStatus::Injectable(AccessLevel::BasicTyping)
     }
     fn type_text(&mut self, text: &str) -> Result<(), OutputError> {
-        print!("\r{:60}\r{}\n", "", text.trim_start());
+        // Seconds since the sink was made: when each word reached the "cursor".
+        print!(
+            "\r{:60}\r[{:5.1}s] {}\n",
+            "",
+            self.started.elapsed().as_secs_f32(),
+            text.trim_start()
+        );
         Ok(())
     }
     fn backspace(&mut self, _n: usize) -> Result<(), OutputError> {

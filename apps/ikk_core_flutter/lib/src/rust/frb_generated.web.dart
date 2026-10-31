@@ -8,6 +8,7 @@
 
 import 'api/core.dart';
 import 'api/engine.dart';
+import 'api/training.dart';
 import 'api/voice.dart';
 
 import 'dart:async';

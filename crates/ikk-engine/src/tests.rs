@@ -58,6 +58,7 @@ impl Provider for FakeProvider {
             interim: true,
             requires_network: true,
             own_audio: false,
+            timed_words: false,
             ..Default::default()
         }
     }
@@ -119,6 +120,7 @@ fn speech_frame() -> AudioFrame {
         samples: vec![0.3; 1600],
         sample_rate_hz: 16_000,
         offset: Duration::ZERO,
+        speech: None,
     }
 }
 fn silence_frame() -> AudioFrame {
@@ -126,6 +128,7 @@ fn silence_frame() -> AudioFrame {
         samples: vec![0.0005; 1600],
         sample_rate_hz: 16_000,
         offset: Duration::ZERO,
+        speech: None,
     }
 }
 
@@ -138,6 +141,8 @@ fn start_cfg() -> StartConfig {
         pause: Duration::from_millis(300),
         command_locale: "de-CH".into(),
         flow_ms: 0,
+        correction: false,
+        correction_rewrites: false,
     }
 }
 
@@ -463,6 +468,7 @@ async fn say(mic: &Mic, samples: &[f32]) {
                 samples: chunk.to_vec(),
                 sample_rate_hz: 16_000,
                 offset: Duration::ZERO,
+                speech: None,
             })
             .await;
     }
@@ -585,6 +591,7 @@ impl Provider for OwnMicProvider {
             interim: true,
             requires_network: true,
             own_audio: true,
+            timed_words: false,
             ..Default::default()
         }
     }
@@ -726,4 +733,413 @@ async fn settings_change_keeps_the_start_word_listener() {
         !ev.iter().any(|e| matches!(e, EngineEvent::VoiceStandby(false))),
         "listener closed: {ev:?}"
     );
+}
+
+/// Corrector that writes everything in capitals (so a correction is easy
+/// to spot) and remembers what it was asked.
+struct ShoutingCorrector {
+    asked: Arc<StdMutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ikk_stt::TextCorrector for ShoutingCorrector {
+    fn id(&self) -> &'static str {
+        "shout"
+    }
+    fn display_name(&self) -> &'static str {
+        "Shout"
+    }
+    async fn correct(
+        &self,
+        text: &str,
+        _language: &str,
+        _credential: Option<&str>,
+    ) -> Result<Option<String>, SttError> {
+        self.asked.lock().unwrap().push(text.to_string());
+        let up = text.to_uppercase();
+        Ok((up != text).then_some(up))
+    }
+}
+
+#[tokio::test]
+async fn live_correction_asks_consent_then_corrects_typed_text_in_place() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(FakeProvider));
+    let asked = Arc::new(StdMutex::new(Vec::new()));
+    reg.set_corrector(Arc::new(ShoutingCorrector { asked: asked.clone() }));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opener_mic = mic.clone();
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let log = SinkLog::default();
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog {
+            typed: log.typed.clone(),
+        },
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    // The checker needs the user's own account; without it nothing is sent.
+    handle
+        .send(EngineCommand::SetCredential(
+            ProviderId("shout".into()),
+            Secret::new("me@example.ch:key"),
+        ))
+        .await;
+    let mut cfg = start_cfg();
+    cfg.correction = true;
+    cfg.correction_rewrites = true;
+    handle.send(EngineCommand::Start(Box::new(cfg))).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(2),
+    )
+    .await;
+
+    // First final: typed as it came, and the checker's consent is asked.
+    let tx = mic.lock().unwrap().clone();
+    if let Some(tx) = tx {
+        tx.send(speech_frame()).await.unwrap();
+    }
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Interim(_))),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::CutSegment).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::ConsentRequired(_)),
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::ConsentRequired(r) if r.id == "shout")),
+        "{ev:?}"
+    );
+    assert!(asked.lock().unwrap().is_empty(), "text sent before consent");
+
+    // Consent given: the next final triggers a correction of everything so far.
+    handle.send(EngineCommand::GrantConsent("shout".into())).await;
+    let tx = mic.lock().unwrap().clone();
+    if let Some(tx) = tx {
+        tx.send(speech_frame()).await.unwrap();
+    }
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Interim(_))),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::CutSegment).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Replace(_))),
+        Duration::from_secs(3),
+    )
+    .await;
+    let replaced = ev.iter().find_map(|e| match e {
+        EngineEvent::Transcript(TranscriptEvent::Replace(t)) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(replaced.as_deref(), Some("F1 F2"), "{ev:?}");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["f1 f2"]);
+    // The field was brought to the corrected text.
+    let typed = log.typed.lock().unwrap().join("|");
+    assert!(typed.contains("F1 F2") || typed.ends_with("F2"), "{typed}");
+}
+
+/// Chunked batch as the provider sees it: quick finals per chunk, then the
+/// whole thought once more, which replaces them.
+struct RefineProvider;
+struct RefineSession {
+    cuts: usize,
+    tx: mpsc::Sender<TranscriptEvent>,
+    rx: mpsc::Receiver<TranscriptEvent>,
+}
+
+#[async_trait::async_trait]
+impl StreamingSession for RefineSession {
+    async fn push(&mut self, _f: AudioFrame) -> Result<(), SttError> {
+        Ok(())
+    }
+    async fn cut_segment(&mut self) -> Result<(), SttError> {
+        self.cuts += 1;
+        let _ = self
+            .tx
+            .send(TranscriptEvent::Final(format!("quick{}", self.cuts)))
+            .await;
+        if self.cuts == 2 {
+            let _ = self
+                .tx
+                .send(TranscriptEvent::Refined {
+                    segments: 2,
+                    text: "the whole thought".into(),
+                })
+                .await;
+        }
+        Ok(())
+    }
+    async fn finish(&mut self) -> Result<(), SttError> {
+        // Stopped mid-thought: the last chunk and the whole thought come
+        // only now, in this order.
+        if self.cuts == 1 {
+            let _ = self.tx.send(TranscriptEvent::Final("quick2".into())).await;
+            let _ = self
+                .tx
+                .send(TranscriptEvent::Refined {
+                    segments: 2,
+                    text: "the whole thought at stop".into(),
+                })
+                .await;
+        }
+        let _ = self.tx.send(TranscriptEvent::Closed).await;
+        Ok(())
+    }
+    fn events(&mut self) -> &mut mpsc::Receiver<TranscriptEvent> {
+        &mut self.rx
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for RefineProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("fake".into())
+    }
+    fn display_name(&self) -> &'static str {
+        "Refine"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streaming: true,
+            requires_network: true,
+            ..Default::default()
+        }
+    }
+    async fn transcribe(&self, _: AudioClip, _: &SessionConfig) -> Result<Transcript, SttError> {
+        Err(SttError::Unsupported)
+    }
+    async fn stream(&self, _: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError> {
+        let (tx, rx) = mpsc::channel(64);
+        Ok(Box::new(RefineSession { cuts: 0, tx, rx }))
+    }
+}
+
+#[tokio::test]
+async fn live_correction_without_rewriting_only_suggests() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(FakeProvider));
+    let asked = Arc::new(StdMutex::new(Vec::new()));
+    reg.set_corrector(Arc::new(ShoutingCorrector { asked: asked.clone() }));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opener_mic = mic.clone();
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let log = SinkLog::default();
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog {
+            typed: log.typed.clone(),
+        },
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    // The checker needs the user's own account; without it nothing is sent.
+    handle
+        .send(EngineCommand::SetCredential(
+            ProviderId("shout".into()),
+            Secret::new("me@example.ch:key"),
+        ))
+        .await;
+    let mut cfg = start_cfg();
+    cfg.correction = true;
+    cfg.correction_rewrites = false;
+    handle.send(EngineCommand::Start(Box::new(cfg))).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(2),
+    )
+    .await;
+
+    // First final: typed as it came, and the checker's consent is asked.
+    let tx = mic.lock().unwrap().clone();
+    if let Some(tx) = tx {
+        tx.send(speech_frame()).await.unwrap();
+    }
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Interim(_))),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::CutSegment).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::ConsentRequired(_)),
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, EngineEvent::ConsentRequired(r) if r.id == "shout")),
+        "{ev:?}"
+    );
+    assert!(asked.lock().unwrap().is_empty(), "text sent before consent");
+
+    // Consent given: the next final triggers a correction of everything so far.
+    handle.send(EngineCommand::GrantConsent("shout".into())).await;
+    let tx = mic.lock().unwrap().clone();
+    if let Some(tx) = tx {
+        tx.send(speech_frame()).await.unwrap();
+    }
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Interim(_))),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::CutSegment).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Suggestion(_)),
+        Duration::from_secs(3),
+    )
+    .await;
+    let replaced = ev.iter().find_map(|e| match e {
+        EngineEvent::Suggestion(t) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(replaced.as_deref(), Some("F1 F2"), "{ev:?}");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["f1 f2"]);
+    // Nothing was typed over: no Replace event, the field keeps the raw text.
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Replace(_)))),
+        "{ev:?}"
+    );
+    let typed = log.typed.lock().unwrap().join("|");
+    assert!(!typed.contains("F1 F2"), "{typed}");
+}
+
+#[tokio::test]
+async fn refined_thought_replaces_the_quick_chunks_in_the_typed_text() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(RefineProvider));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opener_mic = mic.clone();
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let log = SinkLog::default();
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog {
+            typed: log.typed.clone(),
+        },
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    handle.send(EngineCommand::Start(Box::new(start_cfg()))).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::CutSegment).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Final(_))),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::CutSegment).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Replace(_))),
+        Duration::from_secs(3),
+    )
+    .await;
+    let replaced = ev.iter().find_map(|e| match e {
+        EngineEvent::Transcript(TranscriptEvent::Replace(t)) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(replaced.as_deref(), Some("the whole thought"), "{ev:?}");
+    handle.send(EngineCommand::Stop).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Idle)),
+        Duration::from_secs(3),
+    )
+    .await;
+    let typed = log.typed.lock().unwrap().concat();
+    assert!(typed.ends_with("the whole thought"), "typed: {typed:?}");
+}
+
+#[tokio::test]
+async fn refined_thought_arriving_at_stop_still_replaces_the_typed_text() {
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(RefineProvider));
+    let mic: Mic = Arc::new(StdMutex::new(None));
+    let opener_mic = mic.clone();
+    let opener: CaptureOpener = Box::new(move |_cfg| {
+        let (tx, rx) = mpsc::channel(512);
+        *opener_mic.lock().unwrap() = Some(tx);
+        Ok(Box::new(FakeCapture { rx }) as Box<dyn Capture>)
+    });
+    let log = SinkLog::default();
+    let sink = FakeSink {
+        status: TargetStatus::Injectable(AccessLevel::BasicTyping),
+        typing_ok: true,
+        log: SinkLog {
+            typed: log.typed.clone(),
+        },
+    };
+    let mut handle = Engine::spawn_with(reg, Box::new(sink), opener);
+    handle.send(EngineCommand::GrantConsent("fake".into())).await;
+    handle.send(EngineCommand::Start(Box::new(start_cfg()))).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Listening)),
+        Duration::from_secs(2),
+    )
+    .await;
+    // One quick chunk typed, then Stop before the thought ended.
+    handle.send(EngineCommand::CutSegment).await;
+    collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::Transcript(TranscriptEvent::Final(_))),
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.send(EngineCommand::Stop).await;
+    let ev = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Idle)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let replaced = ev.iter().find_map(|e| match e {
+        EngineEvent::Transcript(TranscriptEvent::Replace(t)) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(replaced.as_deref(), Some("the whole thought at stop"), "{ev:?}");
+    let typed = log.typed.lock().unwrap().concat();
+    assert!(typed.ends_with("the whole thought at stop"), "typed: {typed:?}");
 }

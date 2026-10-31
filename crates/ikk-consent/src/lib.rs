@@ -16,6 +16,8 @@ pub enum Use {
     Suggestions,
     Translation,
     Speech,
+    /// Dictated text is checked for grammar and spelling.
+    Correction,
 }
 
 /// A third party that can receive the user's data.
@@ -46,6 +48,7 @@ pub fn recipient_for(provider_id: &str, display_name: &str) -> Recipient {
             "https://openai.com/policies/privacy-policy/",
             vec![Use::Transcription, Use::Suggestions, Use::Translation],
         ),
+        "languagetool" => ("https://languagetool.org/legal/privacy", vec![Use::Correction]),
         _ => ("", vec![Use::Transcription]),
     };
     Recipient {

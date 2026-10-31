@@ -5,7 +5,10 @@
 //! `emitted` (already physically typed) and `pending` (waiting). A writer
 //! drains it at a constant rate. A correction that arrives before the
 //! writer reached the affected text is applied inside `pending` with zero
-//! visible backspaces; only already emitted text needs a [`VisibleEdit`].
+//! visible backspaces; only already emitted text needs a [`VisibleEdit`]:
+//! the wrong part is deleted at once, the replacement joins the queue and
+//! is typed at the writer's pace. (Typing the replacement as one burst
+//! instead lost most of a 130-character correction on macOS.)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleEdit {
@@ -71,9 +74,8 @@ impl TypingQueue {
             return None;
         }
         let before = self.emitted.clone();
-        let keep = emitted_chars.len().min(new_chars.len());
-        self.emitted = new_chars[..keep].iter().collect();
-        self.pending = new_chars[keep..].iter().collect();
+        self.emitted = new_chars[..common].iter().collect();
+        self.pending = new_chars[common..].iter().collect();
         Some(VisibleEdit {
             before,
             after: self.emitted.clone(),
@@ -99,15 +101,17 @@ mod tests {
         // Correction inside pending: no visible edit.
         assert_eq!(q.retarget("hallo Welt!"), None);
         assert_eq!(q.target(), "hallo Welt!");
-        // Correction of emitted text: visible edit of the emitted part only.
+        // Correction of emitted text: the wrong part is deleted (visible
+        // edit back to the common prefix), the rest is typed by the writer.
         let e = q.retarget("Hallo Welt!").unwrap();
         assert_eq!(
             e,
             VisibleEdit {
                 before: "hal".into(),
-                after: "Hal".into()
+                after: "".into()
             }
         );
-        assert_eq!(q.pending_len(), 8);
+        assert_eq!(q.pending_len(), 11);
+        assert_eq!(q.drain_step(3), "Hal");
     }
 }

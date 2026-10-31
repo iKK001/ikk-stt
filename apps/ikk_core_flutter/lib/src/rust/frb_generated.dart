@@ -5,6 +5,7 @@
 
 import 'api/core.dart';
 import 'api/engine.dart';
+import 'api/training.dart';
 import 'api/voice.dart';
 
 import 'dart:async';
@@ -71,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1767021923;
+  int get rustContentHash => 1829735733;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -188,6 +189,12 @@ abstract class RustLibApi extends BaseApi {
   });
 
   String crateApiCoreThirdPartyText();
+
+  Future<String> crateApiTrainingTrainingTake({
+    required String settingsJson,
+    required String credential,
+    required int timeoutSecs,
+  });
 
   Future<void> crateApiVoiceVoiceCheckWord({required List<Float32List> takes});
 
@@ -1141,6 +1148,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "third_party_text", argNames: []);
 
   @override
+  Future<String> crateApiTrainingTrainingTake({
+    required String settingsJson,
+    required String credential,
+    required int timeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(settingsJson, serializer);
+          sse_encode_String(credential, serializer);
+          sse_encode_u_32(timeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 33,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTrainingTrainingTakeConstMeta,
+        argValues: [settingsJson, credential, timeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTrainingTrainingTakeConstMeta =>
+      const TaskConstMeta(
+        debugName: "training_take",
+        argNames: ["settingsJson", "credential", "timeoutSecs"],
+      );
+
+  @override
   Future<void> crateApiVoiceVoiceCheckWord({required List<Float32List> takes}) {
     return handler.executeNormal(
       NormalTask(
@@ -1150,7 +1194,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1182,7 +1226,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1217,7 +1261,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 36,
             port: port_,
           );
         },

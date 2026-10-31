@@ -167,6 +167,60 @@ impl LiveTyper {
         Ok(true)
     }
 
+    /// Replace everything up to and including segment `id` by `text` (a
+    /// live correction of what was said so far); later segments stay.
+    /// `false` when the segment is gone (new session, cleared).
+    pub fn replace_through(&mut self, id: SegmentId, text: &str, sink: &mut dyn TextSink) -> Result<bool, OutputError> {
+        let Some(first) = self.committed.first().map(|s| s.id) else {
+            return Ok(false);
+        };
+        self.replace_range(first, id, text, sink)
+    }
+
+    /// Replace the segments `from` ..= `through` by `text`; the segments
+    /// before and after stay. `false` when either segment is gone.
+    pub fn replace_range(
+        &mut self,
+        from: SegmentId,
+        through: SegmentId,
+        text: &str,
+        sink: &mut dyn TextSink,
+    ) -> Result<bool, OutputError> {
+        let (Some(a), Some(b)) = (
+            self.committed.iter().position(|s| s.id == from),
+            self.committed.iter().position(|s| s.id == through),
+        ) else {
+            return Ok(false);
+        };
+        if a > b {
+            return Ok(false);
+        }
+        let tail = self.committed.split_off(b + 1);
+        self.committed.truncate(a);
+        let new_id = self.next_id;
+        self.next_id += 1;
+        self.committed.push(Segment {
+            id: new_id,
+            text: text.to_string(),
+            span: 0..0,
+        });
+        self.committed.extend(tail);
+        self.reindex();
+        self.drive(sink)?;
+        Ok(true)
+    }
+
+    /// The composed text of the segments `from` ..= `through`.
+    pub fn text_of_range(&self, from: SegmentId, through: SegmentId) -> Option<String> {
+        let a = self.committed.iter().position(|s| s.id == from)?;
+        let b = self.committed.iter().position(|s| s.id == through)?;
+        (a <= b).then(|| {
+            self.committed[a..=b]
+                .iter()
+                .fold(String::new(), |acc, s| compose_segment(&acc, &s.text))
+        })
+    }
+
     /// Delete the last committed word from model and field.
     pub fn delete_last_word(&mut self, sink: &mut dyn TextSink) -> Result<(), OutputError> {
         let current = self.text();
@@ -331,6 +385,52 @@ mod tests {
         assert!(matches!(lt.append("x", &mut s), Err(OutputError::FocusLost)));
         assert!(lt.injection_deferred());
         assert!(s.ops.is_empty());
+    }
+
+    #[test]
+    fn replace_through_corrects_the_prefix_and_keeps_the_tail() {
+        let mut lt = LiveTyper::default();
+        let mut s = RecordingSink::default();
+        let first = lt.append("hallo welt", &mut s).unwrap();
+        lt.append("wie gehts", &mut s).unwrap();
+        assert!(lt.replace_through(first, "Hallo Welt.", &mut s).unwrap());
+        assert_eq!(lt.text(), "Hallo Welt. wie gehts");
+        assert_eq!(lt.typed(), "Hallo Welt. wie gehts");
+        assert_eq!(lt.segments().len(), 2);
+        assert!(!lt.replace_through(999, "x", &mut s).unwrap());
+        // A range in the middle: head and tail untouched.
+        let ids: Vec<_> = lt.segments().iter().map(|s| s.id).collect();
+        lt.append("und tschüss", &mut s).unwrap();
+        assert_eq!(lt.text_of_range(ids[1], ids[1]).as_deref(), Some("wie gehts"));
+        assert!(lt.replace_range(ids[1], ids[1], "Wie geht's?", &mut s).unwrap());
+        assert_eq!(lt.text(), "Hallo Welt. Wie geht's? und tschüss");
+    }
+
+    /// The two-pass case: quick chunks are being typed at the writer's
+    /// pace when the whole thought replaces them. The field must end up
+    /// with exactly the new text, whatever was already typed.
+    #[test]
+    fn replacing_half_typed_chunks_deletes_the_typed_part_and_queues_the_rest() {
+        let mut lt = LiveTyper::new(Box::new(Fixed(true)), 10);
+        let mut s = RecordingSink::default();
+        let a = lt.append("Hallo, ich melde", &mut s).unwrap();
+        lt.append("Wer einen Wein haben?", &mut s).unwrap();
+        let c = lt.append("Textschreiben", &mut s).unwrap();
+        // The writer got through the first chunk and a bit of the second.
+        for _ in 0..20 {
+            lt.flow_tick(1, &mut s).unwrap();
+        }
+        assert_eq!(lt.typed(), "Hallo, ich melde Wer");
+        s.ops.clear();
+        let whole = "Hallo, ich möchte einen längeren Text schreiben.";
+        assert!(lt.replace_range(a, c, whole, &mut s).unwrap());
+        // Only the wrong, already typed part is deleted; nothing is typed in a burst.
+        assert_eq!(s.ops, vec!["bs:8".to_string()], "{:?}", s.ops);
+        assert_eq!(lt.typed(), "Hallo, ich m");
+        assert_eq!(lt.text(), whole);
+        lt.flush(&mut s).unwrap();
+        assert_eq!(lt.typed(), whole);
+        assert!(s.ops.iter().skip(1).all(|o| o.starts_with("type:")), "{:?}", s.ops);
     }
 
     #[test]

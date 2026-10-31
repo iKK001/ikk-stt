@@ -125,6 +125,22 @@ fn parse_batch(json: &serde_json::Value) -> Transcript {
             .and_then(|a| a.get("confidence"))
             .and_then(|c| c.as_f64())
             .map(|c| c as f32),
+        words: alt
+            .and_then(|a| a.get("words"))
+            .and_then(|w| w.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|w| {
+                        Some(ikk_stt::Word {
+                            text: w.get("punctuated_word").or(w.get("word"))?.as_str()?.trim().to_string(),
+                            start: std::time::Duration::from_secs_f64(w.get("start")?.as_f64()?.max(0.0)),
+                            end: std::time::Duration::from_secs_f64(w.get("end")?.as_f64()?.max(0.0)),
+                        })
+                    })
+                    .filter(|w| !w.text.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -167,7 +183,9 @@ impl Provider for Deepgram {
                 .map(|s| s.to_string())
                 .collect(),
             requires_network: true,
+            max_in_flight: None,
             own_audio: false,
+            timed_words: true,
         }
     }
 
@@ -179,6 +197,7 @@ impl Provider for Deepgram {
                 text: String::new(),
                 language: None,
                 confidence: None,
+                words: Vec::new(),
             });
         }
         batch_request(key, Self::url(BATCH_URL, cfg, false), pcm).await

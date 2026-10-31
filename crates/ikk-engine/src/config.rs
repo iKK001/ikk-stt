@@ -22,8 +22,15 @@ pub fn start_config(settings: &Settings) -> StartConfig {
         SettingsTransfer::Batch => TransferMode::Batch,
     };
     session.keywords = opts.keywords.iter().map(|k| (k.clone(), 5)).collect();
+    session.learned = settings.text.training.learned_words();
     session.endpointing = Duration::from_millis(settings.sound.vad.silence_duration_ms as u64);
     session.chunk_interval = Duration::from_millis(settings.sound.vad.chunk_interval_ms as u64);
+    session.refine = settings.sound.vad.refine;
+    session.refine_preview = !settings.sound.vad.type_quick_text;
+    session.agreement = settings.sound.vad.agreement.then(|| ikk_stt::Agreement {
+        step: Duration::from_millis(settings.sound.vad.agreement_step_ms.max(500) as u64),
+        windows: settings.sound.vad.agreement_windows.max(1) as usize,
+    });
     if settings.providers.active == "voiceitt" {
         // Voiceitt's three switches ride in the model string (see provider docs).
         let mut flags = vec!["si"];
@@ -44,6 +51,13 @@ pub fn start_config(settings: &Settings) -> StartConfig {
         preamp_gain_db: settings.sound.preamp_gain_db,
         denoise: settings.sound.denoise != Denoise::Off,
         agc: settings.sound.agc,
+        gate: settings.sound.gate,
+        highpass_hz: settings.sound.highpass_hz,
+        presence_db: settings.sound.presence_db,
+        compressor: settings.sound.compressor,
+        trill_filler: settings.sound.trill_filler,
+        noise_profile: settings.sound.noise_profile,
+        path_eq_db: settings.sound.path_eq_db.clone(),
         ios_mode: match settings.sound.ios_session_mode {
             SettingsIosMode::Measurement => IosSessionMode::Measurement,
             SettingsIosMode::Default => IosSessionMode::Default,
@@ -66,6 +80,7 @@ pub fn start_config(settings: &Settings) -> StartConfig {
             auto_punctuation: false,
             auto_casing: false,
             vocabulary: Vec::new(),
+            learned: settings.text.training.learned_words(),
         },
         vad_mode,
         pause: Duration::from_millis(settings.sound.vad.silence_duration_ms as u64),
@@ -75,6 +90,8 @@ pub fn start_config(settings: &Settings) -> StartConfig {
             _ => String::new(),
         },
         flow_ms: 10,
+        correction: settings.text.live_correction,
+        correction_rewrites: settings.text.correction_rewrites,
     }
 }
 
@@ -87,9 +104,10 @@ mod tests {
     fn maps_defaults() {
         let s = Settings::default();
         let c = start_config(&s);
-        assert_eq!(c.session.provider.0, "deepgram");
-        assert_eq!(c.session.transfer, TransferMode::Streaming);
-        assert_eq!(c.pause, Duration::from_millis(900));
+        assert_eq!(c.session.provider.0, "elevenlabs");
+        assert_eq!(c.session.transfer, TransferMode::Batch);
+        assert_eq!(c.pause, Duration::from_millis(4000));
+        assert!(c.session.refine);
         assert_eq!(c.vad_mode, VadMode::Normal);
         assert_eq!(c.command_locale, "de-CH");
         assert!(!c.capture.denoise);

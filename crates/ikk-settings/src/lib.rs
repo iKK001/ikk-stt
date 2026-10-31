@@ -16,6 +16,125 @@ pub struct Settings {
     pub providers: ProviderSettings,
     pub sound: SoundSettings,
     pub microphone: MicrophoneSettings,
+    #[serde(default)]
+    pub text: TextSettings,
+}
+
+/// What happens to the text after recognition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TextSettings {
+    /// Grammar and spelling checked live by LanguageTool and corrected in
+    /// place. Text leaves the device; asked for consent like a provider.
+    #[serde(default)]
+    pub live_correction: bool,
+    /// Live correction rewrites the typed text (deletes and types again).
+    /// Off: the corrected text is only shown in the app as a suggestion.
+    #[serde(default)]
+    pub correction_rewrites: bool,
+    /// Training mode: words entered once and said a few times.
+    #[serde(default)]
+    pub training: TrainingSettings,
+}
+
+/// Learned words and whether they are used. Stored with the settings, on
+/// the device; the words go to a provider only as hints with a request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub words: Vec<LearnedEntry>,
+}
+
+impl Default for TrainingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            words: Vec::new(),
+        }
+    }
+}
+
+/// One trained word: how it is written, what the recogniser returned for
+/// it (with how often), and whether its forms are swapped even where the
+/// recogniser was sure (only for words whose mishearings are never real
+/// words).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LearnedEntry {
+    pub word: String,
+    #[serde(default)]
+    pub heard: Vec<HeardForm>,
+    #[serde(default)]
+    pub always: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HeardForm {
+    pub text: String,
+    #[serde(default)]
+    pub count: u32,
+}
+
+impl TrainingSettings {
+    /// The entries as the session uses them (empty when switched off).
+    pub fn learned_words(&self) -> Vec<ikk_text::LearnedWord> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        self.words
+            .iter()
+            .filter(|e| !e.word.trim().is_empty())
+            .map(|e| ikk_text::LearnedWord {
+                word: e.word.trim().to_string(),
+                heard: e
+                    .heard
+                    .iter()
+                    .map(|h| h.text.trim().to_string())
+                    .filter(|h| !h.is_empty())
+                    .collect(),
+                always: e.always,
+            })
+            .collect()
+    }
+
+    /// Record what the recogniser returned for `word`. A result equal to
+    /// the word (ignoring case and punctuation) is a hit and not a form.
+    pub fn learn(&mut self, word: &str, heard: &str) {
+        let word = word.trim();
+        let heard = heard.trim();
+        if word.is_empty() {
+            return;
+        }
+        let entry = match self
+            .words
+            .iter_mut()
+            .find(|e| ikk_text::learned::norm(&e.word) == ikk_text::learned::norm(word))
+        {
+            Some(e) => e,
+            None => {
+                self.words.push(LearnedEntry {
+                    word: word.to_string(),
+                    ..Default::default()
+                });
+                self.words.last_mut().expect("just pushed")
+            }
+        };
+        if heard.is_empty() || ikk_text::learned::norm(heard) == ikk_text::learned::norm(word) {
+            return;
+        }
+        let heard_norm = ikk_text::learned::norm(heard);
+        match entry
+            .heard
+            .iter_mut()
+            .find(|h| ikk_text::learned::norm(&h.text) == heard_norm)
+        {
+            Some(h) => h.count += 1,
+            None => entry.heard.push(HeardForm {
+                text: heard.trim_end_matches(['.', ',', '!', '?', ';', ':']).to_string(),
+                count: 1,
+            }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- providers
@@ -35,13 +154,17 @@ pub struct ProviderSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TransferMode {
     /// WebSocket / Socket.IO, live interim text, no wait at stop.
-    #[default]
     Streaming,
-    /// Chunked upload, higher accuracy, 1–3 s wait per chunk.
+    /// Chunked upload: chunks cut between words, higher accuracy, the
+    /// default — a live stream of unclear speech comes back empty.
+    #[default]
     Batch,
 }
 
+/// Partial entries (the app writes just `{"transfer": "Batch"}`) take the
+/// defaults for the rest.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ProviderOptions {
     /// Model id, e.g. "nova-3", "whisper-1", "scribe_v2".
     pub model: Option<String>,
@@ -80,12 +203,43 @@ pub enum IosSessionMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoundSettings {
+    /// Master switch. Off: the pipeline as released for clear speech
+    /// (v0.0.1(51): 2 s chunks cut at word gaps, 0.9 s pause, live
+    /// streams where the provider has them, no filters). On: the
+    /// impaired-voice setup being developed (agreed words only, batch,
+    /// steady-noise filter, 4 s pause). The app writes the matching
+    /// values into the fields below when this is toggled.
+    #[serde(default = "default_true")]
+    pub impaired_voice: bool,
     /// Software gain before any filter, 0..=24 dB.
     pub preamp_gain_db: f32,
     /// Automatic gain: speech is brought to a steady level before it is
     /// sent, whatever the microphone and distance.
     #[serde(default = "default_true")]
     pub agc: bool,
+    /// Turn the pauses between words down: breathing or a ventilator in
+    /// the pauses is otherwise transcribed as words.
+    #[serde(default)]
+    pub gate: bool,
+    /// Tone shaping (all platforms): high-pass cutoff Hz (0 = off),
+    /// presence lift at 3 kHz in dB (0 = off), fast compressor.
+    #[serde(default)]
+    pub highpass_hz: f32,
+    #[serde(default)]
+    pub presence_db: f32,
+    #[serde(default)]
+    pub compressor: bool,
+    #[serde(default)]
+    pub trill_filler: bool,
+    /// Learnt steady-noise profile (ventilator, fan) subtracted from the
+    /// audio. On by default: neutral on clean speech, the only filter that
+    /// helped on a noisy path (measured 2026-11-01).
+    #[serde(default = "default_true")]
+    pub noise_profile: bool,
+    /// Microphone-path equaliser from a calibration (18 third-octave
+    /// gains in dB, 100 Hz–6.3 kHz); empty = none.
+    #[serde(default)]
+    pub path_eq_db: Vec<f32>,
     pub denoise: Denoise,
     pub ios_session_mode: IosSessionMode,
     pub vad: VadSettings,
@@ -99,9 +253,37 @@ pub struct VadSettings {
     pub silence_duration_ms: u32,
     /// Silence this long starts a new paragraph / entry.
     pub long_pause_ms: u32,
-    /// Batch mode: audio is cut into chunks of this length (a timer),
-    /// and at pauses.
+    /// Batch mode: once a chunk is this long it is cut at the next gap
+    /// between words (never inside one); without any gap at three times
+    /// this length. Pauses cut as well.
     pub chunk_interval_ms: u32,
+    /// Batch mode: when a pause ends a thought that took several chunks,
+    /// transcribe it again in one piece and replace the quick chunk texts.
+    #[serde(default)]
+    pub refine: bool,
+    /// With `refine`: type the quick chunk texts too and replace them
+    /// later (off: show them only in the app, type each thought once).
+    #[serde(default = "default_true")]
+    pub type_quick_text: bool,
+    /// Agreed words only: the thought so far is transcribed every
+    /// `agreement_step_ms`; words that the last `agreement_windows`
+    /// results agree on are typed and never changed. Overrides `refine`.
+    #[serde(default = "default_true")]
+    pub agreement: bool,
+    #[serde(default = "default_agreement_step")]
+    pub agreement_step_ms: u32,
+    #[serde(default = "default_agreement_windows")]
+    pub agreement_windows: u32,
+}
+
+fn default_agreement_step() -> u32 {
+    1000
+}
+fn default_agreement_windows() -> u32 {
+    // Four readings remembered, a word out when three agree. Six with
+    // four agreeing was tried live on the loudspeaker→phone path and lost
+    // whole sentences (124 wrong of 240) where four lost 44–51.
+    4
 }
 
 fn default_true() -> bool {
@@ -125,7 +307,9 @@ pub struct MicrophoneSettings {
 impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
-            active: "deepgram".into(),
+            // ElevenLabs: the steadiest reading of unclear speech in the
+            // measurements (same words every run); others are one tap away.
+            active: "elevenlabs".into(),
             language: "deu".into(),
             options: BTreeMap::new(),
         }
@@ -136,7 +320,15 @@ impl Default for SoundSettings {
     fn default() -> Self {
         Self {
             preamp_gain_db: 0.0,
+            impaired_voice: true,
             agc: true,
+            gate: false,
+            highpass_hz: 0.0,
+            presence_db: 0.0,
+            compressor: false,
+            trill_filler: false,
+            noise_profile: true,
+            path_eq_db: Vec::new(),
             denoise: Denoise::Off,
             ios_session_mode: IosSessionMode::Default,
             vad: VadSettings::default(),
@@ -146,12 +338,19 @@ impl Default for SoundSettings {
 
 impl Default for VadSettings {
     fn default() -> Self {
-        // Field-tested defaults: threshold, silence, long pause, chunk interval.
+        // The "word by word" preset, measured on impaired speech: quick
+        // 3 s chunks, a thought ends after 4 s, then it is re-checked whole.
+        // Fluent speakers switch to 2 s / 0.9 s without re-check.
         Self {
             silence_threshold_db: -45.0,
-            silence_duration_ms: 900,
+            silence_duration_ms: 4000,
             long_pause_ms: 2500,
-            chunk_interval_ms: 2000,
+            chunk_interval_ms: 3000,
+            refine: true,
+            type_quick_text: true,
+            agreement: true,
+            agreement_step_ms: 1000,
+            agreement_windows: 4,
         }
     }
 }
@@ -163,6 +362,7 @@ impl Default for Settings {
             providers: ProviderSettings::default(),
             sound: SoundSettings::default(),
             microphone: MicrophoneSettings::default(),
+            text: TextSettings::default(),
         }
     }
 }
@@ -177,7 +377,7 @@ pub enum SettingsError {
 
 /// Current on-disk schema. Bump when a field changes meaning; `migrate`
 /// upgrades older files in place.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 impl Settings {
     pub fn to_json(&self) -> Result<String, SettingsError> {
@@ -212,6 +412,20 @@ impl Settings {
         if self.schema_version < 3 && self.sound.vad.chunk_interval_ms == 12000 {
             self.sound.vad.chunk_interval_ms = Self::default().sound.vad.chunk_interval_ms;
         }
+        // v4: the defaults tuned for fluent speech (2 s chunks, 0.9 s
+        // pause, live streams, RNNoise) gave word salad for the people
+        // this is built for; every install moves to the word-by-word
+        // preset. The Fluent preset is one tap away.
+        if self.schema_version < 4 {
+            let d = Self::default();
+            self.sound.vad.chunk_interval_ms = d.sound.vad.chunk_interval_ms;
+            self.sound.vad.silence_duration_ms = d.sound.vad.silence_duration_ms;
+            self.sound.vad.refine = true;
+            self.sound.denoise = Denoise::Off;
+            for o in self.providers.options.values_mut() {
+                o.transfer = TransferMode::Batch;
+            }
+        }
         if self.schema_version < SCHEMA_VERSION {
             self.schema_version = SCHEMA_VERSION;
         }
@@ -234,10 +448,20 @@ mod tests {
     fn roundtrip_and_defaults() {
         let s = Settings::default();
         let back = Settings::from_json(&s.to_json().unwrap()).unwrap();
-        assert_eq!(back.providers.active, "deepgram");
-        assert_eq!(back.sound.vad.silence_duration_ms, 900);
+        assert_eq!(back.providers.active, "elevenlabs");
+        assert_eq!(back.sound.vad.silence_duration_ms, 4000);
+        assert!(back.sound.vad.refine);
         assert!(back.microphone.device_id.is_none());
-        assert_eq!(back.active_options().transfer, TransferMode::Streaming);
+        assert_eq!(back.active_options().transfer, TransferMode::Batch);
+    }
+
+    #[test]
+    fn partial_provider_options_take_defaults() {
+        let mut json: serde_json::Value = serde_json::from_str(&Settings::default().to_json().unwrap()).unwrap();
+        json["providers"]["options"]["deepgram"] = serde_json::json!({ "transfer": "Batch" });
+        let s = Settings::from_json(&json.to_string()).unwrap();
+        assert_eq!(s.active_options().transfer, TransferMode::Batch);
+        assert!(s.active_options().keywords.is_empty());
     }
 
     #[test]
@@ -245,7 +469,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ikk-settings-test-{}", std::process::id()));
         let path = dir.join("settings.json");
         let loaded = Settings::load(&path).unwrap();
-        assert_eq!(loaded.providers.active, "deepgram");
+        assert_eq!(loaded.providers.active, "elevenlabs");
         let mut s = loaded;
         s.providers.active = "openai".into();
         s.save(&path).unwrap();
@@ -282,16 +506,36 @@ mod tests {
             };
             s.sound.vad.chunk_interval_ms = 12000;
             s.migrate();
-            assert_eq!(s.sound.vad.chunk_interval_ms, 2000);
+            assert_eq!(s.sound.vad.chunk_interval_ms, 3000);
             assert_eq!(s.schema_version, SCHEMA_VERSION);
         }
-        // A value the user chose on purpose stays.
+        // v3 installs ran the fluent defaults: they move to the preset,
+        // their provider entries to batch, RNNoise off.
         let mut s = Settings {
-            schema_version: 1,
+            schema_version: 3,
             ..Default::default()
         };
-        s.sound.vad.chunk_interval_ms = 3000;
+        s.sound.vad.chunk_interval_ms = 2000;
+        s.sound.vad.silence_duration_ms = 900;
+        s.sound.vad.refine = false;
+        s.sound.denoise = Denoise::RnNoise;
+        s.providers.options.insert(
+            "elevenlabs".into(),
+            ProviderOptions {
+                transfer: TransferMode::Streaming,
+                ..Default::default()
+            },
+        );
         s.migrate();
         assert_eq!(s.sound.vad.chunk_interval_ms, 3000);
+        assert_eq!(s.sound.vad.silence_duration_ms, 4000);
+        assert!(s.sound.vad.refine);
+        assert_eq!(s.sound.denoise, Denoise::Off);
+        assert_eq!(s.providers.options["elevenlabs"].transfer, TransferMode::Batch);
+        // A current file is left alone.
+        let mut s = Settings::default();
+        s.sound.vad.chunk_interval_ms = 2000;
+        s.migrate();
+        assert_eq!(s.sound.vad.chunk_interval_ms, 2000);
     }
 }

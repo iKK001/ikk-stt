@@ -6,6 +6,7 @@
 
 pub mod engine;
 pub mod sealed;
+pub mod training;
 pub mod voice;
 
 use serde::{Deserialize, Serialize};

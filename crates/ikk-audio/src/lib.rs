@@ -10,8 +10,12 @@ pub mod capture;
 pub mod chain;
 pub mod denoise;
 pub mod dsp;
+pub mod file_source;
 pub mod mmcss;
+pub mod profile;
+pub mod shape;
 pub mod vad;
+pub mod wav;
 
 use std::time::Duration;
 
@@ -30,6 +34,9 @@ pub struct AudioFrame {
     pub sample_rate_hz: u32,
     /// Position of the first sample relative to session start.
     pub offset: Duration,
+    /// How surely the frame holds speech (0..1), from the noise model in
+    /// the capture chain; `None` when the frame was not analysed.
+    pub speech: Option<f32>,
 }
 
 impl AudioFrame {
@@ -84,6 +91,27 @@ pub struct CaptureConfig {
     pub preamp_gain_db: f32,
     pub denoise: bool,
     pub agc: bool,
+    /// Turn the pauses between words down (breathing, ventilator).
+    #[serde(default)]
+    pub gate: bool,
+    /// High-pass cutoff in Hz (0 = off): rumble, ventilator hum.
+    #[serde(default)]
+    pub highpass_hz: f32,
+    /// Presence lift around 3 kHz in dB (0 = off): sharper consonants.
+    #[serde(default)]
+    pub presence_db: f32,
+    /// Fast compressor flattening the flutter of a rolled R.
+    #[serde(default)]
+    pub compressor: bool,
+    /// Trill filler: lifts the closures of a rolled R.
+    #[serde(default)]
+    pub trill_filler: bool,
+    /// Learnt steady-noise profile subtracted from the audio (ventilator).
+    #[serde(default)]
+    pub noise_profile: bool,
+    /// Fixed microphone-path equaliser, 18 third-octave gains in dB.
+    #[serde(default)]
+    pub path_eq_db: Vec<f32>,
     pub ios_mode: IosSessionMode,
     /// Rate the frames leave the capture at. The pipeline's 16 kHz unless
     /// a provider wants the microphone's full bandwidth (48 kHz).
@@ -102,6 +130,13 @@ impl Default for CaptureConfig {
             preamp_gain_db: 0.0,
             denoise: false,
             agc: false,
+            gate: false,
+            highpass_hz: 0.0,
+            presence_db: 0.0,
+            compressor: false,
+            trill_filler: false,
+            noise_profile: false,
+            path_eq_db: Vec::new(),
             ios_mode: IosSessionMode::Default,
             sample_rate_hz: PIPELINE_SAMPLE_RATE_HZ,
         }
@@ -136,6 +171,7 @@ mod tests {
             samples: vec![0.0; 160],
             sample_rate_hz: 16_000,
             offset: Duration::ZERO,
+            speech: None,
         };
         assert!(f.level_dbfs() <= -99.0);
         assert_eq!(f.duration(), Duration::from_millis(10));
@@ -147,6 +183,7 @@ mod tests {
             samples: vec![1.0; 16],
             sample_rate_hz: 16_000,
             offset: Duration::ZERO,
+            speech: None,
         };
         assert!(f.level_dbfs().abs() < 1e-3);
         assert_eq!(f.to_pcm_s16le()[..2], [0xFF, 0x7F]);

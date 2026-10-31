@@ -29,6 +29,15 @@ const MAX_REST_SECONDS: usize = 55;
 #[derive(Default)]
 pub struct Azure;
 
+/// Azure locale: an explicit one in the model option (`de-AT`) wins,
+/// otherwise the settings language (ISO-639-3) is mapped.
+fn locale_for(cfg: &SessionConfig) -> String {
+    match cfg.model.as_deref() {
+        Some(m) if m.len() == 5 && m.as_bytes()[2] == b'-' => m.to_string(),
+        _ => locale(&cfg.language).to_string(),
+    }
+}
+
 /// Azure locale for a settings language (ISO-639-3).
 pub fn locale(iso639_3: &str) -> &'static str {
     if iso639_3.trim() == "gsw" {
@@ -253,6 +262,9 @@ impl Provider for Azure {
             streaming: true,
             interim: true,
             batch_replacement: false,
+            // "The number of parallel requests exceeded the number of
+            // allowed concurrent transcriptions" from the second one on.
+            max_in_flight: Some(1),
             required_sample_rate_hz: Some(WIRE_RATE_HZ),
             languages: ["deu", "gsw", "eng", "fra", "ita", "spa", "por", "nld"]
                 .iter()
@@ -260,12 +272,14 @@ impl Provider for Azure {
                 .collect(),
             requires_network: true,
             own_audio: false,
+            timed_words: false,
         }
     }
 
     async fn transcribe(&self, audio: AudioClip, cfg: &SessionConfig) -> Result<Transcript, SttError> {
         let (region, key) = credential(cfg)?;
-        let locale = locale(&cfg.language);
+        let locale = locale_for(cfg);
+        let locale = locale.as_str();
         let pcm = audio.to_pcm_s16le(WIRE_RATE_HZ);
         // Under a minute per request.
         let piece = MAX_REST_SECONDS * WIRE_RATE_HZ as usize * 2;
@@ -284,12 +298,14 @@ impl Provider for Azure {
             text: texts.join(" "),
             language: Some(locale.to_string()),
             confidence: None,
+            words: Vec::new(),
         })
     }
 
     async fn stream(&self, cfg: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError> {
         let (region, key) = credential(cfg)?;
-        let locale = locale(&cfg.language);
+        let locale = locale_for(cfg);
+        let locale = locale.as_str();
         info!(%region, %locale, "azure ws connect");
         let mut req = endpoint("wss", &region, locale)
             .into_client_request()

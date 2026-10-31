@@ -10,6 +10,8 @@ pub mod azure;
 pub mod deepgram;
 #[cfg(feature = "elevenlabs")]
 pub mod elevenlabs;
+#[cfg(feature = "languagetool")]
+pub mod languagetool;
 #[cfg(feature = "openai")]
 pub mod openai;
 #[cfg(feature = "voiceitt")]
@@ -32,6 +34,8 @@ pub fn register_all(reg: &mut ProviderRegistry) {
     reg.register(Box::new(elevenlabs::ElevenLabs));
     #[cfg(feature = "azure")]
     reg.register(Box::new(azure::Azure));
+    #[cfg(feature = "languagetool")]
+    reg.set_corrector(std::sync::Arc::new(languagetool::LanguageTool));
     // Windows' own recognizer is under investigation (its online dictation
     // returned nothing in tests): only offered with IKK_WINDOWS_SPEECH=1.
     if std::env::var("IKK_WINDOWS_SPEECH").is_ok_and(|v| v == "1") {

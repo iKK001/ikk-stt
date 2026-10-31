@@ -28,9 +28,22 @@ impl DenoiseStage {
         }
     }
 
-    /// RNNoise's own speech probability for the last frame (0..1).
+    /// RNNoise's own speech probability (0..1): the highest over the
+    /// 10 ms frames of the last block, so a word starting late in the
+    /// block still counts.
     pub fn last_voice_probability(&self) -> f32 {
         self.last_voice_prob
+    }
+
+    /// Whether this input rate can be analysed (48 kHz or a divisor).
+    pub fn supports_rate(&self) -> bool {
+        self.factor().is_some()
+    }
+
+    /// Run the model for its speech probability only; the audio is left
+    /// as it is.
+    pub fn analyse(&mut self, input: &[f32]) {
+        let _ = self.process(input);
     }
 
     fn factor(&self) -> Option<usize> {
@@ -72,6 +85,7 @@ impl DenoiseStage {
         let mut out = Vec::with_capacity(full * RNNOISE_FRAME);
         let mut in_frame = [0.0f32; RNNOISE_FRAME];
         let mut out_frame = [0.0f32; RNNOISE_FRAME];
+        let mut prob = 0.0f32;
         for f in 0..full {
             let start = f * RNNOISE_FRAME;
             for (dst, &src) in in_frame
@@ -80,10 +94,11 @@ impl DenoiseStage {
             {
                 *dst = src * I16_SCALE;
             }
-            self.last_voice_prob = self.state.process_frame(&mut out_frame, &in_frame);
+            prob = prob.max(self.state.process_frame(&mut out_frame, &in_frame));
             out.extend(out_frame.iter().map(|&s| (s / I16_SCALE).clamp(-1.0, 1.0)));
         }
         self.residual_48k.drain(0..full * RNNOISE_FRAME);
+        self.last_voice_prob = prob;
         out
     }
 }

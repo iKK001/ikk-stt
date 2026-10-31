@@ -211,6 +211,7 @@ impl Voiceitt {
                 text: j.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string(),
                 language: Some("eng".into()),
                 confidence: None,
+                words: Vec::new(),
             });
         }
         Err(SttError::Provider(ErrorClass::Unauthorized))
@@ -234,7 +235,9 @@ impl Provider for Voiceitt {
             required_sample_rate_hz: Some(WIRE_RATE_HZ),
             languages: vec!["eng".into()],
             requires_network: true,
+            max_in_flight: None,
             own_audio: false,
+            timed_words: false,
         }
     }
 
@@ -244,6 +247,7 @@ impl Provider for Voiceitt {
                 text: String::new(),
                 language: None,
                 confidence: None,
+                words: Vec::new(),
             });
         }
         self.batch(cfg, audio.to_wav(WIRE_RATE_HZ)).await
@@ -543,6 +547,7 @@ impl StreamingSession for VoiceittSession {
                     samples: pcm_to_f32(&tail),
                     sample_rate_hz: WIRE_RATE_HZ,
                     offset: Duration::ZERO,
+                    speech: None,
                 }],
             }
             .to_wav(WIRE_RATE_HZ);

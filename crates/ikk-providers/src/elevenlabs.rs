@@ -43,6 +43,7 @@ impl Provider for ElevenLabs {
             batch: true,
             requires_network: true,
             own_audio: false,
+            timed_words: true,
             ..Default::default()
         }
     }
@@ -53,6 +54,7 @@ impl Provider for ElevenLabs {
                 text: String::new(),
                 language: None,
                 confidence: None,
+                words: Vec::new(),
             });
         }
         let key = cfg
@@ -86,15 +88,42 @@ impl Provider for ElevenLabs {
             return Err(SttError::Provider(ErrorClass::from_status(status, &body)));
         }
         let j: serde_json::Value = serde_json::from_str(&body).map_err(err)?;
+        // Scribe lists words and spacing entries with start/end seconds.
+        let words = j
+            .get("words")
+            .and_then(|w| w.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|w| w.get("type").and_then(|t| t.as_str()) != Some("spacing"))
+                    .filter_map(|w| {
+                        Some(crate_word(
+                            w.get("text")?.as_str()?,
+                            w.get("start")?.as_f64()?,
+                            w.get("end")?.as_f64()?,
+                        ))
+                    })
+                    .filter(|w| !w.text.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Transcript {
             text: j.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string(),
             language: j.get("language_code").and_then(|l| l.as_str()).map(String::from),
             confidence: j.get("language_probability").and_then(|c| c.as_f64()).map(|c| c as f32),
+            words,
         })
     }
 
     async fn stream(&self, _cfg: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError> {
         Err(SttError::Unsupported)
+    }
+}
+
+fn crate_word(text: &str, start: f64, end: f64) -> Word {
+    Word {
+        text: text.trim().to_string(),
+        start: std::time::Duration::from_secs_f64(start.max(0.0)),
+        end: std::time::Duration::from_secs_f64(end.max(start.max(0.0))),
     }
 }
 

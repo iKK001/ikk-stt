@@ -100,7 +100,9 @@ impl Provider for WindowsSpeech {
                 .map(String::from)
                 .to_vec(),
             requires_network: true,
+            max_in_flight: None,
             own_audio: true,
+            timed_words: false,
         }
     }
 

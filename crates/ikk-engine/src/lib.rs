@@ -21,6 +21,7 @@
 //! only ever appears when it is needed (ARCHITECTURE §10).
 
 pub mod config;
+pub mod training;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -114,7 +115,42 @@ pub struct StartConfig {
     /// Typing flow: ms per character when draining committed text into the
     /// target (even writing flow). 0 = type each final at once.
     pub flow_ms: u32,
+    /// Grammar and spelling corrected live by the registry's corrector.
+    pub correction: bool,
+    /// With `correction`: write the corrected text over the typed one.
+    /// Otherwise it is only reported ([`EngineEvent::Suggestion`]).
+    pub correction_rewrites: bool,
 }
+
+/// Live correction of a session: one request in flight at a time, the
+/// answer applied to the newest segments it covered.
+struct Correction {
+    /// Settings language (ISO-639-3), empty = auto.
+    language: String,
+    /// Answers from an earlier session are dropped.
+    generation: u64,
+    in_flight: bool,
+    /// New text arrived while a request was out.
+    dirty: bool,
+    /// Text already checked; no second request for the same text.
+    checked: String,
+    /// Write corrections over the typed text; otherwise only suggest.
+    rewrites: bool,
+    asked_consent: bool,
+    /// After a 429, corrections rest until here.
+    paused_until: Option<Instant>,
+    last_request: Option<Instant>,
+    /// A delayed retry is already on its way.
+    tick_pending: bool,
+}
+
+/// Rest after the checker said "too many requests".
+const CORRECTION_PAUSE: Duration = Duration::from_secs(60);
+/// The checker's limits are per minute: at most one request every few
+/// seconds.
+const CORRECTION_MIN_GAP: Duration = Duration::from_secs(4);
+/// Only the newest segments are checked; earlier text had its turn.
+const CORRECTION_WINDOW: usize = 3;
 
 #[derive(Debug)]
 pub enum EngineCommand {
@@ -135,6 +171,16 @@ pub enum EngineCommand {
     ClearSessionText,
     /// Offline voice commands on (trained words + what to start with) or off.
     SetVoiceCommands(Option<Box<VoiceSetup>>),
+    /// The corrector answered for the segments `from` ..= `through`.
+    ApplyCorrection {
+        generation: u64,
+        from: ikk_output::live::SegmentId,
+        through: ikk_output::live::SegmentId,
+        result: Result<Option<String>, String>,
+        throttled: bool,
+    },
+    /// The minimum gap between correction requests has passed.
+    CorrectionTick(u64),
     Shutdown,
 }
 
@@ -159,6 +205,9 @@ pub enum EngineEvent {
     Transferred(usize),
     /// Characters handed to the sink.
     Typed(usize),
+    /// Live correction without rewriting: how the checker would write the
+    /// text so far. Shown by the shell, never typed.
+    Suggestion(String),
     /// Mobile: the host (keyboard extension / IME) must insert this text.
     /// Text for a host that inserts it itself (Android service, iOS
     /// keyboard). `rhythm`: type it character by character (streaming);
@@ -258,7 +307,13 @@ const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(2);
 const QUIET_SUMMARIES: u32 = 10;
 const STANDBY_LEVEL_INTERVAL: Duration = Duration::from_secs(3);
-const FINISH_GRACE: Duration = Duration::from_secs(8);
+/// How long `finish` may take: it waits for the chunks in flight and the
+/// second pass over the whole thought.
+const FINISH_GRACE: Duration = Duration::from_secs(20);
+/// After `finish`, how long late results are waited for: the last chunks
+/// and the second pass over the whole thought (a 30 s thought takes a
+/// recogniser a few seconds).
+const LATE_RESULTS: Duration = Duration::from_secs(15);
 
 pub struct Engine {
     registry: ProviderRegistry,
@@ -285,6 +340,12 @@ pub struct Engine {
     insert_style: ikk_output::InsertStyle,
     /// Typing rhythm for hosts that type the text themselves (Android).
     host_rhythm: ikk_output::rhythm::Rhythm,
+    /// To hand asynchronous results (corrections) back to this loop.
+    self_tx: mpsc::Sender<EngineCommand>,
+    correction: Option<Correction>,
+    correction_generation: u64,
+    /// The segment the last final went into.
+    last_segment: Option<ikk_output::live::SegmentId>,
     voice: Option<Voice>,
     /// When and how much text went into the target in this session; lets a
     /// spoken stop word take back what was typed for it.
@@ -306,6 +367,7 @@ impl Engine {
     ) -> EngineHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (ev_tx, ev_rx) = mpsc::channel(256);
+        let self_tx = cmd_tx.clone();
         let engine = Engine {
             registry,
             consent: ConsentState::default(),
@@ -326,6 +388,10 @@ impl Engine {
             live: LiveTyper::default(),
             insert_style: ikk_output::InsertStyle::default(),
             host_rhythm: ikk_output::rhythm::Rhythm::default(),
+            self_tx,
+            correction: None,
+            correction_generation: 0,
+            last_segment: None,
             voice: None,
             typed_log: Vec::new(),
             discard_pending: false,
@@ -466,7 +532,170 @@ impl Engine {
                 });
                 Ok(())
             }
+            EngineCommand::ApplyCorrection {
+                generation,
+                from,
+                through,
+                result,
+                throttled,
+            } => {
+                self.apply_correction(generation, from, through, result, throttled)
+                    .await;
+                Ok(())
+            }
+            EngineCommand::CorrectionTick(generation) => {
+                if self.correction.as_ref().is_some_and(|c| c.generation == generation) {
+                    if let Some(c) = self.correction.as_mut() {
+                        c.tick_pending = false;
+                    }
+                    self.schedule_correction().await;
+                }
+                Ok(())
+            }
             EngineCommand::Shutdown => Ok(()),
+        }
+    }
+
+    /// A final was committed: ask the corrector for the newest segments,
+    /// unless one request is already out (then once it is back) or the
+    /// last request was moments ago (then after the gap).
+    async fn schedule_correction(&mut self) {
+        let Some(corrector) = self.registry.corrector() else {
+            return;
+        };
+        let Some(through) = self.last_segment else { return };
+        let allowed = self.consent.decision(corrector.id()) == Decision::Allowed;
+        // The newest segments only: the ones before were checked already.
+        let segments = self.live.segments();
+        let start = segments.len().saturating_sub(CORRECTION_WINDOW);
+        let Some(from) = segments.get(start).map(|s| s.id) else {
+            return;
+        };
+        let Some(text) = self.live.text_of_range(from, through) else {
+            return;
+        };
+        let credential = self
+            .credentials
+            .get(&ProviderId(corrector.id().to_string()))
+            .map(|s| s.expose().to_string());
+        let Some(c) = self.correction.as_mut() else { return };
+        if c.paused_until.is_some_and(|t| t > Instant::now()) {
+            return;
+        }
+        if !allowed {
+            if !c.asked_consent {
+                c.asked_consent = true;
+                let r = recipient_for(corrector.id(), corrector.display_name());
+                let _ = self.events.send(EngineEvent::ConsentRequired(r)).await;
+            }
+            return;
+        }
+        // No account, no requests: the switch alone is not enough.
+        let Some(credential) = credential else { return };
+        if c.in_flight {
+            c.dirty = true;
+            return;
+        }
+        if text.trim().is_empty() || text == c.checked {
+            return;
+        }
+        // Not too often: wait out the gap, then come back.
+        let wait = c
+            .last_request
+            .map(|t| CORRECTION_MIN_GAP.saturating_sub(t.elapsed()))
+            .unwrap_or(Duration::ZERO);
+        if !wait.is_zero() {
+            if !c.tick_pending {
+                c.tick_pending = true;
+                let (generation, tx) = (c.generation, self.self_tx.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    let _ = tx.send(EngineCommand::CorrectionTick(generation)).await;
+                });
+            }
+            return;
+        }
+        c.in_flight = true;
+        c.dirty = false;
+        c.last_request = Some(Instant::now());
+        let (generation, language, tx) = (c.generation, c.language.clone(), self.self_tx.clone());
+        tokio::spawn(async move {
+            let (result, throttled) = match corrector.correct(&text, &language, Some(&credential)).await {
+                Ok(r) => (Ok(r), false),
+                Err(e) => {
+                    warn!(%e, "live correction failed");
+                    let throttled = matches!(e, ikk_stt::SttError::Provider(ikk_stt::ErrorClass::Throttled));
+                    (Err(e.to_string()), throttled)
+                }
+            };
+            let _ = tx
+                .send(EngineCommand::ApplyCorrection {
+                    generation,
+                    from,
+                    through,
+                    result,
+                    throttled,
+                })
+                .await;
+        });
+    }
+
+    async fn apply_correction(
+        &mut self,
+        generation: u64,
+        from: ikk_output::live::SegmentId,
+        through: ikk_output::live::SegmentId,
+        result: Result<Option<String>, String>,
+        throttled: bool,
+    ) {
+        let Some(c) = self.correction.as_mut() else { return };
+        if c.generation != generation {
+            return;
+        }
+        c.in_flight = false;
+        if throttled {
+            c.paused_until = Some(Instant::now() + CORRECTION_PAUSE);
+        }
+        let dirty = c.dirty;
+        let rewrites = c.rewrites;
+        match result {
+            Ok(Some(corrected)) if !rewrites => {
+                // Suggest only: the typed text stays as it is.
+                if let Some(c) = self.correction.as_mut() {
+                    c.checked = corrected.clone();
+                }
+                let _ = self.events.send(EngineEvent::Suggestion(corrected)).await;
+            }
+            Ok(Some(corrected)) if self.output_mode == OutputMode::Inject => {
+                match self.live.replace_range(from, through, &corrected, &mut *self.sink) {
+                    Ok(true) => {
+                        if let Some(c) = self.correction.as_mut() {
+                            c.checked = corrected.clone();
+                        }
+                        let text = self.live.text();
+                        self.session_text = text.clone();
+                        let _ = self
+                            .events
+                            .send(EngineEvent::Transcript(TranscriptEvent::Replace(text)))
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        self.switch_to_fallback(FallbackReason::InjectionFailed(e.to_string()))
+                            .await
+                    }
+                }
+            }
+            Ok(_) => {
+                let checked = self.live.text_of_range(from, through).unwrap_or_default();
+                if let Some(c) = self.correction.as_mut() {
+                    c.checked = checked;
+                }
+            }
+            Err(_) => {}
+        }
+        if dirty {
+            self.schedule_correction().await;
         }
     }
 
@@ -626,6 +855,20 @@ impl Engine {
             cfg.flow_ms
         };
         self.live = LiveTyper::new(Box::new(ikk_output::guard::AllowAllGuard), flow_ms);
+        self.last_segment = None;
+        self.correction_generation += 1;
+        self.correction = cfg.correction.then(|| Correction {
+            language: cfg.session.language.clone(),
+            generation: self.correction_generation,
+            in_flight: false,
+            dirty: false,
+            checked: String::new(),
+            rewrites: cfg.correction_rewrites,
+            asked_consent: false,
+            paused_until: None,
+            last_request: None,
+            tick_pending: false,
+        });
         self.decide_output_mode().await?;
 
         // Our session stream takes over from the voice listener. Providers
@@ -665,7 +908,21 @@ impl Engine {
         if standby_closed {
             let _ = self.events.send(EngineEvent::VoiceStandby(false)).await;
         }
-        info!(provider = %cfg.session.provider.0, mode = ?self.output_mode, "session started");
+        info!(
+            provider = %cfg.session.provider.0,
+            transfer = ?cfg.session.transfer,
+            language = %cfg.session.language,
+            chunk_ms = cfg.session.chunk_interval.as_millis() as u64,
+            pause_ms = cfg.pause.as_millis() as u64,
+            denoise = cfg.capture.denoise,
+            agc = cfg.capture.agc,
+            vocabulary = cfg.session.keywords.len(),
+            agreement = cfg.session.agreement.is_some(),
+            mode = ?self.output_mode,
+            correction = cfg.correction,
+            checker = self.registry.corrector().map(|c| c.id()).unwrap_or("none"),
+            "session started"
+        );
         Ok(())
     }
 
@@ -758,6 +1015,8 @@ impl Engine {
             TranscriptEvent::Final(text) => {
                 self.diag.finals += 1;
                 self.diag.final_chars += text.chars().count();
+                // Dictated text only at debug level, for test sessions.
+                tracing::debug!(text = %text, "final");
                 let processed = ikk_text::process(&self.text_cfg, &text);
                 if processed.is_empty() {
                     return;
@@ -781,6 +1040,7 @@ impl Engine {
                         with_space.trim().to_string(),
                     )))
                     .await;
+                self.schedule_correction().await;
             }
             TranscriptEvent::Error(class) => {
                 let retryable = class.is_retryable();
@@ -798,6 +1058,7 @@ impl Engine {
                     self.stop().await;
                 }
             }
+            TranscriptEvent::Refined { segments, text } => self.apply_refined(segments, text).await,
             TranscriptEvent::Replace(text) => {
                 let processed = ikk_text::process(&self.text_cfg, &text);
                 self.replace_all(&processed).await;
@@ -811,6 +1072,52 @@ impl Engine {
                     self.diag.interims += 1;
                 }
                 let _ = self.events.send(EngineEvent::Transcript(other)).await;
+            }
+        }
+    }
+
+    /// The whole thought came back: replace the last `segments` typed
+    /// finals with it (in place, common prefix kept).
+    async fn apply_refined(&mut self, segments: usize, text: String) {
+        tracing::debug!(segments, text = %text, "refined");
+        let processed = ikk_text::process(&self.text_cfg, &text);
+        if processed.is_empty() {
+            return;
+        }
+        let all = self.live.segments();
+        let n = segments.min(all.len());
+        if n == 0 || self.output_mode != OutputMode::Inject {
+            // Nothing typed to replace: forward it, the app decides.
+            let _ = self
+                .events
+                .send(EngineEvent::Transcript(TranscriptEvent::Refined {
+                    segments,
+                    text: processed,
+                }))
+                .await;
+            return;
+        }
+        let from = all[all.len() - n].id;
+        let through = all[all.len() - 1].id;
+        let with_space = if all.len() == n {
+            processed
+        } else {
+            format!(" {processed}")
+        };
+        match self.live.replace_range(from, through, &with_space, &mut *self.sink) {
+            Ok(_) => {
+                let text = self.live.text();
+                self.session_text = text.clone();
+                self.last_segment = self.live.segments().last().map(|s| s.id);
+                let _ = self
+                    .events
+                    .send(EngineEvent::Transcript(TranscriptEvent::Replace(text)))
+                    .await;
+                self.schedule_correction().await;
+            }
+            Err(e) => {
+                self.switch_to_fallback(FallbackReason::InjectionFailed(e.to_string()))
+                    .await
             }
         }
     }
@@ -897,32 +1204,48 @@ impl Engine {
         self.vad = None;
         if let Some(mut session) = self.session.take() {
             let _ = tokio::time::timeout(FINISH_GRACE, session.finish()).await;
-            // Drain what finish produced (last finals, batch tail) until Closed.
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-            let mut finals = Vec::new();
+            // Drain what finish produced until Closed: the last chunks and,
+            // after them, the whole thought that replaces them. In order,
+            // because the replacement refers to the finals before it.
+            let deadline = tokio::time::Instant::now() + LATE_RESULTS;
+            let mut late = Vec::new();
             while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, session.events().recv()).await {
+                if matches!(ev, TranscriptEvent::Closed) {
+                    break;
+                }
+                late.push(ev);
+            }
+            for ev in late {
                 match ev {
-                    TranscriptEvent::Final(t) => finals.push(ikk_text::process(&self.text_cfg, &t)),
-                    TranscriptEvent::Closed => break,
+                    TranscriptEvent::Final(t) => {
+                        let t = ikk_text::process(&self.text_cfg, &t);
+                        if t.is_empty() || self.discard_pending {
+                            continue;
+                        }
+                        let with_space = if self.session_text.is_empty() {
+                            t
+                        } else {
+                            format!(" {t}")
+                        };
+                        let _ = self.emit_text(&with_space).await;
+                        let _ = self
+                            .events
+                            .send(EngineEvent::Transcript(TranscriptEvent::Final(
+                                with_space.trim().to_string(),
+                            )))
+                            .await;
+                    }
+                    TranscriptEvent::Refined { segments, text } if !self.discard_pending => {
+                        // The last chunks were queued for typing just now: let
+                        // them out before the replacement looks at them.
+                        if self.output_mode == OutputMode::Inject {
+                            let _ = self.live.flush(&mut *self.sink);
+                        }
+                        self.apply_refined(segments, text).await;
+                    }
                     other => {
                         let _ = self.events.send(EngineEvent::Transcript(other)).await;
                     }
-                }
-            }
-            for t in finals {
-                if !t.is_empty() && !self.discard_pending {
-                    let with_space = if self.session_text.is_empty() {
-                        t
-                    } else {
-                        format!(" {t}")
-                    };
-                    let _ = self.emit_text(&with_space).await;
-                    let _ = self
-                        .events
-                        .send(EngineEvent::Transcript(TranscriptEvent::Final(
-                            with_space.trim().to_string(),
-                        )))
-                        .await;
                 }
             }
         }
@@ -1027,7 +1350,8 @@ impl Engine {
                 .await;
         }
         match self.live.append(segment, &mut *self.sink) {
-            Ok(_) => {
+            Ok(id) => {
+                self.last_segment = Some(id);
                 if self.live.flow_rate_ms() == 0 {
                     if self.sink.verify(segment) == Verification::Mismatch {
                         self.switch_to_fallback(FallbackReason::VerificationMismatch).await;

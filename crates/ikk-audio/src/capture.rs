@@ -215,6 +215,14 @@ impl Capture for CpalCapture {
 }
 
 pub fn open_capture(cfg: &CaptureConfig) -> Result<Box<dyn Capture>, AudioError> {
+    // A recording instead of a microphone (test sessions).
+    if let Some(path) = cfg
+        .device_id
+        .as_deref()
+        .and_then(|d| d.strip_prefix(crate::file_source::DEVICE_PREFIX))
+    {
+        return crate::file_source::open(cfg, std::path::Path::new(path));
+    }
     let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(FRAME_CHANNEL_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let level = Arc::new(AtomicU32::new(0));
@@ -271,7 +279,15 @@ fn run_capture(
 
     let mut chain = CaptureChain::new(ChainConfig {
         preamp_gain_db: cfg.preamp_gain_db,
+        highpass_hz: cfg.highpass_hz,
+        presence_db: cfg.presence_db,
+        compressor: cfg.compressor,
+        trill_filler: cfg.trill_filler,
+        noise_profile: cfg.noise_profile,
+        path_eq_db: cfg.path_eq_db.clone(),
         denoise: cfg.denoise,
+        listen: true,
+        gate: cfg.gate,
         agc: cfg.agc,
         agc_target_dbfs: -16.0,
         sample_rate_hz: cfg.sample_rate_hz,
@@ -291,10 +307,12 @@ fn run_capture(
         level.store(((dbfs + 200.0) * 1000.0).max(0.0) as u32, Ordering::Relaxed);
         let offset = Duration::from_secs_f64(samples_sent as f64 / out_hz as f64);
         samples_sent += processed.len() as u64;
+        let speech = chain.speech_probability();
         let frame = AudioFrame {
             samples: processed.into_owned(),
             sample_rate_hz: out_hz,
             offset,
+            speech,
         };
         if frame_tx.try_send(frame).is_err() {
             static DROPPED: AtomicU64 = AtomicU64::new(0);
