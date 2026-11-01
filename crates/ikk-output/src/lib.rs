@@ -95,6 +95,66 @@ pub enum Verification {
 
 /// The one owner of the target field. Everything the engine and the live
 /// typer need: probe, type, delete, move the caret, read back.
+/// Special keys the platform layer must be able to press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Return,
+    Tab,
+}
+
+/// Modifier keys held for a chord. `command` is Cmd on macOS and Ctrl
+/// elsewhere (the shortcut key); `word` is the word-jump modifier (Option
+/// on macOS, Ctrl elsewhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub command: bool,
+    pub word: bool,
+}
+
+/// One key press with modifiers: a special key or a letter (shortcuts
+/// like select all, undo, cut, paste, bold).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chord {
+    Key(Key, Modifiers),
+    Char(char, Modifiers),
+}
+
+impl Chord {
+    pub fn key(k: Key) -> Self {
+        Chord::Key(k, Modifiers::default())
+    }
+    pub fn shift(k: Key) -> Self {
+        Chord::Key(
+            k,
+            Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        )
+    }
+    /// Cmd/Ctrl + letter.
+    pub fn shortcut(c: char) -> Self {
+        Chord::Char(
+            c,
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        )
+    }
+}
+
 pub trait TextSink: Send {
     fn access_level(&self) -> AccessLevel;
     /// Inspect the focused target. Must be cheap and must not hang: desktop
@@ -109,6 +169,11 @@ pub trait TextSink: Send {
         Err(OutputError::Unavailable)
     }
     fn cursor_right(&mut self, _n: usize) -> Result<(), OutputError> {
+        Err(OutputError::Unavailable)
+    }
+    /// Press a key chord `n` times (voice commands: cursor, selection,
+    /// shortcuts). Sinks that cannot return `Unavailable`.
+    fn press(&mut self, _chord: Chord, _n: usize) -> Result<(), OutputError> {
         Err(OutputError::Unavailable)
     }
     /// Read back the tail of the target and compare with what we typed.

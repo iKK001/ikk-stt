@@ -143,14 +143,42 @@ pub fn wait_input_idle() {
     sendinput::wait_target_idle(250);
 }
 
-pub fn press(key: Key, n: usize) -> Result<(), OutputError> {
-    let vk = match key {
+fn vk_of(key: Key) -> u16 {
+    match key {
         Key::Backspace => sendinput::VK_BACK,
+        Key::Delete => sendinput::VK_DELETE,
         Key::Left => sendinput::VK_LEFT,
         Key::Right => sendinput::VK_RIGHT,
+        Key::Up => sendinput::VK_UP,
+        Key::Down => sendinput::VK_DOWN,
+        Key::Home => sendinput::VK_HOME,
+        Key::End => sendinput::VK_END,
+        Key::PageUp => sendinput::VK_PRIOR,
+        Key::PageDown => sendinput::VK_NEXT,
         Key::Return => sendinput::VK_RETURN,
+        Key::Tab => sendinput::VK_TAB,
+    }
+}
+
+pub fn press(key: Key, n: usize) -> Result<(), OutputError> {
+    sendinput::press_vk(vk_of(key), n)
+}
+
+/// A chord: Ctrl is both the shortcut and the word-jump modifier here.
+pub fn press_chord(chord: crate::Chord, n: usize) -> Result<(), OutputError> {
+    let (vk, m) = match chord {
+        crate::Chord::Key(k, m) => (vk_of(k), m),
+        // Letter keys: the virtual-key code of a letter is its upper-case ASCII.
+        crate::Chord::Char(c, m) => (c.to_ascii_uppercase() as u16, m),
     };
-    sendinput::press_vk(vk, n)
+    let mut mods = Vec::new();
+    if m.command || m.word {
+        mods.push(sendinput::VK_CONTROL);
+    }
+    if m.shift {
+        mods.push(sendinput::VK_SHIFT);
+    }
+    sendinput::press_vk_with(&mods, vk, n)
 }
 
 #[link(name = "user32")]

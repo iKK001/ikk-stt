@@ -242,6 +242,28 @@ impl LiveTyper {
         self.drive(sink)
     }
 
+    /// Drop the last `n` characters of the text (a voice command deleted
+    /// them): the target is brought there with backspaces, pending text
+    /// included.
+    pub fn delete_tail(&mut self, n: usize, sink: &mut dyn TextSink) -> Result<(), OutputError> {
+        let current = self.text();
+        let keep = current.chars().count().saturating_sub(n);
+        let new_text: String = current.chars().take(keep).collect();
+        let id = self.next_id;
+        self.next_id += 1;
+        self.committed = if new_text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Segment {
+                id,
+                text: new_text,
+                span: 0..0,
+            }]
+        };
+        self.reindex();
+        self.drive(sink)
+    }
+
     /// Writer tick: type up to `max_chars` of pending text. Returns chars typed.
     pub fn flow_tick(&mut self, max_chars: usize, sink: &mut dyn TextSink) -> Result<usize, OutputError> {
         if !self.guard.may_inject() {

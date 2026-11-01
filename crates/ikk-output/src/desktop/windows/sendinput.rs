@@ -84,10 +84,19 @@ const KEYEVENTF_UNICODE: u32 = 0x0004;
 const DESKTOP_SWITCHDESKTOP: u32 = 0x0100;
 
 pub const VK_BACK: u16 = 0x08;
+pub const VK_TAB: u16 = 0x09;
 pub const VK_RETURN: u16 = 0x0D;
+pub const VK_SHIFT: u16 = 0x10;
 pub const VK_CONTROL: u16 = 0x11;
+pub const VK_PRIOR: u16 = 0x21;
+pub const VK_NEXT: u16 = 0x22;
+pub const VK_END: u16 = 0x23;
+pub const VK_HOME: u16 = 0x24;
 pub const VK_LEFT: u16 = 0x25;
+pub const VK_UP: u16 = 0x26;
 pub const VK_RIGHT: u16 = 0x27;
+pub const VK_DOWN: u16 = 0x28;
+pub const VK_DELETE: u16 = 0x2E;
 const VK_V: u16 = 0x56;
 
 fn record(vk: u16, scan: u16, flags: u32) -> InputRecord {
@@ -157,6 +166,22 @@ pub fn press_vk(vk: u16, n: usize) -> Result<(), OutputError> {
         send(&[record(vk, 0, 0), record(vk, 0, KEYEVENTF_KEYUP)])?;
     }
     Ok(())
+}
+
+/// `vk` pressed `n` times while the modifier keys are held.
+pub fn press_vk_with(mods: &[u16], vk: u16, n: usize) -> Result<(), OutputError> {
+    let mut records = Vec::with_capacity(mods.len() * 2 + n * 2);
+    for m in mods {
+        records.push(record(*m, 0, 0));
+    }
+    for _ in 0..n {
+        records.push(record(vk, 0, 0));
+        records.push(record(vk, 0, KEYEVENTF_KEYUP));
+    }
+    for m in mods.iter().rev() {
+        records.push(record(*m, 0, KEYEVENTF_KEYUP));
+    }
+    send(&records)
 }
 
 pub fn ctrl_v() -> Result<(), OutputError> {

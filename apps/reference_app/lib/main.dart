@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'theme.dart';
+import 'ui_strings.dart';
 import 'app_name.dart';
 import 'platform_extras.dart';
 
@@ -149,6 +150,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String get _provider => (_settings['providers']?['active'] as String?) ?? 'deepgram';
 
+  /// The app's own language (settings `app.language`, ISO 639-3; '' = English).
+  String get _appLanguage => ((_settings['app'] as Map<String, dynamic>?)?['language'] as String?) ?? '';
+  UiStrings get _t => UiStrings.of(_appLanguage);
+
   Future<void> _loadKey() async {
     String k = '';
     _keyReadError = null;
@@ -179,7 +184,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _engine.setCredential(provider: _provider, secret: '');
     try {
       await _secure.delete(key: 'api_key:$_provider');
-      _snack('Key for $_provider removed');
+      _snack(_t.keyRemoved(_provider));
     } catch (e) {
       _snack('Could not remove the key: $e');
     }
@@ -223,7 +228,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await _secure.write(key: 'api_key:$_provider', value: k);
       _keyReadError = null;
-      _snack('Key saved in $_keyStoreName');
+      _snack(_t.keySaved(_keyStoreName));
     } catch (e) {
       _snack('Key set for this run only; saving failed: $e');
     }
@@ -240,7 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await settingsSave(path: _settingsPath, json: json);
       _engine.rememberSettings(settingsJson: json);
     } catch (e) {
-      _snack('Settings not saved: $e');
+      _snack(_t.settingsNotSaved('$e'));
       return;
     }
     _applyVoice();
@@ -250,7 +255,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _onEvent(String raw) {
     final ev = jsonDecode(raw);
     if (ev is String) {
-      if (ev == 'PermissionRequired') _snack('Permission needed: allow keyboard access for this app (Accessibility).');
+      if (ev == 'PermissionRequired') _snack(_t.permissionNeeded);
       return;
     }
     final m = ev as Map<String, dynamic>;
@@ -294,7 +299,7 @@ class _HomeScreenState extends State<HomeScreen> {
         case 'VoiceStandbyLevel':
           _standbyLevel = (v as num).toDouble();
         case 'VoiceCommand':
-          _snack(v == 'Start' ? 'Voice command: start' : 'Voice command: stop');
+          _snack(v == 'Start' ? _t.voiceStart : _t.voiceStop);
         case 'SetupRequired':
           _askSetup(v as Map<String, dynamic>);
         case 'ConsentChanged':
@@ -306,13 +311,17 @@ class _HomeScreenState extends State<HomeScreen> {
         case 'Transferred':
           _fallbackReason = null;
           _fallbackText = '';
-          _snack('Inserted into target');
+          _snack(_t.insertedIntoTarget);
         case 'Error':
           _error = v as String;
         case 'Suggestion':
           _suggestion = v as String;
+        case 'CommandRefused':
+          _snack(_t.commandRefused(v as String));
+        case 'CommandHeard':
+          _snack(_t.commandDone(v as String));
         case 'Command':
-          _snack('Command: $v');
+          break;
         default:
           break;
       }
@@ -703,6 +712,19 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text(appName),
         actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.language),
+            tooltip: _t.appLanguage,
+            initialValue: _appLanguage.isEmpty ? 'eng' : _appLanguage,
+            onSelected: (code) {
+              (_settings['app'] ??= <String, dynamic>{})['language'] = code == 'eng' ? '' : code;
+              _saveSettings();
+              setState(() {});
+            },
+            itemBuilder: (_) => [
+              for (final code in UiStrings.codes) PopupMenuItem(value: code, child: Text(UiStrings.of(code).name)),
+            ],
+          ),
           IconButton(icon: const Icon(Icons.info_outline), onPressed: () => _showAbout(context)),
         ],
       ),
@@ -833,7 +855,7 @@ class _HomeScreenState extends State<HomeScreen> {
       key = await _secure.read(key: 'api_key:$_provider') ?? '';
     } catch (_) {}
     if (key.isEmpty) {
-      _snack('No API key for $_provider – enter it first.');
+      _snack(_t.noKey(_provider));
       return;
     }
     final denied = await ensureMicPermission();
@@ -964,7 +986,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     final word = _trainCtl.text.trim();
                     _learn(word, selected);
                     _saveSettings();
-                    _snack('«$word» is now written for „$selected“');
+                    _snack(_t.learned(word, selected));
                     setState(() => _teachFrom = _teachTo = null);
                   },
             child: const Text('Teach'),
@@ -1285,7 +1307,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _ltKeyCtl.text = '';
       await _loadLtKey();
     } catch (e) {
-      _snack('Saving failed: $e');
+      _snack(_t.savingFailed('$e'));
     }
   }
 
@@ -1623,7 +1645,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_vocabDirty) return;
     _vocabDirty = false;
     _saveSettings();
-    _snack('Vocabulary saved');
+    _snack(_t.vocabularySaved);
   }
 
   void _saveReplayPath() {

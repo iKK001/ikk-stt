@@ -18,6 +18,18 @@ pub struct Settings {
     pub microphone: MicrophoneSettings,
     #[serde(default)]
     pub text: TextSettings,
+    /// The app itself (language of its own words).
+    #[serde(default)]
+    pub app: AppSettings,
+}
+
+/// Settings of the shell, kept here so that they round-trip through the
+/// core's settings file like the rest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// ISO 639-3 code of the app's own language ("" = English).
+    #[serde(default)]
+    pub language: String,
 }
 
 /// What happens to the text after recognition.
@@ -363,6 +375,7 @@ impl Default for Settings {
             sound: SoundSettings::default(),
             microphone: MicrophoneSettings::default(),
             text: TextSettings::default(),
+            app: AppSettings::default(),
         }
     }
 }

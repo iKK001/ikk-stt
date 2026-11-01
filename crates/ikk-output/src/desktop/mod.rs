@@ -14,16 +14,9 @@ use tracing::{info, warn};
 use crate::budget::{with_budget, PROBE_BUDGET};
 use crate::chunk::{chunk_plan, is_typewriter, MIN_SAFE_CHAR_DELAY_MS};
 use crate::rhythm::Rhythm;
-use crate::{AccessLevel, InsertStyle, OutputError, TargetStatus, TextSink, Verification};
+use crate::{AccessLevel, Chord, InsertStyle, OutputError, TargetStatus, TextSink, Verification};
 
-/// Special keys the platform layer must be able to press.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Backspace,
-    Left,
-    Right,
-    Return,
-}
+pub use crate::Key;
 
 const RETRIES: u32 = 3;
 const RETRY_BACKOFF: Duration = Duration::from_millis(60);
@@ -242,6 +235,14 @@ impl TextSink for DesktopSink {
     fn cursor_right(&mut self, n: usize) -> Result<(), OutputError> {
         platform::ensure_target_foreground()?;
         platform::press(Key::Right, n)
+    }
+
+    fn press(&mut self, chord: Chord, n: usize) -> Result<(), OutputError> {
+        if n == 0 {
+            return Ok(());
+        }
+        platform::ensure_target_foreground()?;
+        platform::press_chord(chord, n)
     }
 
     fn verify(&mut self, expected_tail: &str) -> Verification {

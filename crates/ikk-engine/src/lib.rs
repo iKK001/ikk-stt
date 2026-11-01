@@ -20,6 +20,7 @@
 //! automatically — probe before start, verify while typing — so the window
 //! only ever appears when it is needed (ARCHITECTURE §10).
 
+mod commands;
 pub mod config;
 pub mod training;
 
@@ -208,6 +209,11 @@ pub enum EngineEvent {
     /// Live correction without rewriting: how the checker would write the
     /// text so far. Shown by the shell, never typed.
     Suggestion(String),
+    /// A voice command was understood but not carried out (why).
+    CommandRefused(String),
+    /// The phrase a voice command was recognised from, for the shell's
+    /// confirmation.
+    CommandHeard(String),
     /// Mobile: the host (keyboard extension / IME) must insert this text.
     /// Text for a host that inserts it itself (Android service, iOS
     /// keyboard). `rhythm`: type it character by character (streaming);
@@ -344,6 +350,8 @@ pub struct Engine {
     self_tx: mpsc::Sender<EngineCommand>,
     correction: Option<Correction>,
     correction_generation: u64,
+    /// What the voice commands know about the dictation.
+    dictation: commands::Dictation,
     /// The segment the last final went into.
     last_segment: Option<ikk_output::live::SegmentId>,
     voice: Option<Voice>,
@@ -391,6 +399,7 @@ impl Engine {
             self_tx,
             correction: None,
             correction_generation: 0,
+            dictation: commands::Dictation::default(),
             last_segment: None,
             voice: None,
             typed_log: Vec::new(),
@@ -506,6 +515,10 @@ impl Engine {
             EngineCommand::TransferToTarget => self.transfer().await,
             EngineCommand::ClearSessionText => {
                 self.session_text.clear();
+                self.dictation = commands::Dictation {
+                    caret_from_end: Some(0),
+                    ..Default::default()
+                };
                 Ok(())
             }
             EngineCommand::SetVoiceCommands(setup) => {
@@ -842,6 +855,10 @@ impl Engine {
             cfg.session.credential = self.credentials.get(&cfg.session.provider).cloned();
         }
         self.session_text.clear();
+        self.dictation = commands::Dictation {
+            caret_from_end: Some(0),
+            ..Default::default()
+        };
         // Dictated text is typed in rhythm at the cursor, whether it comes
         // from a live stream or from batch chunks. Only a finished text
         // moved from the dictation window is pasted in one piece.
@@ -1023,17 +1040,43 @@ impl Engine {
                 }
                 if !self.command_locale.is_empty() {
                     if let Some(intent) = ikk_commands::match_command(&processed, &self.command_locale) {
+                        let _ = self.events.send(EngineEvent::CommandHeard(processed.clone())).await;
                         let _ = self.events.send(EngineEvent::Command(intent.clone())).await;
                         self.execute(intent).await;
                         return;
                     }
+                    // Agreed words come in pieces: a command may have been
+                    // split over the last piece and this one ("Neue" …
+                    // "Zeile"). Then the last piece was typed by mistake.
+                    if let Some(last) = self.dictation.pieces.last().cloned() {
+                        let joined = format!("{} {processed}", last.trim());
+                        if let Some(intent) = ikk_commands::match_command(&joined, &self.command_locale) {
+                            if self.dictation.caret_from_end == Some(0) && self.dictation.selection == 0 {
+                                self.dictation.pieces.pop();
+                                let n = last.chars().count();
+                                if self.output_mode == OutputMode::Inject {
+                                    let _ = self.live.delete_tail(n, &mut *self.sink);
+                                }
+                                let keep = self.session_text.chars().count().saturating_sub(n);
+                                self.session_text = self.session_text.chars().take(keep).collect();
+                            }
+                            let _ = self.events.send(EngineEvent::CommandHeard(joined)).await;
+                            let _ = self.events.send(EngineEvent::Command(intent.clone())).await;
+                            self.execute(intent).await;
+                            return;
+                        }
+                    }
                 }
-                let with_space = if self.session_text.is_empty() {
-                    processed
+                let Some(shaped) = self.shape_final(&processed) else {
+                    return;
+                };
+                let with_space = if self.session_text.is_empty() || self.dictation.selection > 0 {
+                    shaped
                 } else {
-                    format!(" {processed}")
+                    format!(" {shaped}")
                 };
                 let _ = self.emit_text(&with_space).await;
+                self.note_piece(&with_space);
                 let _ = self
                     .events
                     .send(EngineEvent::Transcript(TranscriptEvent::Final(
@@ -1149,35 +1192,6 @@ impl Engine {
         if let Err(e) = self.live.replace_all(text, &mut *self.sink) {
             self.switch_to_fallback(FallbackReason::InjectionFailed(e.to_string()))
                 .await;
-        }
-    }
-
-    async fn execute(&mut self, intent: Intent) {
-        match intent {
-            Intent::StopDictation => self.stop().await,
-            Intent::NewLine => {
-                let _ = self.emit_text("\n").await;
-            }
-            Intent::NewParagraph => {
-                let _ = self.emit_text("\n\n").await;
-            }
-            Intent::DeleteLastWord => {
-                let n = self
-                    .session_text
-                    .trim_end()
-                    .rsplit(' ')
-                    .next()
-                    .map(|w| w.chars().count())
-                    .unwrap_or(0);
-                if n > 0 && self.output_mode == OutputMode::Inject {
-                    let _ = self.sink.backspace(n + 1);
-                }
-                let cut = self.session_text.trim_end().rfind(' ').unwrap_or(0);
-                self.session_text.truncate(cut);
-            }
-            Intent::DeleteLastSentence | Intent::Undo => {
-                warn!(?intent, "command not implemented in v1");
-            }
         }
     }
 
@@ -1327,7 +1341,8 @@ impl Engine {
         if self.output_mode == OutputMode::Fallback {
             return Ok(n);
         }
-        let segment = text.trim_start();
+        // Only the joining space is dropped here; a line break is text.
+        let segment = text.trim_start_matches(' ');
         self.typed_log.push((Instant::now(), n));
         if self.sink.access_level() == AccessLevel::Host {
             let rhythm = self.insert_style == ikk_output::InsertStyle::Rhythm;
