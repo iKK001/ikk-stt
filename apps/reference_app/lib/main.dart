@@ -698,6 +698,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final listening = _state == 'Listening' || _state == 'Finishing';
     if (_settings.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    final impairedMode = (_settings['sound'] as Map<String, dynamic>)['impaired_voice'] != false;
     return Scaffold(
       appBar: AppBar(
         title: const Text(appName),
@@ -709,9 +710,23 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           _voiceModeSection(),
+          // The cards that exist only for the impaired setup, right under
+          // the switch, sliding in and out with it.
+          AnimatedSize(
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeInOut,
+            alignment: Alignment.topCenter,
+            child: impairedMode
+                ? Column(children: [
+                    const SizedBox(height: 16),
+                    _impairedSoundSection(),
+                    const SizedBox(height: 16),
+                    _trainingSection(),
+                  ])
+                : const SizedBox.shrink(),
+          ),
           const SizedBox(height: 16),
           _providerSection(),
-          _trainingSection(),
           const SizedBox(height: 16),
           _correctionSection(),
           const SizedBox(height: 16),
@@ -1355,9 +1370,14 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// The fine-tuning fold of the Sound card (and the test entries of the
+  /// microphone list) is open.
+  bool _advanced = false;
+
   Widget _soundSection() {
     final sound = _settings['sound'] as Map<String, dynamic>;
     final vad = sound['vad'] as Map<String, dynamic>;
+    final impaired = sound['impaired_voice'] != false;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -1365,15 +1385,6 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Sound', style: Theme.of(context).textTheme.titleMedium),
-            _stepper(
-              label: 'Preamp gain',
-              value: sound['preamp_gain_db'] as num,
-              min: 0,
-              max: 24,
-              step: 1,
-              unit: 'dB',
-              onChanged: (v) => sound['preamp_gain_db'] = v.toDouble(),
-            ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Automatic gain'),
@@ -1384,6 +1395,76 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            if (!impaired)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Noise reduction (RNNoise)'),
+                value: sound['denoise'] != 'Off',
+                onChanged: (b) {
+                  sound['denoise'] = b ? 'RnNoise' : 'Off';
+                  _saveSettings();
+                },
+              ),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: const Text('Advanced'),
+              subtitle: Text(impaired ? 'Gain' : 'Gain, chunk length and pause'),
+              initiallyExpanded: _advanced,
+              onExpansionChanged: (open) => setState(() => _advanced = open),
+              children: [
+                _stepper(
+                  label: 'Preamp gain',
+                  value: sound['preamp_gain_db'] as num,
+                  min: 0,
+                  max: 24,
+                  step: 1,
+                  unit: 'dB',
+                  onChanged: (v) => sound['preamp_gain_db'] = v.toDouble(),
+                ),
+                if (!impaired) ...[
+                  _stepper(
+                    label: 'Chunk length',
+                    value: (vad['chunk_interval_ms'] as num) / 1000,
+                    min: 1,
+                    max: 60,
+                    step: 1,
+                    unit: 's',
+                    onChanged: (v) => vad['chunk_interval_ms'] = (v * 1000).round(),
+                  ),
+                  _stepper(
+                    label: 'Pause',
+                    value: vad['silence_duration_ms'] as num,
+                    min: 300,
+                    max: 6000,
+                    step: 100,
+                    unit: 'ms',
+                    onChanged: (v) => vad['silence_duration_ms'] = v.round(),
+                  ),
+                  Text(
+                    'Chunks are cut only between words, at the first gap after the chunk length; a pause always ends one.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// What only the impaired setup uses; shown under the master switch.
+  Widget _impairedSoundSection() {
+    final sound = _settings['sound'] as Map<String, dynamic>;
+    final vad = sound['vad'] as Map<String, dynamic>;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Impaired voice: sound and rhythm', style: Theme.of(context).textTheme.titleMedium),
+            const Text('Batch pieces of the whole thought every second, words typed once three readings agree, never changed.'),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Steady-noise filter (ventilator, fan)'),
@@ -1394,105 +1475,63 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Noise reduction (RNNoise)'),
-              value: sound['denoise'] != 'Off',
-              onChanged: (b) {
-                sound['denoise'] = b ? 'RnNoise' : 'Off';
-                _saveSettings();
-              },
-            ),
-            const SizedBox(height: 8),
-            const Text('Speech rhythm'),
-            const SizedBox(height: 4),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'fluent', label: Text('Fluent'), tooltip: 'Text appears every 2 s; a 0.9 s pause ends a chunk'),
-                ButtonSegment(value: 'words', label: Text('Word by word'), tooltip: 'Agreed words only: the last 12 s are transcribed every second and a word is typed once three of the last four readings agree on it, never changed. Batch upload, noise reduction off.'),
-              ],
-              selected: {_rhythmPreset(vad)},
-              emptySelectionAllowed: true,
-              showSelectedIcon: false,
-              onSelectionChanged: (sel) {
-                if (sel.isEmpty) return;
-                setState(() {
-                  final words = sel.first == 'words';
-                  vad['chunk_interval_ms'] = words ? 3000 : 2000;
-                  vad['silence_duration_ms'] = words ? 4000 : 900;
-                  vad['refine'] = words;
-                  vad['type_quick_text'] = true;
-                  vad['agreement'] = words;
-                  // Measured on impaired speech: RNNoise removes the soft
-                  // consonants and makes every provider worse.
-                  if (words) sound['denoise'] = 'Off';
-                  // Live streams of unclear speech come back empty or as
-                  // word salad; chunks between words carry the context.
-                  final options = _settings['providers']['options'] as Map<String, dynamic>;
-                  final o = Map<String, dynamic>.from(options[_provider] as Map<String, dynamic>? ?? {});
-                  o['transfer'] = words ? 'Batch' : 'Streaming';
-                  options[_provider] = o;
-                });
-                _saveSettings();
-              },
-            ),
             _stepper(
-              label: 'Chunk length',
-              value: (vad['chunk_interval_ms'] as num) / 1000,
-              min: 1,
-              max: 60,
-              step: 1,
-              unit: 's',
-              onChanged: (v) => vad['chunk_interval_ms'] = (v * 1000).round(),
-            ),
-            _stepper(
-              label: 'Pause',
+              label: 'Pause that ends a thought',
               value: vad['silence_duration_ms'] as num,
-              min: 300,
+              min: 1500,
               max: 6000,
               step: 100,
               unit: 'ms',
               onChanged: (v) => vad['silence_duration_ms'] = v.round(),
             ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Agreed words only (no corrections)'),
-              subtitle: const Text('The last 12 s are transcribed every second; a word is typed once three of the last four readings agree on it, '
-                  'and never changed. The rest comes at the pause. Measured 100% with OpenAI (whisper-1) and your phrases in the vocabulary.'),
-              value: vad['agreement'] == true,
-              onChanged: (b) {
-                vad['agreement'] = b;
-                _saveSettings();
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Re-check whole thoughts'),
-              subtitle: const Text('After a pause the whole thought is transcribed again in one piece and replaces the quick text. '
-                  'Needed for slow or unclear speech; the recording is sent twice.'),
-              value: vad['refine'] == true,
-              onChanged: (b) {
-                vad['refine'] = b;
-                _saveSettings();
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Type the quick text too'),
-              subtitle: const Text('Off: the quick chunks only show up here while you speak and each thought is typed once, when it is known. '
-                  'On: they are typed at once and replaced afterwards (fluent speakers).'),
-              value: vad['type_quick_text'] == true,
-              onChanged: vad['refine'] == true
-                  ? (b) {
-                      vad['type_quick_text'] = b;
-                      _saveSettings();
-                    }
-                  : null,
-            ),
-            Text(
-              'Chunks are cut only between words, at the first gap after the chunk length; a pause always ends one. '
-              'Quick chunks give fast text, the whole thought gives the right text.',
-              style: Theme.of(context).textTheme.bodySmall,
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: const Text('Advanced'),
+              subtitle: const Text('The rules of the agreed-words mode; leave as they are unless testing'),
+              initiallyExpanded: _advanced,
+              onExpansionChanged: (open) => setState(() => _advanced = open),
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Agreed words only (no corrections)'),
+                  subtitle: const Text('Off: chunk mode with the two switches below instead.'),
+                  value: vad['agreement'] == true,
+                  onChanged: (b) {
+                    vad['agreement'] = b;
+                    _saveSettings();
+                  },
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Re-check whole thoughts (chunk mode only)'),
+                  value: vad['refine'] == true,
+                  onChanged: (b) {
+                    vad['refine'] = b;
+                    _saveSettings();
+                  },
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Type the quick text too (chunk mode only)'),
+                  value: vad['type_quick_text'] == true,
+                  onChanged: vad['refine'] == true
+                      ? (b) {
+                          vad['type_quick_text'] = b;
+                          _saveSettings();
+                        }
+                      : null,
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Noise reduction (RNNoise)'),
+                  subtitle: const Text('Measured harmful for unclear speech; off in this setup.'),
+                  value: sound['denoise'] != 'Off',
+                  onChanged: (b) {
+                    sound['denoise'] = b ? 'RnNoise' : 'Off';
+                    _saveSettings();
+                  },
+                ),
+              ],
             ),
           ],
         ),
@@ -1578,14 +1617,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// Which preset the two VAD values match, '' when neither.
-  String _rhythmPreset(Map<String, dynamic> vad) {
-    final chunk = vad['chunk_interval_ms'], pause = vad['silence_duration_ms'];
-    if (chunk == 2000 && pause == 900) return 'fluent';
-    if (chunk == 3000 && pause == 4000 && vad['refine'] == true && vad['agreement'] == true) return 'words';
-    if (vad['refine'] == true || vad['agreement'] == true) return '';
-    return '';
-  }
-
   /// The vocabulary field saves when it loses focus too: a user who
   /// clicks away instead of pressing Enter must not dictate without it.
   void _saveVocab() {
@@ -1631,7 +1662,7 @@ class _HomeScreenState extends State<HomeScreen> {
               items: [
                 const DropdownMenuItem<String?>(value: null, child: Text('System default')),
                 ..._mics.map((m) => DropdownMenuItem<String?>(value: m.id, child: Text(m.isDefault ? '${m.name} (default)' : m.name))),
-                const DropdownMenuItem<String?>(value: _replayPrefix, child: Text('Replay a recording (test)')),
+                if (_advanced || replaying) const DropdownMenuItem<String?>(value: _replayPrefix, child: Text('Replay a recording (test)')),
               ],
               onChanged: (id) {
                 if (id == _replayPrefix) {
