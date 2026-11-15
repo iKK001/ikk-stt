@@ -109,12 +109,9 @@ fn on_event(s: &Shared, ev: &EngineEvent) {
         }
         // Replace by voice: mark the selection while the engine listens,
         // and let go of the yellow state when it is over.
-        EngineEvent::ReplaceListening { .. } => {
-            ikk_overlay::set_busy(ikk_overlay::Busy::Listening);
-            if let Some((x, y, w, h)) = ikk_output::desktop::selection_bounds() {
-                ikk_overlay::highlight(x, y, w, h);
-            }
-        }
+        // The selection keeps the app's own colour; the arc on the wand is
+        // the only progress sign (Stephan's choice).
+        EngineEvent::ReplaceListening { .. } => ikk_overlay::set_busy(ikk_overlay::Busy::Listening),
         // While a replacement waits for its words: speech over means the
         // recogniser is at work (red) until the next words or the end.
         EngineEvent::Speech(on) if s.replace_armed.load(Ordering::SeqCst) => {

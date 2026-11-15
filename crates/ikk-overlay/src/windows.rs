@@ -8,11 +8,9 @@ use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CombineRgn, CreateEllipticRgn, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
-    Ellipse, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx, Polygon, SelectClipRgn, SelectObject, SetBkMode,
-    SetGraphicsMode, SetTextColor, SetWindowRgn, SetWorldTransform, DT_CENTER, DT_SINGLELINE, DT_VCENTER, GM_ADVANCED,
-    PAINTSTRUCT, PS_SOLID, RGN_OR, TRANSPARENT, XFORM,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, SelectObject, PAINTSTRUCT,
 };
+use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
@@ -22,8 +20,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, IDC_HAND, MA_NOACTIVATE, MSG,
     MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::{Busy, OnClicks, OnMode, OnMoved, OnTap, RangeMode};
@@ -55,23 +54,9 @@ const BRAND: COLORREF = COLORREF(0x00CC_9900); // #0099CC: the correction button
 const ORANGE: COLORREF = COLORREF(0x0000_6CEF); // #EF6C00: waiting for the two clicks
 const YELLOW: COLORREF = COLORREF(0x0000_C7F9); // #F9C700: replace by voice armed
 const INK: COLORREF = COLORREF(0x0000_2E3A); // #3A2E00: glyph on the yellow button
-const WHITE_FACE: COLORREF = COLORREF(0x00FF_FFFF);
 const COLOR_LISTEN_ARC: COLORREF = COLORREF(0x00AD_7800); // #0078AD
 const RED: COLORREF = COLORREF(0x002F_2FD3); // #D32F2F: dictating
 const GRAY: COLORREF = COLORREF(0x0042_4242); // #424242: off
-
-/// `c` darkened towards [`DIM`]: `bright` 1 = as is, 0 = fully dimmed.
-fn dimmed(c: COLORREF, bright: f64) -> COLORREF {
-    let f = DIM + (1.0 - DIM) * bright;
-    let ch = |shift: u32| (((c.0 >> shift) & 0xFF) as f64 * f) as u32;
-    COLORREF(ch(0) | (ch(8) << 8) | (ch(16) << 16))
-}
-
-/// The ring and glyph colour: light grey at rest, white at full size.
-fn glyph_colour(bright: f64) -> COLORREF {
-    let v = (0xE0 as f64 + (0xFF - 0xE0) as f64 * bright) as u32;
-    COLORREF(v | (v << 8) | (v << 16))
-}
 
 const MSG_REDRAW: u32 = WM_APP + 1;
 const MSG_HIDE: u32 = WM_APP + 2;
@@ -281,25 +266,13 @@ unsafe fn start_animation(hwnd: HWND, from: f64) {
     }
     SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
     apply_shape(hwnd, layout());
-    let _ = InvalidateRect(Some(hwnd), None, true);
+    render(hwnd);
 }
 
-/// Round buttons: the window's shape is the drawn discs (one, or two
-/// joined), where they are at the current scale.
-unsafe fn apply_shape(hwnd: HWND, l: Layout) {
-    let disc = |x0: f64| {
-        let left = (l.dx + x0 * l.scale).floor() as i32;
-        let top = l.dy.floor() as i32;
-        let d = (SIZE as f64 * l.scale).ceil() as i32 + 1;
-        CreateEllipticRgn(left, top, left + d, top + d)
-    };
-    let region = disc(0.0);
-    for i in 1..l.count {
-        let next = disc(((SIZE + GAP) * i as i32) as f64);
-        let _ = CombineRgn(Some(region), Some(region), Some(next), RGN_OR);
-        let _ = DeleteObject(next.into());
-    }
-    let _ = SetWindowRgn(hwnd, Some(region), true);
+/// The layered bitmap's alpha is the window's shape now; drawing it anew
+/// is all a size or state change needs.
+unsafe fn apply_shape(hwnd: HWND, _l: Layout) {
+    render(hwnd);
 }
 
 pub fn set_shrink(on: bool) {
@@ -492,6 +465,7 @@ fn run() {
         let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
             return;
         };
+        gdiplus_ready();
         let class = w!("ikk_floating_mic");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
@@ -507,7 +481,7 @@ fn run() {
         let x = GetSystemMetrics(SM_CXSCREEN) - w_px - 32;
         let y = GetSystemMetrics(SM_CYSCREEN) / 3;
         let Ok(hwnd) = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             class,
             w!("Dictation"),
             WS_POPUP,
@@ -526,10 +500,11 @@ fn run() {
             }
             return;
         };
-        apply_shape(hwnd, l);
         if let Ok(mut s) = state().lock() {
             s.hwnd = hwnd.0 as isize;
         }
+        let _ = l;
+        render(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         note_position(hwnd, false);
         // Settings that arrived while the window was being created (the
@@ -644,7 +619,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             (s.audio_mode, s.on_mode.clone())
                         })
                         .unwrap_or((false, None));
-                    let _ = InvalidateRect(Some(hwnd), None, true);
+                    render(hwnd);
                     if let Some(on_mode) = on_mode {
                         std::thread::spawn(move || on_mode(audio));
                     }
@@ -662,11 +637,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_PAINT => {
-            paint(hwnd);
+            // A layered window shows its bitmap; nothing to paint here.
+            let mut ps = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut ps);
+            let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
+        WM_ERASEBKGND => LRESULT(1),
         MSG_REDRAW => {
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            render(hwnd);
             LRESULT(0)
         }
         MSG_HIDE => {
@@ -712,14 +691,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
             apply_shape(hwnd, l);
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            render(hwnd);
             SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_ANIM => {
             let l = layout();
             apply_shape(hwnd, l);
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            render(hwnd);
             if !l.animating {
                 let _ = KillTimer(Some(hwnd), TIMER_ANIM);
             }
@@ -743,11 +722,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             } else {
                 let _ = KillTimer(Some(hwnd), TIMER_SPIN);
             }
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            render(hwnd);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_SPIN => {
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            render(hwnd);
             LRESULT(0)
         }
         MSG_UNHIGHLIGHT => {
@@ -793,285 +772,336 @@ fn state_capture_timeout() -> u32 {
         .max(1_000)
 }
 
-unsafe fn paint(hwnd: HWND) {
-    let (listening, standby) = state()
-        .lock()
-        .map(|s| (s.listening, s.standby))
-        .unwrap_or((false, false));
+/// GDI+ once per process.
+fn gdiplus_ready() -> bool {
+    static TOKEN: OnceLock<usize> = OnceLock::new();
+    *TOKEN.get_or_init(|| unsafe {
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            ..Default::default()
+        };
+        let mut token = 0usize;
+        if GdiplusStartup(&mut token, &input, std::ptr::null_mut()).0 == 0 {
+            token
+        } else {
+            0
+        }
+    }) != 0
+}
+
+/// 0x00BBGGRR → GDI+ 0xAARRGGBB, darkened towards [`DIM`] by `bright`.
+fn argb(c: COLORREF, bright: f64) -> u32 {
+    let f = DIM + (1.0 - DIM) * bright;
+    let ch = |shift: u32| (((c.0 >> shift) & 0xFF) as f64 * f) as u32;
+    0xFF00_0000 | (ch(0) << 16) | (ch(8) << 8) | ch(16)
+}
+
+/// Draw the panel into a 32-bit bitmap with GDI+ (anti-aliased, scaled
+/// by the shrink animation) and show it as the layered window's content:
+/// no flicker, no window region, smooth edges. The whole panel is left at
+/// alpha 1, so the mouse counts as over it everywhere (hover, drag).
+unsafe fn render(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, GetDC, ReleaseDC, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    };
+    use windows::Win32::Graphics::GdiPlus::*;
+    use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
+    if !gdiplus_ready() {
+        return;
+    }
     let l = layout();
-    let with_correct = l.with_correct;
-    let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(hwnd, &mut ps);
-    // Everything below is drawn at scale 1 (SIZE × SIZE per button); the
-    // world transform scales and centres it. Idle shrunk buttons: darker.
-    SetGraphicsMode(hdc, GM_ADVANCED);
-    let xform = XFORM {
-        eM11: l.scale as f32,
-        eM12: 0.0,
-        eM21: 0.0,
-        eM22: l.scale as f32,
-        eDx: l.dx as f32,
-        eDy: l.dy as f32,
-    };
-    let _ = SetWorldTransform(hdc, &xform);
-    let colour = |c: COLORREF| dimmed(c, l.bright);
-    let white = glyph_colour(l.bright);
-    let brush = CreateSolidBrush(colour(if listening {
-        RED
-    } else if standby {
-        BLUE
-    } else {
-        GRAY
-    }));
-    let pen = CreatePen(PS_SOLID, RING, white);
-    let old_brush = SelectObject(hdc, brush.into());
-    let old_pen = SelectObject(hdc, pen.into());
-    let _ = Ellipse(hdc, RING / 2, RING / 2, SIZE - RING / 2, SIZE - RING / 2);
-    let replace_armed = state().lock().map(|s| s.replace_armed).unwrap_or(false);
-    if with_correct {
-        // The correction button: brand blue, orange while waiting for
-        // clicks (yellow when the range is for a replacement by voice).
-        let c = if replace_armed {
-            YELLOW
-        } else if is_capturing() {
-            ORANGE
-        } else {
-            BRAND
-        };
-        let brush2 = CreateSolidBrush(colour(c));
-        let prev = SelectObject(hdc, brush2.into());
-        let x0 = SIZE + GAP;
-        let _ = Ellipse(hdc, x0 + RING / 2, RING / 2, x0 + SIZE - RING / 2, SIZE - RING / 2);
-        SelectObject(hdc, prev);
-        let _ = DeleteObject(brush2.into());
-    }
-    // Glyphs from the Windows symbol font: microphone, check mark.
-    let font = CreateFontW(
-        30,
-        0,
-        0,
-        0,
-        400,
-        0,
-        0,
-        0,
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        w!("Segoe MDL2 Assets"),
-    );
-    let old_font = SelectObject(hdc, font.into());
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, white);
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: SIZE,
-        bottom: SIZE,
-    };
-    let mut glyph: Vec<u16> = "\u{E720}".encode_utf16().collect();
-    DrawTextW(hdc, &mut glyph, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    let (replace_armed, with_replace, range_mode, audio_mode) = state()
+    let (listening, standby, replace_armed, with_replace, range_mode, audio_mode, busy, since) = state()
         .lock()
-        .map(|s| (s.replace_armed, s.on_mode.is_some(), s.range_mode, s.audio_mode))
-        .unwrap_or((false, false, 0, false));
-    let line = |x1: i32, y1: i32, x2: i32, y2: i32, w: i32, c: COLORREF| {
-        let pen = CreatePen(PS_SOLID, w, c);
-        let old = SelectObject(hdc, pen.into());
-        let _ = MoveToEx(hdc, x1, y1, None);
-        let _ = LineTo(hdc, x2, y2);
-        SelectObject(hdc, old);
-        let _ = DeleteObject(pen.into());
+        .map(|s| {
+            (
+                s.listening,
+                s.standby,
+                s.replace_armed,
+                s.on_mode.is_some(),
+                s.range_mode,
+                s.audio_mode,
+                s.busy,
+                s.busy_since,
+            )
+        })
+        .unwrap_or((false, false, false, false, 0, false, 0, None));
+    let (w, h) = (l.width.max(1), l.height.max(1));
+    let screen = GetDC(None);
+    let mem = CreateCompatibleDC(Some(screen));
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
     };
-    let dot = |x: i32, y: i32, r: i32, c: COLORREF| {
-        let b = CreateSolidBrush(c);
-        let p = CreatePen(PS_SOLID, 1, c);
-        let ob = SelectObject(hdc, b.into());
-        let op = SelectObject(hdc, p.into());
-        let _ = Ellipse(hdc, x - r, y - r, x + r, y + r);
-        SelectObject(hdc, op);
-        SelectObject(hdc, ob);
-        let _ = DeleteObject(p.into());
-        let _ = DeleteObject(b.into());
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let bmp = match CreateDIBSection(Some(mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+        std::result::Result::Ok(b) => b,
+        Err(_) => {
+            let _ = DeleteDC(mem);
+            ReleaseDC(None, screen);
+            return;
+        }
     };
-    let star = |sx: i32, sy: i32, r: f64, c: COLORREF| {
-        let inner = r * 0.38;
-        let pts: Vec<POINT> = (0..8)
-            .map(|i| {
-                let a = std::f64::consts::FRAC_PI_4 * i as f64;
-                let rr = if i % 2 == 0 { r } else { inner };
-                POINT {
-                    x: sx + (rr * a.cos()).round() as i32,
-                    y: sy - (rr * a.sin()).round() as i32,
+    let old_bmp = SelectObject(mem, bmp.into());
+    let mut g: *mut GpGraphics = std::ptr::null_mut();
+    if GdipCreateFromHDC(mem, &mut g).0 == 0 && !g.is_null() {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+        GdipSetTextRenderingHint(g, TextRenderingHintAntiAlias);
+        GdipGraphicsClear(g, 0x0100_0000);
+        GdipTranslateWorldTransform(g, l.dx as f32, l.dy as f32, MatrixOrderPrepend);
+        GdipScaleWorldTransform(g, l.scale as f32, l.scale as f32, MatrixOrderPrepend);
+        let bright = l.bright;
+        let white = 0xFFFF_FFFFu32;
+        let glyph = {
+            let v = (0xE0 as f64 + (0xFF - 0xE0) as f64 * bright) as u32;
+            0xFF00_0000 | (v << 16) | (v << 8) | v
+        };
+        // Drawing helpers over the graphics.
+        let fill_ellipse = |x: f32, y: f32, d: f32, c: u32| {
+            let mut b: *mut GpSolidFill = std::ptr::null_mut();
+            if GdipCreateSolidFill(c, &mut b).0 == 0 {
+                GdipFillEllipse(g, b as *mut GpBrush, x, y, d, d);
+                GdipDeleteBrush(b as *mut GpBrush);
+            }
+        };
+        let stroke_ellipse = |x: f32, y: f32, d: f32, width: f32, c: u32| {
+            let mut p: *mut GpPen = std::ptr::null_mut();
+            if GdipCreatePen1(c, width, UnitPixel, &mut p).0 == 0 {
+                GdipDrawEllipse(g, p, x, y, d, d);
+                GdipDeletePen(p);
+            }
+        };
+        let line = |x1: f32, y1: f32, x2: f32, y2: f32, width: f32, c: u32| {
+            let mut p: *mut GpPen = std::ptr::null_mut();
+            if GdipCreatePen1(c, width, UnitPixel, &mut p).0 == 0 {
+                GdipSetPenStartCap(p, LineCapRound);
+                GdipSetPenEndCap(p, LineCapRound);
+                GdipDrawLine(g, p, x1, y1, x2, y2);
+                GdipDeletePen(p);
+            }
+        };
+        let dot = |x: f32, y: f32, r: f32, c: u32| fill_ellipse(x - r, y - r, 2.0 * r, c);
+        let star = |sx: f32, sy: f32, r: f32, c: u32| {
+            let inner = r * 0.38;
+            let pts: Vec<PointF> = (0..8)
+                .map(|i| {
+                    let a = std::f32::consts::FRAC_PI_4 * i as f32;
+                    let rr = if i % 2 == 0 { r } else { inner };
+                    PointF {
+                        X: sx + rr * a.cos(),
+                        Y: sy - rr * a.sin(),
+                    }
+                })
+                .collect();
+            let mut b: *mut GpSolidFill = std::ptr::null_mut();
+            if GdipCreateSolidFill(c, &mut b).0 == 0 {
+                GdipFillPolygon2(g, b as *mut GpBrush, pts.as_ptr(), pts.len() as i32);
+                GdipDeleteBrush(b as *mut GpBrush);
+            }
+        };
+        let text = |t: &str, family: PCWSTR, size: f32, bold: bool, rect: RectF, c: u32| {
+            let mut fam: *mut GpFontFamily = std::ptr::null_mut();
+            if GdipCreateFontFamilyFromName(family, std::ptr::null_mut(), &mut fam).0 != 0 || fam.is_null() {
+                return;
+            }
+            let mut font: *mut GpFont = std::ptr::null_mut();
+            let style = if bold { FontStyleBold.0 } else { 0 };
+            if GdipCreateFont(fam, size, style, UnitPixel, &mut font).0 == 0 {
+                let mut fmt: *mut GpStringFormat = std::ptr::null_mut();
+                if GdipCreateStringFormat(0, 0, &mut fmt).0 == 0 {
+                    GdipSetStringFormatAlign(fmt, StringAlignmentCenter);
+                    GdipSetStringFormatLineAlign(fmt, StringAlignmentCenter);
+                    let mut b: *mut GpSolidFill = std::ptr::null_mut();
+                    if GdipCreateSolidFill(c, &mut b).0 == 0 {
+                        let utf16: Vec<u16> = t.encode_utf16().chain(std::iter::once(0)).collect();
+                        GdipDrawString(g, PCWSTR(utf16.as_ptr()), -1, font, &rect, fmt, b as *const GpBrush);
+                        GdipDeleteBrush(b as *mut GpBrush);
+                    }
+                    GdipDeleteStringFormat(fmt);
                 }
-            })
-            .collect();
-        let thin = CreatePen(PS_SOLID, 1, c);
-        let brush = CreateSolidBrush(c);
-        let op = SelectObject(hdc, thin.into());
-        let ob = SelectObject(hdc, brush.into());
-        let _ = Polygon(hdc, &pts);
-        SelectObject(hdc, ob);
-        SelectObject(hdc, op);
-        let _ = DeleteObject(brush.into());
-        let _ = DeleteObject(thin.into());
-    };
-    if with_correct {
-        // The rotating arc while busy: a quarter turn every 0.9 s.
-        let (busy, since) = state().lock().map(|s| (s.busy, s.busy_since)).unwrap_or((0, None));
-        if busy != 0 {
-            use windows::Win32::Graphics::Gdi::{Arc, SetArcDirection, AD_CLOCKWISE};
-            let t = since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-            let a0 = (t * 400.0) % 360.0;
-            let a1 = a0 + 110.0;
-            let (cx, cy, r) = (
-                (SIZE + GAP + SIZE / 2) as f64,
-                (SIZE / 2) as f64,
-                (SIZE / 2 - RING - 3) as f64,
-            );
-            let pt = |a: f64| POINT {
-                x: (cx + r * a.to_radians().cos()).round() as i32,
-                y: (cy - r * a.to_radians().sin()).round() as i32,
-            };
-            // Listening: brand blue (shows on the yellow armed button); processing: red.
-            let colour = if busy == 1 { COLOR_LISTEN_ARC } else { RED };
-            let pen = CreatePen(PS_SOLID, 6, colour);
-            let old = SelectObject(hdc, pen.into());
-            let _ = SetArcDirection(hdc, AD_CLOCKWISE);
-            let (p1, p2) = (pt(a1), pt(a0));
-            let inset = RING + 3;
-            let _ = Arc(
-                hdc,
-                SIZE + GAP + inset,
-                inset,
-                SIZE + GAP + SIZE - inset,
-                SIZE - inset,
-                p1.x,
-                p1.y,
-                p2.x,
-                p2.y,
-            );
-            SelectObject(hdc, old);
-            let _ = DeleteObject(pen.into());
-        }
-        // The correction button: the wand, a little smaller and higher, and
-        // the range it corrects as small lines beneath it.
-        let (cx, cy) = (SIZE + GAP + SIZE / 2, SIZE / 2);
-        let ink = if replace_armed { INK } else { white };
-        let (wx, wy) = (cx, cy - 6);
-        line(wx - 10, wy + 9, wx + 3, wy - 4, 4, ink);
-        star(wx + 8, wy - 9, 6.5, ink);
-        star(wx + 1, wy - 13, 2.6, ink);
-        star(wx + 13, wy - 2, 2.6, ink);
-        let gy = cy + 17;
-        match range_mode {
-            2 => {
-                line(cx - 11, gy - 4, cx - 11, gy + 4, 2, ink);
-                line(cx - 11, gy, cx + 11, gy, 2, ink);
-                line(cx + 11, gy - 4, cx + 11, gy + 4, 2, ink);
+                GdipDeleteFont(font);
             }
-            1 => {
-                line(cx - 11, gy - 5, cx + 11, gy - 5, 2, ink);
-                line(cx - 11, gy, cx + 11, gy, 2, ink);
-                line(cx - 11, gy + 5, cx + 1, gy + 5, 2, ink);
-            }
-            3 => {
-                line(cx - 7, gy + 2, cx + 7, gy + 2, 3, ink);
-                dot(cx, gy - 4, 2, ink);
-            }
-            _ => {
-                line(cx - 12, gy - 4, cx - 12, gy + 4, 2, ink);
-                line(cx - 12, gy, cx + 1, gy, 2, ink);
-                dot(cx + 5, gy, 1, ink);
-                dot(cx + 9, gy, 1, ink);
-                dot(cx + 13, gy, 1, ink);
-            }
-        }
-    }
-    if with_replace {
-        // The switch: a white disc, the lit half brand blue — "AI" above,
-        // "Audio" below.
-        let x0 = (SIZE + GAP) * if with_correct { 2 } else { 1 };
-        let dark_brush = CreateSolidBrush(colour(GRAY));
-        let prev = SelectObject(hdc, dark_brush.into());
-        let _ = Ellipse(hdc, x0 + RING / 2, RING / 2, x0 + SIZE - RING / 2, SIZE - RING / 2);
-        SelectObject(hdc, prev);
-        let _ = DeleteObject(dark_brush.into());
-        // The lit half: clip to the disc, fill a rectangle.
-        let disc = CreateEllipticRgn(x0 + RING / 2, RING / 2, x0 + SIZE - RING / 2, SIZE - RING / 2);
-        let _ = SelectClipRgn(hdc, Some(disc));
-        let lit = CreateSolidBrush(colour(BRAND));
-        let rect = if audio_mode {
-            RECT {
-                left: x0,
-                top: SIZE / 2,
-                right: x0 + SIZE,
-                bottom: SIZE,
-            }
+            GdipDeleteFontFamily(fam);
+        };
+        let (size, ring) = (SIZE as f32, RING as f32);
+        let inner = size - ring;
+        // --- the microphone button
+        let mic = if listening {
+            RED
+        } else if standby {
+            BLUE
         } else {
-            RECT {
-                left: x0,
-                top: 0,
-                right: x0 + SIZE,
-                bottom: SIZE / 2,
-            }
+            GRAY
         };
-        let _ = FillRect(hdc, &rect, lit);
-        let _ = DeleteObject(lit.into());
-        let _ = SelectClipRgn(hdc, None);
-        let _ = DeleteObject(disc.into());
-        line(
-            x0 + RING + 2,
-            SIZE / 2,
-            x0 + SIZE - RING - 2,
-            SIZE / 2,
-            1,
-            COLORREF(0x0070_7070),
+        fill_ellipse(ring / 2.0, ring / 2.0, inner, argb(mic, bright));
+        stroke_ellipse(ring / 2.0, ring / 2.0, inner, ring, glyph);
+        text(
+            "\u{E720}",
+            w!("Segoe MDL2 Assets"),
+            30.0,
+            false,
+            RectF {
+                X: 0.0,
+                Y: 0.0,
+                Width: size,
+                Height: size,
+            },
+            glyph,
         );
-        // Labels.
-        let small = CreateFontW(
-            13,
-            0,
-            0,
-            0,
-            700,
-            0,
-            0,
-            0,
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            w!("Segoe UI"),
-        );
-        let old_small = SelectObject(hdc, small.into());
-        let label = |text: &str, top: i32, bottom: i32, c: COLORREF| {
-            SetTextColor(hdc, c);
-            let mut r = RECT {
-                left: x0,
-                top,
-                right: x0 + SIZE,
-                bottom,
+        // --- the correction button: wand over the range glyph
+        if l.with_correct {
+            let x0 = (SIZE + GAP) as f32;
+            let face = if replace_armed {
+                YELLOW
+            } else if is_capturing() {
+                ORANGE
+            } else {
+                BRAND
             };
-            let mut t: Vec<u16> = text.encode_utf16().collect();
-            DrawTextW(hdc, &mut t, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        };
-        let off = COLORREF(0x00B8_B8B8);
-        label("AI", 2, SIZE / 2, if audio_mode { off } else { WHITE_FACE });
-        label("Audio", SIZE / 2, SIZE - 2, if audio_mode { WHITE_FACE } else { off });
-        SelectObject(hdc, old_small);
-        let _ = DeleteObject(small.into());
+            fill_ellipse(x0 + ring / 2.0, ring / 2.0, inner, argb(face, bright));
+            stroke_ellipse(x0 + ring / 2.0, ring / 2.0, inner, ring, glyph);
+            if busy != 0 {
+                let t = since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+                let start = ((t * 400.0) % 360.0) as f32;
+                let inset = ring + 3.0;
+                let mut p: *mut GpPen = std::ptr::null_mut();
+                let c = argb(if busy == 1 { COLOR_LISTEN_ARC } else { RED }, 1.0);
+                if GdipCreatePen1(c, 6.0, UnitPixel, &mut p).0 == 0 {
+                    GdipSetPenStartCap(p, LineCapRound);
+                    GdipSetPenEndCap(p, LineCapRound);
+                    GdipDrawArc(
+                        g,
+                        p,
+                        x0 + inset,
+                        inset,
+                        size - 2.0 * inset,
+                        size - 2.0 * inset,
+                        start,
+                        120.0,
+                    );
+                    GdipDeletePen(p);
+                }
+            }
+            let ink = if replace_armed { argb(INK, 1.0) } else { glyph };
+            let (cx, cy) = (x0 + size / 2.0, size / 2.0);
+            let (wx, wy) = (cx, cy - 6.0);
+            line(wx - 10.0, wy + 9.0, wx + 3.0, wy - 4.0, 3.6, ink);
+            star(wx + 8.0, wy - 9.0, 6.5, ink);
+            star(wx + 1.0, wy - 13.0, 2.6, ink);
+            star(wx + 13.0, wy - 2.0, 2.6, ink);
+            let gy = cy + 17.0;
+            match range_mode {
+                2 => {
+                    line(cx - 11.0, gy - 4.0, cx - 11.0, gy + 4.0, 2.4, ink);
+                    line(cx - 11.0, gy, cx + 11.0, gy, 2.0, ink);
+                    line(cx + 11.0, gy - 4.0, cx + 11.0, gy + 4.0, 2.4, ink);
+                }
+                1 => {
+                    line(cx - 11.0, gy - 5.0, cx + 11.0, gy - 5.0, 2.0, ink);
+                    line(cx - 11.0, gy, cx + 11.0, gy, 2.0, ink);
+                    line(cx - 11.0, gy + 5.0, cx + 1.0, gy + 5.0, 2.0, ink);
+                }
+                3 => {
+                    line(cx - 7.0, gy + 2.0, cx + 7.0, gy + 2.0, 3.0, ink);
+                    dot(cx, gy - 4.5, 2.0, ink);
+                }
+                _ => {
+                    line(cx - 12.0, gy - 4.0, cx - 12.0, gy + 4.0, 2.4, ink);
+                    line(cx - 12.0, gy, cx + 1.0, gy, 2.0, ink);
+                    dot(cx + 5.0, gy, 1.4, ink);
+                    dot(cx + 9.0, gy, 1.4, ink);
+                    dot(cx + 13.0, gy, 1.4, ink);
+                }
+            }
+        }
+        // --- the switch: a disc cut in two, "AI" above, "Audio" below
+        if with_replace {
+            let x0 = ((SIZE + GAP) * if l.with_correct { 2 } else { 1 }) as f32;
+            fill_ellipse(x0 + ring / 2.0, ring / 2.0, inner, argb(GRAY, bright));
+            let mut path: *mut GpPath = std::ptr::null_mut();
+            if GdipCreatePath(FillModeAlternate, &mut path).0 == 0 {
+                GdipAddPathEllipse(path, x0 + ring, ring, size - 2.0 * ring, size - 2.0 * ring);
+                GdipSetClipPath(g, path, CombineModeReplace);
+                let mut b: *mut GpSolidFill = std::ptr::null_mut();
+                if GdipCreateSolidFill(argb(BRAND, bright), &mut b).0 == 0 {
+                    let y = if audio_mode { size / 2.0 } else { 0.0 };
+                    GdipFillRectangle(g, b as *mut GpBrush, x0, y, size, size / 2.0);
+                    GdipDeleteBrush(b as *mut GpBrush);
+                }
+                GdipResetClip(g);
+                GdipDeletePath(path);
+            }
+            line(
+                x0 + ring + 2.0,
+                size / 2.0,
+                x0 + size - ring - 2.0,
+                size / 2.0,
+                1.0,
+                0xFF70_7070,
+            );
+            stroke_ellipse(x0 + ring / 2.0, ring / 2.0, inner, ring, glyph);
+            let off = 0xFFB8_B8B8;
+            text(
+                "AI",
+                w!("Segoe UI"),
+                12.0,
+                true,
+                RectF {
+                    X: x0,
+                    Y: 2.0,
+                    Width: size,
+                    Height: size / 2.0 - 2.0,
+                },
+                if audio_mode { off } else { white },
+            );
+            text(
+                "Audio",
+                w!("Segoe UI"),
+                12.0,
+                true,
+                RectF {
+                    X: x0,
+                    Y: size / 2.0,
+                    Width: size,
+                    Height: size / 2.0 - 2.0,
+                },
+                if audio_mode { white } else { off },
+            );
+        }
+        GdipDeleteGraphics(g);
     }
-    SelectObject(hdc, old_font);
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    let _ = DeleteObject(font.into());
-    let _ = DeleteObject(pen.into());
-    let _ = DeleteObject(brush.into());
-    let _ = EndPaint(hwnd, &ps);
+    // Hand the bitmap to the window manager.
+    let src = POINT { x: 0, y: 0 };
+    let size = windows::Win32::Foundation::SIZE { cx: w, cy: h };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let _ = UpdateLayeredWindow(
+        hwnd,
+        None,
+        None,
+        Some(&size),
+        Some(mem),
+        Some(&src),
+        COLORREF(0),
+        Some(&blend),
+        ULW_ALPHA,
+    );
+    SelectObject(mem, old_bmp);
+    let _ = DeleteObject(bmp.into());
+    let _ = DeleteDC(mem);
+    ReleaseDC(None, screen);
 }
 
 /// The yellow mark: a layered, click-through, topmost window painted in
