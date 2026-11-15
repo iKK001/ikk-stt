@@ -644,7 +644,14 @@ impl Agreed {
         } else {
             self.windows
         };
-        let needed = if last { (votes - 1).max(2) } else { votes };
+        // One reading only (a short thought ended before any window): as read.
+        let needed = if last && self.history.len() == 1 {
+            1
+        } else if last {
+            (votes - 1).max(2)
+        } else {
+            votes
+        };
         if last || self.history.len() >= self.windows {
             while k < words.len()
                 && self
@@ -894,7 +901,18 @@ impl TimedAgreed {
         } else {
             self.windows
         };
-        let needed = if last { (votes - 1).max(2) } else { votes };
+        // A short thought — a command, one word, a short sentence — got no
+        // window before the pause and comes as one reading: there is
+        // nothing to vote against, and waiting for a second reading would
+        // drop it (it did). It goes out as read.
+        let single = last && self.readings.len() == 1;
+        let needed = if single {
+            1
+        } else if last {
+            (votes - 1).max(2)
+        } else {
+            votes
+        };
         if !last && self.readings.len() < self.windows {
             return None;
         }
@@ -974,7 +992,9 @@ impl TimedAgreed {
             // At the pause two readings must agree (the ending check covers
             // the final reading's tail); a tail only one reading heard is
             // left out rather than typed as heard.
-            let needed = if last {
+            let needed = if single {
+                1
+            } else if last {
                 needed.min(covering.len()).max(2)
             } else {
                 needed
@@ -1933,6 +1953,30 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_short_thought_read_once_goes_out_as_read() {
+        // Timed voter: one reading at the pause releases every word.
+        let mut a = TimedAgreed::new(4, Vec::new());
+        let out = a.offer(
+            &timed(&[("Punkt", 0.1)], 0.0),
+            Duration::ZERO,
+            Duration::from_millis(800),
+            true,
+        );
+        assert_eq!(out.as_deref(), Some("Punkt"));
+        let mut b = TimedAgreed::new(4, Vec::new());
+        let out = b.offer(
+            &timed(&[("das", 0.1), ("neue", 0.4), ("Haus", 0.8)], 0.0),
+            Duration::ZERO,
+            Duration::from_millis(1500),
+            true,
+        );
+        assert_eq!(out.as_deref(), Some("das neue Haus"));
+        // Text voter: the same.
+        let mut c = Agreed::new(4);
+        assert_eq!(c.offer("Neue Zeile", true, true).as_deref(), Some("Neue Zeile"));
     }
 
     #[test]
