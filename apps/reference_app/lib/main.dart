@@ -87,11 +87,11 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _keyReadError;
 
   /// Where flutter_secure_storage keeps keys on this platform.
-  static String get _keyStoreName {
-    if (Platform.isMacOS || Platform.isIOS) return 'the Keychain';
-    if (Platform.isAndroid) return 'the Android Keystore (encrypted)';
-    if (Platform.isWindows) return 'Windows (encrypted, key in the Credential Manager)';
-    return 'the secure store';
+  String get _keyStoreName {
+    if (Platform.isMacOS || Platform.isIOS) return _t['storeKeychain'];
+    if (Platform.isAndroid) return _t['storeAndroid'];
+    if (Platform.isWindows) return _t['storeWindows'];
+    return _t['storeGeneric'];
   }
 
   void _rememberKeyTail(String credential) {
@@ -186,7 +186,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await _secure.delete(key: 'api_key:$_provider');
       _snack(_t.keyRemoved(_provider));
     } catch (e) {
-      _snack('Could not remove the key: $e');
+      _snack(_t.fmt('keyRemoveFailed', {'e': e}));
     }
     setState(() {
       _keyStored = false;
@@ -200,7 +200,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final region = _regionCtl.text.trim().toLowerCase();
     if (key.contains(':')) return key;
     if (!RegExp(r'^[a-z0-9]+$').hasMatch(region)) {
-      _snack('Enter the Azure region, e.g. switzerlandnorth (Azure portal > Speech resource > Keys and Endpoint)');
+      _snack(_t['azureRegionMissing']);
       return null;
     }
     if (key.isEmpty) {
@@ -230,7 +230,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _keyReadError = null;
       _snack(_t.keySaved(_keyStoreName));
     } catch (e) {
-      _snack('Key set for this run only; saving failed: $e');
+      _snack(_t.fmt('keyRunOnly', {'e': e}));
     }
     setState(() {
       _keyStored = true;
@@ -336,24 +336,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(textOnly ? 'Send text to ${r['name']}?' : 'Send audio to ${r['name']}?'),
+        title: Text(_t.fmt(textOnly ? 'consentTitleText' : 'consentTitleAudio', {'p': r['name']})),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(textOnly
-                ? 'Your dictated text leaves this device and is checked by ${r['name']} for: $uses.'
-                : 'Your recordings leave this device and are processed by ${r['name']} for: $uses.'),
+            Text(_t.fmt(textOnly ? 'consentBodyText' : 'consentBodyAudio', {'p': r['name'], 'u': uses})),
             const SizedBox(height: 12),
             TextButton(
               onPressed: () => launchUrl(Uri.parse(r['privacy_url'] as String)),
-              child: const Text('Privacy policy'),
+              child: Text(_t['privacyPolicy']),
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Deny')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Allow')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_t['deny'])),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(_t['allow'])),
         ],
       ),
     );
@@ -396,9 +394,8 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.all(12),
         child: SwitchListTile(
           contentPadding: EdgeInsets.zero,
-          title: const Text('Floating microphone button'),
-          subtitle: const Text('Stays on top of all apps. Click it to start or stop dictating into the app '
-              'you are working in; drag it to move it. Red while listening.'),
+          title: Text(_t['floatingTitle']),
+          subtitle: Text(_t['floatingBody']),
           value: _floatingOn,
           onChanged: _setFloating,
         ),
@@ -450,7 +447,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _voiceOn = (j['enabled'] as bool? ?? false) && _voiceModel != null;
       _applyVoice();
     } catch (e) {
-      _snack('Voice commands could not be read ($e). Please record them again.');
+      _snack(_t.fmt('voiceReadError', {'e': e}));
       return;
     }
     // A plain file of an earlier version: encrypt it, then remove it. If
@@ -477,7 +474,7 @@ class _HomeScreenState extends State<HomeScreen> {
         settingsJson: jsonEncode(_settings),
       );
     } catch (e) {
-      _snack('Voice commands: $e');
+      _snack(_t.fmt('voiceError', {'e': e}));
     }
     if (!_voiceOn) _voiceStandby = false;
   }
@@ -495,7 +492,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // running dictation would transcribe them (and type them somewhere).
     _engine.setVoiceTraining(active: true);
     try {
-      final step = ValueNotifier<_VoiceStep>(const _VoiceStep('Get ready …', _StepKind.info));
+      final step = ValueNotifier<_VoiceStep>(_VoiceStep(_t['getReady'], _StepKind.info));
       var cancelled = false;
       var detail = '';
       if (!mounted) return;
@@ -503,7 +500,7 @@ class _HomeScreenState extends State<HomeScreen> {
         context: context,
         barrierDismissible: false,
         builder: (ctx) => AlertDialog(
-          title: const Text('Record your voice commands'),
+          title: Text(_t['voiceDialogTitle']),
           content: ValueListenableBuilder<_VoiceStep>(
             valueListenable: step,
             builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
@@ -520,7 +517,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 cancelled = true;
                 Navigator.of(ctx).pop();
               },
-              child: const Text('Close'),
+              child: Text(_t['close']),
             ),
           ],
         ),
@@ -532,19 +529,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final takes = <String, List<Float32List>>{'start': [], 'stop': []};
       for (final word in ['start', 'stop']) {
-        final label = word == 'start' ? 'START' : 'STOP';
+        final label = _t[word == 'start' ? 'wordStart' : 'wordStop'];
         if (word == 'stop') {
-          await show('✓ START word learned.\nNext: your STOP word – a different word.', _StepKind.ok, 2500);
+          await show(_t['startLearned'], _StepKind.ok, 2500);
         }
         var retry = false;
         while (!cancelled && takes[word]!.length < 3) {
           final n = takes[word]!.length + 1;
           await show(
-            retry
-                ? 'Didn\'t catch that clearly ($detail).\nPlease say your $label word again ($n of 3).'
-                : n == 1
-                    ? 'Say your $label word now ($n of 3).'
-                    : 'Say your $label word once more ($n of 3).',
+            _t.fmt(
+              retry
+                  ? 'sayWordRetry'
+                  : n == 1
+                      ? 'sayWordNow'
+                      : 'sayWordMore',
+              {'d': detail, 'l': label, 'n': n},
+            ),
             retry ? _StepKind.retry : _StepKind.listening,
           );
           try {
@@ -552,12 +552,12 @@ class _HomeScreenState extends State<HomeScreen> {
             if (cancelled) break;
             takes[word]!.add(take);
             retry = false;
-            await show('✓ Understood ($n of 3).', _StepKind.ok, 1300);
+            await show(_t.fmt('understood', {'n': n}), _StepKind.ok, 1300);
           } catch (e) {
             if (cancelled) break;
             retry = true;
             detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
-            await show('Didn\'t catch that clearly.\n($detail)', _StepKind.retry, 2000);
+            await show(_t.fmt('notClear', {'d': detail}), _StepKind.retry, 2000);
           }
           if (!cancelled && takes[word]!.length == 3) {
             try {
@@ -565,7 +565,7 @@ class _HomeScreenState extends State<HomeScreen> {
             } catch (_) {
               takes[word]!.clear();
               retry = false;
-              await show('Those three sounded too different.\nLet\'s record your $label word again.', _StepKind.retry, 2500);
+              await show(_t.fmt('tooDifferent', {'l': label}), _StepKind.retry, 2500);
             }
           }
         }
@@ -575,17 +575,17 @@ class _HomeScreenState extends State<HomeScreen> {
         _applyVoice();
         return;
       }
-      await show('Learning your words …', _StepKind.listening);
+      await show(_t['learningWords'], _StepKind.listening);
       try {
         _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
         _voiceOn = true;
         await _saveVoice();
-        await show('✓ Done. Say your START word to dictate,\nyour STOP word to stop.', _StepKind.ok, 2500);
+        await show(_t['voiceDone'], _StepKind.ok, 2500);
         if (mounted && !cancelled) Navigator.of(context).pop();
       } catch (e) {
         // Stays visible until closed: the reason matters for the next try.
         final msg = '$e'.replaceFirst(RegExp(r'^.*?Error:\s*'), '');
-        await show('Could not learn your words:\n$msg\n\nClose and record them again.', _StepKind.retry);
+        await show(_t.fmt('couldNotLearn', {'e': msg}), _StepKind.retry);
       }
       _applyVoice();
       setState(() {});
@@ -601,18 +601,17 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Voice commands (offline)', style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['voiceTitle'], style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
-            const Text('Start and stop dictation with two words of your own. They are recorded in your '
-                'voice and recognised on this device only; nothing is sent anywhere.'),
+            Text(_t['voiceBody']),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Start and stop by voice'),
-              subtitle: Text(_voiceModel == null
-                  ? 'Record your words first'
+              title: Text(_t['voiceSwitch']),
+              subtitle: Text(_t[_voiceModel == null
+                  ? 'voiceRecordFirst'
                   : _voiceStandby
-                      ? 'Listening for your start word'
-                      : 'Ready'),
+                      ? 'voiceListening'
+                      : 'voiceReady']),
               value: _voiceOn,
               onChanged: _voiceModel == null
                   ? null
@@ -640,7 +639,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             OutlinedButton(
               onPressed: _trainVoice,
-              child: Text(_voiceModel == null ? 'Record start and stop word' : 'Record them again'),
+              child: Text(_t[_voiceModel == null ? 'voiceRecord' : 'voiceRecordAgain']),
             ),
           ],
         ),
@@ -654,16 +653,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final retry = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('One more setting needed'),
+        title: Text(_t['setupTitle']),
         content: Text(s['message'] as String? ?? ''),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_t['cancel'])),
           if (url.isNotEmpty)
             TextButton(
               onPressed: () => launchUrl(Uri.parse(url)),
-              child: const Text('Open settings'),
+              child: Text(_t['openSettings']),
             ),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Done, start')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(_t['doneStart'])),
         ],
       ),
     );
@@ -705,6 +704,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // The widgets without settings at hand (licences page, platform cards)
+    // read the language from here.
+    UiStrings.current = _t;
     final listening = _state == 'Listening' || _state == 'Finishing';
     if (_settings.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
     final impairedMode = (_settings['sound'] as Map<String, dynamic>)['impaired_voice'] != false;
@@ -765,7 +767,7 @@ class _HomeScreenState extends State<HomeScreen> {
               style: FilledButton.styleFrom(minimumSize: const Size(220, 64)),
               onPressed: listening ? _stop : _start,
               icon: Icon(listening ? Icons.stop : Icons.mic),
-              label: Text(listening ? 'Stop' : 'Dictate', style: const TextStyle(fontSize: 20)),
+              label: Text(_t[listening ? 'stop' : 'dictate'], style: const TextStyle(fontSize: 20)),
             ),
           ),
           const SizedBox(height: 6),
@@ -786,8 +788,8 @@ class _HomeScreenState extends State<HomeScreen> {
           // accessibility bridge log "Failed to update ui::AXTree" lines.
           Semantics(
             container: true,
-            label: 'Status: $_state',
-            child: ExcludeSemantics(child: Center(child: Text('$_state${_speech ? ' · speech' : ''}'))),
+            label: _t.fmt('status', {'s': _state}),
+            child: ExcludeSemantics(child: Center(child: Text('$_state${_speech ? ' · ${_t['speech']}' : ''}'))),
           ),
           const SizedBox(height: 8),
           ExcludeSemantics(child: LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0))),
@@ -796,7 +798,7 @@ class _HomeScreenState extends State<HomeScreen> {
           if (_fallbackReason != null) _fallbackCard(),
           Semantics(
             container: true,
-            label: _finals.isEmpty ? 'No text recognised yet' : 'Last recognised: ${_finals.last}',
+            label: _finals.isEmpty ? _t['noTextYet'] : _t.fmt('lastRecognised', {'s': _finals.last}),
             child: ExcludeSemantics(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -865,7 +867,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     // Nothing may dictate while the takes are recorded.
     _engine.setVoiceTraining(active: true);
-    final step = ValueNotifier<_VoiceStep>(_VoiceStep('Get ready to say «$word» …', _StepKind.info));
+    final step = ValueNotifier<_VoiceStep>(_VoiceStep(_t.fmt('getReadyWord', {'w': word}), _StepKind.info));
     var cancelled = false;
     final heardAll = <String>[];
     if (!mounted) return;
@@ -873,7 +875,7 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        title: Text('Training «$word»'),
+        title: Text(_t.fmt('trainWordTitle', {'w': word})),
         content: ValueListenableBuilder<_VoiceStep>(
           valueListenable: step,
           builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
@@ -890,7 +892,7 @@ class _HomeScreenState extends State<HomeScreen> {
               cancelled = true;
               Navigator.of(ctx).pop();
             },
-            child: const Text('Close'),
+            child: Text(_t['close']),
           ),
         ],
       ),
@@ -901,22 +903,22 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     try {
-      await show('Get ready …', _StepKind.info, 1200);
+      await show(_t['getReady'], _StepKind.info, 1200);
       var n = 1;
       var failures = 0;
       while (!cancelled && n <= takes) {
-        await show('Say «$word» now ($n of $takes).', _StepKind.listening);
+        await show(_t.fmt('sayWordTake', {'w': word, 'n': n, 't': takes}), _StepKind.listening);
         try {
           final heard = await trainingTake(settingsJson: jsonEncode(_settings), credential: key, timeoutSecs: 10);
           if (cancelled) break;
           heardAll.add(heard);
           _learn(word, heard);
-          await show(heard.isEmpty ? 'Heard nothing in that take.' : 'Heard: „$heard“ ($n of $takes)', _StepKind.ok, 1400);
+          await show(heard.isEmpty ? _t['heardNothing'] : _t.fmt('heardTake', {'s': heard, 'n': n, 't': takes}), _StepKind.ok, 1400);
           n++;
         } catch (e) {
           if (cancelled) break;
           failures++;
-          await show('Didn\'t catch that.\n($e)', _StepKind.retry, 1800);
+          await show(_t.fmt('didntCatch', {'e': e}), _StepKind.retry, 1800);
           if (failures >= 3) break;
         }
       }
@@ -926,8 +928,8 @@ class _HomeScreenState extends State<HomeScreen> {
         final hits = heardAll.where((h) => _normWord(h) == _normWord(word)).length;
         await show(
           forms.isEmpty
-              ? '✓ «$word» was recognised $hits of ${heardAll.length} times as it is.'
-              : '✓ Learned. «$word» is heard as:\n${forms.join(', ')}\n\nFrom now on these are written as «$word».',
+              ? _t.fmt('trainedAsIs', {'w': word, 'n': hits, 't': heardAll.length})
+              : _t.fmt('trainedLearned', {'w': word, 's': forms.join(', ')}),
           _StepKind.ok,
           3500,
         );
@@ -956,8 +958,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final selected = from == null || to == null ? '' : words.sublist(from, to + 1).join(' ');
     return [
       const SizedBox(height: 8),
-      Text('Teach from the last text', style: Theme.of(context).textTheme.titleSmall),
-      const Text('Tap the first and the last wrong word, then enter the right word above and press Teach.'),
+      Text(_t['teachTitle'], style: Theme.of(context).textTheme.titleSmall),
+      Text(_t['teachBody']),
       Wrap(
         spacing: 4,
         runSpacing: 0,
@@ -989,7 +991,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     _snack(_t.learned(word, selected));
                     setState(() => _teachFrom = _teachTo = null);
                   },
-            child: const Text('Teach'),
+            child: Text(_t['teach']),
           ),
         ]),
       if (selected.isNotEmpty && learned.isNotEmpty)
@@ -1016,15 +1018,11 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Training', style: Theme.of(context).textTheme.titleMedium),
-            const Text(
-              'A word the recogniser never gets right: enter it once, say it five times. What the recogniser hears '
-              'for it is remembered, and written as the word wherever the recogniser was unsure. A similar word it '
-              'hears clearly stays as it is. Stays on this device.',
-            ),
+            Text(_t['trainingTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['trainingBody']),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Use learned words'),
+              title: Text(_t['useLearned']),
               value: t['enabled'] as bool? ?? true,
               onChanged: (b) {
                 t['enabled'] = b;
@@ -1036,7 +1034,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 child: TextField(
                   controller: _trainCtl,
-                  decoration: const InputDecoration(labelText: 'Word to train', hintText: 'e.g. Bildschirmtastatur'),
+                  decoration: InputDecoration(labelText: _t['wordToTrain'], hintText: _t['wordHint']),
                   onChanged: (_) => setState(() {}),
                   onSubmitted: (_) => hasKey ? _trainWord(_trainCtl.text.trim()) : null,
                 ),
@@ -1045,10 +1043,10 @@ class _HomeScreenState extends State<HomeScreen> {
               FilledButton.icon(
                 onPressed: hasKey && _state != 'Listening' ? () => _trainWord(_trainCtl.text.trim()) : null,
                 icon: const Icon(Icons.mic),
-                label: const Text('Say it 5×'),
+                label: Text(_t['sayIt5']),
               ),
             ]),
-            if (!hasKey) const Padding(padding: EdgeInsets.only(top: 4), child: Text('Enter the API key of the recogniser first.')),
+            if (!hasKey) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t['enterKeyFirst'])),
             ..._teachFromText(words),
             for (final e in words)
               ExpansionTile(
@@ -1056,15 +1054,16 @@ class _HomeScreenState extends State<HomeScreen> {
                 title: Text(e['word'] as String),
                 subtitle: Text(
                   ((e['heard'] as List?) ?? const []).isEmpty
-                      ? 'recognised as it is so far'
-                      : 'heard as: ${((e['heard'] as List).cast<Map<String, dynamic>>()).map((f) => '${f['text']} ×${f['count'] ?? 1}').join(', ')}',
+                      ? _t['recognisedAsIs']
+                      : _t.fmt('heardAs', {
+                          's': ((e['heard'] as List).cast<Map<String, dynamic>>()).map((f) => '${f['text']} ×${f['count'] ?? 1}').join(', '),
+                        }),
                 ),
                 children: [
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Replace even when heard clearly'),
-                    subtitle: const Text('Off: a heard form is replaced only where the recogniser was unsure, so a similar real word '
-                        'still gets through. On: replaced always – only for a word whose mishearings are never real words.'),
+                    title: Text(_t['replaceAlways']),
+                    subtitle: Text(_t['replaceAlwaysBody']),
                     value: e['always'] as bool? ?? false,
                     onChanged: (b) {
                       e['always'] = b;
@@ -1076,7 +1075,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     TextButton.icon(
                       onPressed: hasKey && _state != 'Listening' ? () => _trainWord(e['word'] as String) : null,
                       icon: const Icon(Icons.mic),
-                      label: const Text('Say it again'),
+                      label: Text(_t['sayAgain']),
                     ),
                     TextButton.icon(
                       onPressed: () {
@@ -1085,7 +1084,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         setState(() {});
                       },
                       icon: const Icon(Icons.delete_outline),
-                      label: const Text('Remove'),
+                      label: Text(_t['remove']),
                     ),
                   ]),
                 ],
@@ -1107,7 +1106,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Speech recognition', style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['providerTitle'], style: Theme.of(context).textTheme.titleMedium),
             DropdownButton<String>(
               value: _providers.contains(_provider) ? _provider : null,
               isExpanded: true,
@@ -1131,8 +1130,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Batch upload'),
-              subtitle: const Text('Chunks cut between words instead of a live stream: more accurate, a little later. Needed for slow or unclear speech.'),
+              title: Text(_t['batchUpload']),
+              subtitle: Text(_t['batchBody']),
               value: batch,
               onChanged: (b) {
                 final o = Map<String, dynamic>.from(opts);
@@ -1144,11 +1143,7 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               controller: _vocabCtl,
               focusNode: _vocabFocus,
-              decoration: const InputDecoration(
-                labelText: 'Personal vocabulary',
-                helperText: 'Names, places, special words, separated by commas. The recogniser is told to expect them '
-                    '(OpenAI prompt, Deepgram keywords).',
-              ),
+              decoration: InputDecoration(labelText: _t['vocabLabel'], helperText: _t['vocabHelper']),
               onChanged: (v) {
                 final o = Map<String, dynamic>.from(opts);
                 o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
@@ -1169,11 +1164,7 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_provider == 'azure')
               TextField(
                 controller: _regionCtl,
-                decoration: const InputDecoration(
-                  labelText: 'Azure region',
-                  helperText: 'Where your Speech resource is, e.g. switzerlandnorth or westeurope '
-                      '(Azure portal > Speech resource > Keys and Endpoint > Location/Region)',
-                ),
+                decoration: InputDecoration(labelText: _t['azureRegion'], helperText: _t['azureRegionHelper']),
               ),
             Row(
               children: [
@@ -1182,17 +1173,17 @@ class _HomeScreenState extends State<HomeScreen> {
                     controller: _keyCtl,
                     obscureText: true,
                     decoration: InputDecoration(
-                      labelText: _keyStored ? 'New API key (replaces the stored one)' : 'API key for $_provider',
+                      labelText: _keyStored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': _provider}),
                       helperText: switch (_provider) {
                         'voiceitt' => 'Format: APP_ID:API_KEY',
-                        'azure' => 'KEY 1 or KEY 2 of the Speech resource',
+                        'azure' => _t['azureKeyHelper'],
                         _ => null,
                       },
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
-                FilledButton(onPressed: _saveKey, child: const Text('Save')),
+                FilledButton(onPressed: _saveKey, child: Text(_t['save'])),
               ],
             ),
           ],
@@ -1205,14 +1196,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _keyStatus() {
     final scheme = Theme.of(context).colorScheme;
     final (IconData icon, Color color, String text) = switch ((_keyReadError, _keyStored)) {
-      (final String e, _) => (Icons.error_outline, scheme.error, 'Could not read the key store: $e'),
+      (final String e, _) => (Icons.error_outline, scheme.error, _t.fmt('keyReadError', {'e': e})),
       (null, true) => (
           Icons.check_circle,
           Colors.green.shade700,
-          'Key for $_provider found in $_keyStoreName: ••••${_keyTail ?? ''}'
-              '${_provider == 'azure' ? ' · region ${_regionCtl.text.trim()}' : ''}',
+          _t.fmt('keyFound', {'p': _provider, 's': _keyStoreName, 'k': _keyTail ?? ''}) +
+              (_provider == 'azure' ? ' · ${_t['region']} ${_regionCtl.text.trim()}' : ''),
         ),
-      (null, false) => (Icons.key_off, Colors.orange.shade800, 'No key stored for $_provider yet: enter it below.'),
+      (null, false) => (Icons.key_off, Colors.orange.shade800, _t.fmt('keyNone', {'p': _provider})),
     };
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -1221,7 +1212,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Icon(icon, color: color, size: 20),
           const SizedBox(width: 8),
           Expanded(child: Text(text, style: TextStyle(color: color))),
-          if (_keyStored) TextButton(onPressed: _removeKey, child: const Text('Remove')),
+          if (_keyStored) TextButton(onPressed: _removeKey, child: Text(_t['remove'])),
         ],
       ),
     );
@@ -1250,7 +1241,7 @@ class _HomeScreenState extends State<HomeScreen> {
       SizedBox(width: 120, child: Text(label)),
       Semantics(
         button: true,
-        label: '$label lower',
+        label: _t.fmt('lower', {'l': label}),
         child: IconButton(
           icon: const Icon(Icons.remove),
           onPressed: value > min ? () => set(value - step) : null,
@@ -1265,7 +1256,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       Semantics(
         button: true,
-        label: '$label higher',
+        label: _t.fmt('higher', {'l': label}),
         child: IconButton(
           icon: const Icon(Icons.add),
           onPressed: value < max ? () => set(value + step) : null,
@@ -1297,7 +1288,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final user = _ltUserCtl.text.trim();
     final key = _ltKeyCtl.text.trim();
     if (user.isEmpty || key.isEmpty) {
-      _snack('E-mail and API key are both needed');
+      _snack(_t['ltBothNeeded']);
       return;
     }
     final k = '$user:$key';
@@ -1328,13 +1319,13 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Live correction', style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['correctionTitle'], style: Theme.of(context).textTheme.titleMedium),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Correct grammar and spelling while dictating'),
+              title: Text(_t['correctionSwitch']),
               subtitle: InkWell(
                 onTap: () => launchUrl(Uri.parse('https://languagetool.org')),
-                child: const Text('Checked by LanguageTool (languagetool.org) with your own account; the dictated text is sent there'),
+                child: Text(_t['correctionBody']),
               ),
               value: on,
               onChanged: (b) {
@@ -1344,9 +1335,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Write corrections into the text'),
-              subtitle: const Text('Off: corrections are only shown here as a suggestion, nothing typed is deleted. '
-                  'On: the typed text is replaced by the corrected one.'),
+              title: Text(_t['rewriteSwitch']),
+              subtitle: Text(_t['rewriteBody']),
               value: (_settings['text'] as Map<String, dynamic>?)?['correction_rewrites'] as bool? ?? false,
               onChanged: on
                   ? (b) {
@@ -1356,35 +1346,30 @@ class _HomeScreenState extends State<HomeScreen> {
                     }
                   : null,
             ),
-            if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Suggested: $_suggestion')),
+            if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t.fmt('suggested', {'s': _suggestion}))),
             Row(children: [
               Icon(_ltStored ? Icons.check_circle : Icons.info_outline,
                   size: 18, color: _ltStored ? Colors.green : Colors.grey),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(_ltStored
-                    ? 'LanguageTool account found in $_keyStoreName: ••••$_ltTail (own limits)'
-                    : 'No account yet: enter your LanguageTool e-mail and API key below, then corrections start'),
+                child: Text(_ltStored ? _t.fmt('ltFound', {'s': _keyStoreName, 'k': _ltTail}) : _t['ltNone']),
               ),
-              if (_ltStored) TextButton(onPressed: _removeLtKey, child: const Text('Remove')),
+              if (_ltStored) TextButton(onPressed: _removeLtKey, child: Text(_t['remove'])),
             ]),
             TextField(
               controller: _ltUserCtl,
-              decoration: const InputDecoration(labelText: 'LanguageTool account e-mail'),
+              decoration: InputDecoration(labelText: _t['ltEmail']),
             ),
             Row(children: [
               Expanded(
                 child: TextField(
                   controller: _ltKeyCtl,
                   obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'API key',
-                    hintText: 'From languagetool.org > Account > API',
-                  ),
+                  decoration: InputDecoration(labelText: _t['apiKey'], hintText: _t['ltKeyHint']),
                 ),
               ),
               const SizedBox(width: 8),
-              FilledButton(onPressed: _saveLtKey, child: const Text('Save')),
+              FilledButton(onPressed: _saveLtKey, child: Text(_t['save'])),
             ]),
           ],
         ),
@@ -1406,11 +1391,11 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Sound', style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['soundTitle'], style: Theme.of(context).textTheme.titleMedium),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Automatic gain'),
-              subtitle: const Text('Brings your voice to a steady level before it is sent'),
+              title: Text(_t['agc']),
+              subtitle: Text(_t['agcBody']),
               value: sound['agc'] as bool? ?? true,
               onChanged: (b) {
                 sound['agc'] = b;
@@ -1420,7 +1405,7 @@ class _HomeScreenState extends State<HomeScreen> {
             if (!impaired)
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Noise reduction (RNNoise)'),
+                title: Text(_t['rnnoise']),
                 value: sound['denoise'] != 'Off',
                 onChanged: (b) {
                   sound['denoise'] = b ? 'RnNoise' : 'Off';
@@ -1429,13 +1414,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ExpansionTile(
               tilePadding: EdgeInsets.zero,
-              title: const Text('Advanced'),
-              subtitle: Text(impaired ? 'Gain' : 'Gain, chunk length and pause'),
+              title: Text(_t['advanced']),
+              subtitle: Text(_t[impaired ? 'advGain' : 'advGainChunk']),
               initiallyExpanded: _advanced,
               onExpansionChanged: (open) => setState(() => _advanced = open),
               children: [
                 _stepper(
-                  label: 'Preamp gain',
+                  label: _t['preamp'],
                   value: sound['preamp_gain_db'] as num,
                   min: 0,
                   max: 24,
@@ -1445,7 +1430,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 if (!impaired) ...[
                   _stepper(
-                    label: 'Chunk length',
+                    label: _t['chunkLength'],
                     value: (vad['chunk_interval_ms'] as num) / 1000,
                     min: 1,
                     max: 60,
@@ -1454,7 +1439,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     onChanged: (v) => vad['chunk_interval_ms'] = (v * 1000).round(),
                   ),
                   _stepper(
-                    label: 'Pause',
+                    label: _t['pause'],
                     value: vad['silence_duration_ms'] as num,
                     min: 300,
                     max: 6000,
@@ -1462,10 +1447,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     unit: 'ms',
                     onChanged: (v) => vad['silence_duration_ms'] = v.round(),
                   ),
-                  Text(
-                    'Chunks are cut only between words, at the first gap after the chunk length; a pause always ends one.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
+                  Text(_t['chunkNote'], style: Theme.of(context).textTheme.bodySmall),
                 ],
               ],
             ),
@@ -1485,12 +1467,12 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Impaired voice: sound and rhythm', style: Theme.of(context).textTheme.titleMedium),
-            const Text('Batch pieces of the whole thought every second, words typed once three readings agree, never changed.'),
+            Text(_t['impairedSoundTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['impairedSoundBody']),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Steady-noise filter (ventilator, fan)'),
-              subtitle: const Text('Learns the room\'s steady noise from the pauses and takes it out under the words. Leaves the voice alone.'),
+              title: Text(_t['noiseFilter']),
+              subtitle: Text(_t['noiseFilterBody']),
               value: sound['noise_profile'] != false,
               onChanged: (b) {
                 sound['noise_profile'] = b;
@@ -1498,7 +1480,7 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
             _stepper(
-              label: 'Pause that ends a thought',
+              label: _t['pauseThought'],
               value: vad['silence_duration_ms'] as num,
               min: 1500,
               max: 6000,
@@ -1508,15 +1490,15 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             ExpansionTile(
               tilePadding: EdgeInsets.zero,
-              title: const Text('Advanced'),
-              subtitle: const Text('The rules of the agreed-words mode; leave as they are unless testing'),
+              title: Text(_t['advanced']),
+              subtitle: Text(_t['impairedAdvBody']),
               initiallyExpanded: _advanced,
               onExpansionChanged: (open) => setState(() => _advanced = open),
               children: [
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Agreed words only (no corrections)'),
-                  subtitle: const Text('Off: chunk mode with the two switches below instead.'),
+                  title: Text(_t['agreedOnly']),
+                  subtitle: Text(_t['agreedOnlyBody']),
                   value: vad['agreement'] == true,
                   onChanged: (b) {
                     vad['agreement'] = b;
@@ -1525,7 +1507,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Re-check whole thoughts (chunk mode only)'),
+                  title: Text(_t['recheck']),
                   value: vad['refine'] == true,
                   onChanged: (b) {
                     vad['refine'] = b;
@@ -1534,7 +1516,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Type the quick text too (chunk mode only)'),
+                  title: Text(_t['quickText']),
                   value: vad['type_quick_text'] == true,
                   onChanged: vad['refine'] == true
                       ? (b) {
@@ -1545,8 +1527,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Noise reduction (RNNoise)'),
-                  subtitle: const Text('Measured harmful for unclear speech; off in this setup.'),
+                  title: Text(_t['rnnoise']),
+                  subtitle: Text(_t['rnnoiseImpairedBody']),
                   value: sound['denoise'] != 'Off',
                   onChanged: (b) {
                     sound['denoise'] = b ? 'RnNoise' : 'Off';
@@ -1569,10 +1551,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final impaired = sound['impaired_voice'] != false;
     return Card(
       child: SwitchListTile(
-        title: const Text('Impaired voice'),
-        subtitle: Text(impaired
-            ? 'On: agreed words only, batch upload, steady-noise filter, 4 s pause — the setup for slow or unclear speech (in development).'
-            : 'Off: the released setup for clear speech (v0.0.1(51)): quick 2 s chunks, 0.9 s pause, live stream where available, no filters.'),
+        title: Text(_t['impairedVoice']),
+        subtitle: Text(_t[impaired ? 'impairedOn' : 'impairedOff']),
         value: impaired,
         onChanged: (b) {
           setState(() => _applyVoiceProfile(b));
@@ -1623,18 +1603,23 @@ class _HomeScreenState extends State<HomeScreen> {
     final opts = (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
     final sound = _settings['sound'] as Map<String, dynamic>;
     final vad = sound['vad'] as Map<String, dynamic>;
-    final mic = (_settings['microphone'] as Map<String, dynamic>)['device_label'] as String? ?? 'default microphone';
+    final mic = (_settings['microphone'] as Map<String, dynamic>)['device_label'] as String? ?? _t['defaultMic'];
     final chunk = ((vad['chunk_interval_ms'] as num) / 1000).toStringAsFixed(0);
     final pause = ((vad['silence_duration_ms'] as num) / 1000).toStringAsFixed(1);
     final vocab = ((opts['keywords'] as List?) ?? const []).length;
     return [
-      sound['impaired_voice'] != false ? 'IMPAIRED VOICE setup' : 'normal voice setup (v0.0.1(51))',
+      _t[sound['impaired_voice'] != false ? 'summaryImpaired' : 'summaryNormal'],
       // No saved options yet means the engine's default: batch.
-      '$_provider · ${(opts['transfer'] ?? 'Batch') == 'Batch' ? 'batch' : 'stream'} · ${kLanguages[_settings['providers']['language']] ?? _settings['providers']['language']} · vocabulary: $vocab',
+      '$_provider · ${_t[(opts['transfer'] ?? 'Batch') == 'Batch' ? 'batch' : 'stream']} · ${kLanguages[_settings['providers']['language']] ?? _settings['providers']['language']} · ${_t['vocabulary']}: $vocab',
       vad['agreement'] == true
-          ? 'agreed words only · every ${((vad['agreement_step_ms'] as num? ?? 1000) / 1000).toStringAsFixed(1)} s · pause $pause s'
-          : 'chunks $chunk s · pause $pause s · re-check ${vad['refine'] == true ? 'on' : 'off'}',
-      'steady-noise filter ${sound['noise_profile'] != false ? 'on' : 'off'} · noise reduction ${sound['denoise'] != 'Off' ? 'on' : 'off'} · gain ${sound['agc'] == false ? 'fixed' : 'auto'} · $mic',
+          ? _t.fmt('summaryAgreed', {'s': ((vad['agreement_step_ms'] as num? ?? 1000) / 1000).toStringAsFixed(1), 'p': pause})
+          : _t.fmt('summaryChunks', {'c': chunk, 'p': pause, 'r': _t[vad['refine'] == true ? 'on' : 'off']}),
+      _t.fmt('summaryFilters', {
+        'a': _t[sound['noise_profile'] != false ? 'on' : 'off'],
+        'b': _t[sound['denoise'] != 'Off' ? 'on' : 'off'],
+        'g': _t[sound['agc'] == false ? 'fixed' : 'auto'],
+        'm': mic,
+      }),
     ].join('\n');
   }
 
@@ -1651,7 +1636,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _saveReplayPath() {
     final path = _replayCtl.text.trim();
     if (path.isEmpty) {
-      _snack('Enter the path of a WAV file');
+      _snack(_t['enterWavPath']);
       return;
     }
     final mic = _settings['microphone'] as Map<String, dynamic>;
@@ -1672,7 +1657,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Microphone', style: Theme.of(context).textTheme.titleMedium),
+            Text(_t['micTitle'], style: Theme.of(context).textTheme.titleMedium),
             DropdownButton<String?>(
               value: replaying
                   ? _replayPrefix
@@ -1680,17 +1665,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       ? current
                       : null,
               isExpanded: true,
-              hint: const Text('System default'),
+              hint: Text(_t['systemDefault']),
               items: [
-                const DropdownMenuItem<String?>(value: null, child: Text('System default')),
-                ..._mics.map((m) => DropdownMenuItem<String?>(value: m.id, child: Text(m.isDefault ? '${m.name} (default)' : m.name))),
-                if (_advanced || replaying) const DropdownMenuItem<String?>(value: _replayPrefix, child: Text('Replay a recording (test)')),
+                DropdownMenuItem<String?>(value: null, child: Text(_t['systemDefault'])),
+                ..._mics.map((m) => DropdownMenuItem<String?>(value: m.id, child: Text(m.isDefault ? '${m.name} ${_t['defaultSuffix']}' : m.name))),
+                if (_advanced || replaying) DropdownMenuItem<String?>(value: _replayPrefix, child: Text(_t['replayEntry'])),
               ],
               onChanged: (id) {
                 if (id == _replayPrefix) {
                   // The path field below completes the device id.
                   mic['device_id'] = _replayPrefix + _replayCtl.text.trim();
-                  mic['device_label'] = 'Recording';
+                  mic['device_label'] = _t['recording'];
                 } else {
                   mic['device_id'] = id;
                   mic['device_label'] = _mics.where((m) => m.id == id).map((m) => m.name).firstOrNull;
@@ -1701,16 +1686,12 @@ class _HomeScreenState extends State<HomeScreen> {
             if (replaying) ...[
               TextField(
                 controller: _replayCtl,
-                decoration: const InputDecoration(
-                  labelText: 'WAV file (16-bit PCM)',
-                  helperText: 'Played through the same chain as a microphone, in real time, then silence until you stop. '
-                      'The same sample on every device and provider.',
-                ),
+                decoration: InputDecoration(labelText: _t['wavLabel'], helperText: _t['wavHelper']),
                 onSubmitted: (_) => _saveReplayPath(),
               ),
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton(onPressed: _saveReplayPath, child: const Text('Use this file')),
+                child: FilledButton(onPressed: _saveReplayPath, child: Text(_t['useFile'])),
               ),
             ],
           ],
@@ -1727,7 +1708,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Cannot type into the focused app ($_fallbackReason). Your text is kept here:'),
+            Text(_t.fmt('fallbackTitle', {'r': _fallbackReason})),
             const SizedBox(height: 8),
             SelectableText(_fallbackText),
             const SizedBox(height: 8),
@@ -1740,7 +1721,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     _snack('$e');
                   }
                 },
-                child: const Text('Insert into focused app'),
+                child: Text(_t['insertFocused']),
               ),
               const SizedBox(width: 8),
               OutlinedButton(
@@ -1752,7 +1733,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     _fallbackText = '';
                   });
                 },
-                child: const Text('Copy'),
+                child: Text(_t['copy']),
               ),
             ]),
           ],
@@ -1766,18 +1747,18 @@ class _HomeScreenState extends State<HomeScreen> {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('About $appName'),
+        title: Text(_t.fmt('aboutTitle', {'a': appName})),
         content: Text('App 0.1.0+1\nCore ${a.coreVersion} (build ${a.buildNumber}, ${a.gitSha}, ${a.buildDate})\n'
-            '${a.targetOs}-${a.targetArch}\nCore license: ${a.coreLicense}\nProviders: ${a.providers.join(', ')}'),
+            '${a.targetOs}-${a.targetArch}\n${_t['coreLicense']}: ${a.coreLicense}\n${_t['providers']}: ${a.providers.join(', ')}'),
         actions: [
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
               Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const LicensesScreen()));
             },
-            child: const Text('Licenses'),
+            child: Text(_t['licenses']),
           ),
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(_t['close'])),
         ],
       ),
     );
@@ -1789,12 +1770,13 @@ class LicensesScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = UiStrings.current;
     return DefaultTabController(
       length: 3,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Licenses'),
-          bottom: const TabBar(tabs: [Tab(text: 'License'), Tab(text: 'Notice'), Tab(text: 'Third party')]),
+          title: Text(t['licenses']),
+          bottom: TabBar(tabs: [Tab(text: t['license']), Tab(text: t['notice']), Tab(text: t['thirdParty'])]),
         ),
         body: TabBarView(
           children: [licenseText(), noticeText(), thirdPartyText()]
