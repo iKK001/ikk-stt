@@ -56,6 +56,7 @@ const ORANGE: COLORREF = COLORREF(0x0000_6CEF); // #EF6C00: waiting for the two 
 const YELLOW: COLORREF = COLORREF(0x0000_C7F9); // #F9C700: replace by voice armed
 const INK: COLORREF = COLORREF(0x0000_2E3A); // #3A2E00: glyph on the yellow button
 const WHITE_FACE: COLORREF = COLORREF(0x00FF_FFFF);
+const COLOR_LISTEN_ARC: COLORREF = COLORREF(0x00AD_7800); // #0078AD
 const RED: COLORREF = COLORREF(0x002F_2FD3); // #D32F2F: dictating
 const GRAY: COLORREF = COLORREF(0x0042_4242); // #424242: off
 
@@ -928,23 +929,25 @@ unsafe fn paint(hwnd: HWND) {
             let (cx, cy, r) = (
                 (SIZE + GAP + SIZE / 2) as f64,
                 (SIZE / 2) as f64,
-                (SIZE / 2 - RING / 2) as f64,
+                (SIZE / 2 - RING - 3) as f64,
             );
             let pt = |a: f64| POINT {
                 x: (cx + r * a.to_radians().cos()).round() as i32,
                 y: (cy - r * a.to_radians().sin()).round() as i32,
             };
-            let colour = if busy == 1 { YELLOW } else { RED };
-            let pen = CreatePen(PS_SOLID, RING + 1, colour);
+            // Listening: brand blue (shows on the yellow armed button); processing: red.
+            let colour = if busy == 1 { COLOR_LISTEN_ARC } else { RED };
+            let pen = CreatePen(PS_SOLID, 6, colour);
             let old = SelectObject(hdc, pen.into());
             let _ = SetArcDirection(hdc, AD_CLOCKWISE);
             let (p1, p2) = (pt(a1), pt(a0));
+            let inset = RING + 3;
             let _ = Arc(
                 hdc,
-                SIZE + GAP + RING / 2,
-                RING / 2,
-                SIZE + GAP + SIZE - RING / 2,
-                SIZE - RING / 2,
+                SIZE + GAP + inset,
+                inset,
+                SIZE + GAP + SIZE - inset,
+                SIZE - inset,
                 p1.x,
                 p1.y,
                 p2.x,
