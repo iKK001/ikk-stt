@@ -258,10 +258,12 @@ impl Shared {
                         let same_spot = (a.0 - b.0).abs() < 8.0 && (a.1 - b.1).abs() < 8.0;
                         let Some(s) = get() else { return };
                         s.busy_start(audio);
+                        // Two clicks on one spot were a double-click: the app
+                        // selected the word itself; take the selection as it is.
                         let r = match (audio, same_spot) {
-                            (true, true) => s.engine.replace_by_voice(&json, Some(a), false),
+                            (true, true) => s.engine.replace_by_voice(&json, None, false),
                             (true, false) => s.engine.replace_between(&json, a, b),
-                            (false, true) => s.engine.correct_word_at(&json, a),
+                            (false, true) => s.engine.correct_selection(&json),
                             (false, false) => s.engine.correct_between(&json, a, b),
                         };
                         if let Err(e) = r {

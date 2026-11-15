@@ -121,7 +121,15 @@ impl FfiEngine {
     /// double-click, then corrected.
     pub fn correct_word_at(&self, settings_json: &str, at: (f64, f64)) -> Result<(), String> {
         let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
-        ikk_output::desktop::double_click_at(at.0, at.1).map_err(|e| e.to_string())?;
+        ikk_output::desktop::complete_double_click_at(at.0, at.1).map_err(|e| e.to_string())?;
+        let mut req = ikk_engine::config::correct_request(&settings);
+        req.range = ikk_engine::CorrectionRange::Selection;
+        self.send(EngineCommand::CorrectRange(req))
+    }
+    /// Correct the selection as the app in front has it (the user made it,
+    /// for instance with a double-click of their own).
+    pub fn correct_selection(&self, settings_json: &str) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
         let mut req = ikk_engine::config::correct_request(&settings);
         req.range = ikk_engine::CorrectionRange::Selection;
         self.send(EngineCommand::CorrectRange(req))
@@ -147,8 +155,10 @@ impl FfiEngine {
         use_range: bool,
     ) -> Result<(), String> {
         let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        // The user clicked the word a moment ago: one more click makes it
+        // a double-click (two more would select the line).
         if let Some((x, y)) = word_at {
-            ikk_output::desktop::double_click_at(x, y).map_err(|e| e.to_string())?;
+            ikk_output::desktop::complete_double_click_at(x, y).map_err(|e| e.to_string())?;
         }
         let range = if word_at.is_some() || !use_range {
             ikk_engine::CorrectionRange::Selection

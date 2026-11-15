@@ -14,6 +14,14 @@ fn main() {
             ikk_output::desktop::drag(x, y, x2, y2).expect("drag");
             return;
         }
+        // `click x y complete`: a click, then the one more click that makes it
+        // a double-click (what the app does after the user's click).
+        if a.get(3).is_some_and(|s| s == "complete") {
+            ikk_output::desktop::click_at(x, y, false).expect("click");
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            ikk_output::desktop::complete_double_click_at(x, y).expect("complete");
+            return;
+        }
         // `click x y double`: a double-click (selects the word under it).
         if a.get(3).is_some_and(|s| s == "double") {
             ikk_output::desktop::double_click_at(x, y).expect("double click");

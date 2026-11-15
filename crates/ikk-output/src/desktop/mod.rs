@@ -64,6 +64,18 @@ pub fn double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
     }
 }
 
+/// The user just clicked at this point: one more click inside the system's
+/// double-click time completes a double-click and selects the word. (Two
+/// synthetic clicks after the user's own would make a triple-click, which
+/// selects the whole line.)
+pub fn complete_double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
+    {
+        platform::click_at(x, y, false)?;
+        std::thread::sleep(Duration::from_millis(120));
+        Ok(())
+    }
+}
+
 /// Screen rectangle (x, y, width, height in points, origin top-left of the
 /// main display) of the focused app's text selection, when its
 /// accessibility tree tells; `None` otherwise.
