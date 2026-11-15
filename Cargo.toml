@@ -12,7 +12,7 @@ publish = false
 
 # Core build number, shown in About next to the version. Bump for each build you hand out.
 [workspace.metadata.ikk]
-build_number = 58
+build_number = 59
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +35,7 @@ ikk-stt-local = { path = "crates/ikk-stt-local" }
 ikk-wake = { path = "crates/ikk-wake" }
 ikk-stt-windows = { path = "crates/ikk-stt-windows" }
 ikk-text = { path = "crates/ikk-text" }
+ikk-ondevice = { path = "crates/ikk-ondevice" }
 ikk-commands = { path = "crates/ikk-commands" }
 ikk-output = { path = "crates/ikk-output" }
 ikk-consent = { path = "crates/ikk-consent" }

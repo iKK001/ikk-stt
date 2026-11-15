@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -39,22 +39,31 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Shrinking buttons: drawn this much larger than [`SIZE`] under the
 /// mouse, and this much smaller (and darker) when the mouse is elsewhere.
 const HOVER_SCALE: f64 = 1.15;
-const IDLE_SCALE: f64 = 0.6;
+const IDLE_SCALE: f64 = 0.72;
 /// How much darker the idle buttons are drawn (multiplied into the colour).
 const DIM: f64 = 0.55;
+/// Growing and shrinking take this long, eased at both ends; redrawn
+/// every 16 ms by a window timer.
+const ANIM_MS: f64 = 340.0;
+const TIMER_ANIM: usize = 8;
 // COLORREF is 0x00BBGGRR.
 const BLUE: COLORREF = COLORREF(0x00B3_8600); // #0086B3, brand primary: listening for the start word
 const BRAND: COLORREF = COLORREF(0x00CC_9900); // #0099CC: the correction button
 const ORANGE: COLORREF = COLORREF(0x0000_6CEF); // #EF6C00: waiting for the two clicks
 const RED: COLORREF = COLORREF(0x002F_2FD3); // #D32F2F: dictating
 const GRAY: COLORREF = COLORREF(0x0042_4242); // #424242: off
-const WHITE: COLORREF = COLORREF(0x00FF_FFFF);
-const LIGHT_GRAY: COLORREF = COLORREF(0x00B8_B8B8);
 
-/// `c` darkened by [`DIM`].
-fn dimmed(c: COLORREF) -> COLORREF {
-    let ch = |shift: u32| (((c.0 >> shift) & 0xFF) as f64 * DIM) as u32;
+/// `c` darkened towards [`DIM`]: `bright` 1 = as is, 0 = fully dimmed.
+fn dimmed(c: COLORREF, bright: f64) -> COLORREF {
+    let f = DIM + (1.0 - DIM) * bright;
+    let ch = |shift: u32| (((c.0 >> shift) & 0xFF) as f64 * f) as u32;
     COLORREF(ch(0) | (ch(8) << 8) | (ch(16) << 16))
+}
+
+/// The ring and glyph colour: light grey at rest, white at full size.
+fn glyph_colour(bright: f64) -> COLORREF {
+    let v = (0xB8 as f64 + (0xFF - 0xB8) as f64 * bright) as u32;
+    COLORREF(v | (v << 8) | (v << 16))
 }
 
 const MSG_REDRAW: u32 = WM_APP + 1;
@@ -162,6 +171,8 @@ struct State {
     shrink: bool,
     /// The mouse is over the window.
     hover: bool,
+    /// The running size change: from, to, when it started.
+    anim: Option<(f64, f64, Instant)>,
 }
 
 /// The current layout: window size, drawing scale and offset, dimmed.
@@ -172,35 +183,75 @@ struct Layout {
     scale: f64,
     dx: f64,
     dy: f64,
-    dim: bool,
+    /// 0 = resting (small, dark), 1 = full size and bright.
+    bright: f64,
     with_correct: bool,
+    /// An animation is still running.
+    animating: bool,
 }
 
-fn layout() -> Layout {
-    let (with_correct, shrink, hover) = state()
-        .lock()
-        .map(|s| (s.on_correct.is_some(), s.shrink, s.hover))
-        .unwrap_or((false, false, false));
-    let content = width(with_correct) as f64;
-    let panel_scale = if shrink { HOVER_SCALE } else { 1.0 };
-    let scale = if !shrink {
+fn target_scale(shrink: bool, hover: bool) -> f64 {
+    if !shrink {
         1.0
     } else if hover {
         HOVER_SCALE
     } else {
         IDLE_SCALE
+    }
+}
+
+fn layout() -> Layout {
+    let (with_correct, shrink, hover, anim) = state()
+        .lock()
+        .map(|s| (s.on_correct.is_some(), s.shrink, s.hover, s.anim))
+        .unwrap_or((false, false, false, None));
+    let content = width(with_correct) as f64;
+    let panel_scale = if shrink { HOVER_SCALE } else { 1.0 };
+    let target = target_scale(shrink, hover);
+    let mut scale = target;
+    let mut animating = false;
+    if let Some((from, to, start)) = anim {
+        let t = start.elapsed().as_secs_f64() * 1000.0 / ANIM_MS;
+        if t < 1.0 && to == target {
+            let eased = t * t * (3.0 - 2.0 * t);
+            scale = from + (to - from) * eased;
+            animating = true;
+        }
+    }
+    let bright = if shrink {
+        ((scale - IDLE_SCALE) / (HOVER_SCALE - IDLE_SCALE)).clamp(0.0, 1.0)
+    } else {
+        1.0
     };
-    let w = (content * panel_scale).ceil();
-    let h = (SIZE as f64 * panel_scale).ceil();
+    // Two pixels of room: the disc regions are one pixel wider than the
+    // drawing and must never touch the window's edge.
+    let w = (content * panel_scale).ceil() + 2.0;
+    let h = (SIZE as f64 * panel_scale).ceil() + 2.0;
     Layout {
         width: w as i32,
         height: h as i32,
         scale,
         dx: (w - content * scale) / 2.0,
         dy: (h - SIZE as f64 * scale) / 2.0,
-        dim: shrink && !hover,
+        bright,
         with_correct,
+        animating,
     }
+}
+
+/// Start moving from the size drawn now to the current target (window
+/// thread): a timer redraws every frame until the time is up.
+unsafe fn start_animation(hwnd: HWND, from: f64) {
+    let to = state().lock().map(|s| target_scale(s.shrink, s.hover)).unwrap_or(1.0);
+    if (to - from).abs() < 1e-6 {
+        return;
+    }
+    if let Ok(mut s) = state().lock() {
+        s.anim = Some((from, to, Instant::now()));
+    }
+    SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
+    apply_shape(hwnd, layout());
+    let _ = InvalidateRect(Some(hwnd), None, true);
 }
 
 /// Round buttons: the window's shape is the drawn discs (one, or two
@@ -222,9 +273,19 @@ unsafe fn apply_shape(hwnd: HWND, l: Layout) {
 }
 
 pub fn set_shrink(on: bool) {
+    // The size drawn now is where the animation to the new size starts.
+    let from = layout().scale;
     let changed = state()
         .lock()
-        .map(|mut s| std::mem::replace(&mut s.shrink, on) != on)
+        .map(|mut s| {
+            if s.shrink == on {
+                return false;
+            }
+            s.shrink = on;
+            let to = target_scale(on, s.hover);
+            s.anim = Some((from, to, Instant::now()));
+            true
+        })
         .unwrap_or(false);
     if changed {
         post(MSG_SHRINK);
@@ -277,8 +338,10 @@ fn state() -> &'static Mutex<State> {
 }
 
 fn post(msg: u32) {
+    // 0: no window yet; -1: being created on its thread (that thread reads
+    // the state itself once the window exists).
     let hwnd = state().lock().map(|s| s.hwnd).unwrap_or(0);
-    if hwnd != 0 {
+    if hwnd > 0 {
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0));
         }
@@ -371,6 +434,10 @@ fn run() {
         }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         note_position(hwnd, false);
+        // Settings that arrived while the window was being created (the
+        // shell switches shrinking on right after `show`): size and shape
+        // follow the state as it is now.
+        let _ = PostMessageW(Some(hwnd), MSG_SHRINK, WPARAM(0), LPARAM(0));
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
@@ -399,6 +466,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_MOUSEMOVE => {
             // Shrinking buttons: grow under the mouse, and be told when it leaves.
+            let from = layout().scale;
             let entered = state()
                 .lock()
                 .map(|mut s| s.shrink && !std::mem::replace(&mut s.hover, true))
@@ -411,8 +479,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     dwHoverTime: 0,
                 };
                 let _ = TrackMouseEvent(&mut track);
-                apply_shape(hwnd, layout());
-                let _ = InvalidateRect(Some(hwnd), None, true);
+                start_animation(hwnd, from);
             }
             if let Some((start, rect, moved)) = DRAG.get() {
                 let mut now = POINT::default();
@@ -435,13 +502,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
+            let from = layout().scale;
             let left = state()
                 .lock()
                 .map(|mut s| std::mem::replace(&mut s.hover, false))
                 .unwrap_or(false);
             if left {
-                apply_shape(hwnd, layout());
-                let _ = InvalidateRect(Some(hwnd), None, true);
+                start_animation(hwnd, from);
             }
             LRESULT(0)
         }
@@ -512,7 +579,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         MSG_SHRINK => {
-            // Resized around the top-left corner; the shape follows.
+            // Resized around the top-left corner; the shape follows, and
+            // the animation set up by `set_shrink` runs.
             let l = layout();
             let _ = SetWindowPos(
                 hwnd,
@@ -525,6 +593,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             );
             apply_shape(hwnd, l);
             let _ = InvalidateRect(Some(hwnd), None, true);
+            SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_ANIM => {
+            let l = layout();
+            apply_shape(hwnd, l);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            if !l.animating {
+                let _ = KillTimer(Some(hwnd), TIMER_ANIM);
+            }
             LRESULT(0)
         }
         MSG_ARM => {
@@ -584,8 +662,8 @@ unsafe fn paint(hwnd: HWND) {
         eDy: l.dy as f32,
     };
     let _ = SetWorldTransform(hdc, &xform);
-    let colour = |c: COLORREF| if l.dim { dimmed(c) } else { c };
-    let white = if l.dim { LIGHT_GRAY } else { WHITE };
+    let colour = |c: COLORREF| dimmed(c, l.bright);
+    let white = glyph_colour(l.bright);
     let brush = CreateSolidBrush(colour(if listening {
         RED
     } else if standby {

@@ -25,6 +25,7 @@ pub mod config;
 pub mod training;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ikk_audio::vad::{VadEvent, VadMode, VoiceActivityDetector};
@@ -33,7 +34,9 @@ use ikk_commands::Intent;
 use ikk_consent::{recipient_for, ConsentState, Decision, Recipient};
 use ikk_output::live::LiveTyper;
 use ikk_output::{OutputError, TargetStatus, TextSink, Verification};
-use ikk_stt::{open_session, ProviderId, ProviderRegistry, Secret, SessionConfig, StreamingSession, TranscriptEvent};
+use ikk_stt::{
+    open_session, ProviderId, ProviderRegistry, Secret, SessionConfig, StreamingSession, TextCorrector, TranscriptEvent,
+};
 use ikk_text::TextConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -116,8 +119,11 @@ pub struct StartConfig {
     /// Typing flow: ms per character when draining committed text into the
     /// target (even writing flow). 0 = type each final at once.
     pub flow_ms: u32,
-    /// Grammar and spelling corrected live by the registry's corrector.
+    /// Grammar and spelling corrected live by the chosen corrector.
     pub correction: bool,
+    /// Who corrects (settings `text.corrector`); a corrector without a key
+    /// is replaced by the on-device one.
+    pub corrector: String,
     /// With `correction`: write the corrected text over the typed one.
     /// Otherwise it is only reported ([`EngineEvent::Suggestion`]).
     pub correction_rewrites: bool,
@@ -391,6 +397,8 @@ pub struct Engine {
     session: Option<Box<dyn StreamingSession>>,
     vad: Option<VoiceActivityDetector>,
     text_cfg: TextConfig,
+    /// The chosen corrector's id for live correction (from the start config).
+    corrector_id: String,
     command_locale: String,
     last_level: Instant,
     /// Diagnosis: what happened since the last summary line.
@@ -459,6 +467,7 @@ impl Engine {
             session: None,
             vad: None,
             text_cfg: TextConfig::default(),
+            corrector_id: String::new(),
             command_locale: String::new(),
             last_level: Instant::now(),
             diag: Diag::default(),
@@ -665,15 +674,39 @@ impl Engine {
         }
     }
 
+    /// The corrector to use for `wanted` (settings id), with its credential.
+    /// A corrector that needs a key but has none is replaced by the
+    /// on-device corrector, which needs neither key nor consent.
+    fn pick_corrector(&self, wanted: &str) -> Option<(Arc<dyn TextCorrector>, Option<String>)> {
+        let chosen = self.registry.corrector_named(wanted)?;
+        if chosen.local() {
+            return Some((chosen, None));
+        }
+        let credential = self
+            .credentials
+            .get(&ProviderId(chosen.id().to_string()))
+            .map(|s| s.expose().to_string());
+        if credential.is_some() {
+            return Some((chosen, credential));
+        }
+        match self.registry.local_corrector() {
+            Some(local) => {
+                info!(chosen = chosen.id(), "no key: the on-device corrector steps in");
+                Some((local, None))
+            }
+            None => Some((chosen, None)),
+        }
+    }
+
     /// A final was committed: ask the corrector for the newest segments,
     /// unless one request is already out (then once it is back) or the
     /// last request was moments ago (then after the gap).
     async fn schedule_correction(&mut self) {
-        let Some(corrector) = self.registry.corrector() else {
+        let Some((corrector, credential)) = self.pick_corrector(&self.corrector_id.clone()) else {
             return;
         };
         let Some(through) = self.last_segment else { return };
-        let allowed = self.consent.decision(corrector.id()) == Decision::Allowed;
+        let allowed = corrector.local() || self.consent.decision(corrector.id()) == Decision::Allowed;
         // The newest segments only: the ones before were checked already.
         let segments = self.live.segments();
         let start = segments.len().saturating_sub(CORRECTION_WINDOW);
@@ -683,10 +716,6 @@ impl Engine {
         let Some(text) = self.live.text_of_range(from, through) else {
             return;
         };
-        let credential = self
-            .credentials
-            .get(&ProviderId(corrector.id().to_string()))
-            .map(|s| s.expose().to_string());
         let Some(c) = self.correction.as_mut() else { return };
         if c.paused_until.is_some_and(|t| t > Instant::now()) {
             return;
@@ -699,8 +728,11 @@ impl Engine {
             }
             return;
         }
-        // No account, no requests: the switch alone is not enough.
-        let Some(credential) = credential else { return };
+        // No account, no requests: the switch alone is not enough (an
+        // on-device corrector needs none).
+        if credential.is_none() && !corrector.local() {
+            return;
+        }
         if c.in_flight {
             c.dirty = true;
             return;
@@ -730,7 +762,7 @@ impl Engine {
         corrector.set_gender_colon(self.text_cfg.gender_colon_auto || !self.text_cfg.gender_colon.is_empty());
         let (generation, language, tx) = (c.generation, c.language.clone(), self.self_tx.clone());
         tokio::spawn(async move {
-            let (result, throttled) = match corrector.correct(&text, &language, Some(&credential)).await {
+            let (result, throttled) = match corrector.correct(&text, &language, credential.as_deref()).await {
                 Ok(r) => (Ok(r), false),
                 Err(e) => {
                     warn!(%e, "live correction failed");
@@ -1011,6 +1043,7 @@ impl Engine {
         self.session = Some(session);
         self.vad = Some(vad);
         self.text_cfg = cfg.text;
+        self.corrector_id = cfg.corrector;
         self.command_locale = cfg.command_locale;
         self.set_state(EngineState::Listening).await;
         if standby_closed {
@@ -1029,7 +1062,7 @@ impl Engine {
             agreement = cfg.session.agreement.is_some(),
             mode = ?self.output_mode,
             correction = cfg.correction,
-            checker = self.registry.corrector().map(|c| c.id()).unwrap_or("none"),
+            checker = self.pick_corrector(&self.corrector_id).map(|(c, _)| c.id()).unwrap_or("none"),
             "session started"
         );
         Ok(())
@@ -1432,25 +1465,21 @@ impl Engine {
                 .await;
             return;
         }
-        let Some(corrector) = self.registry.corrector_named(&req.corrector) else {
+        let Some((corrector, credential)) = self.pick_corrector(&req.corrector) else {
             self.say_error("correction: no corrector available").await;
             return;
         };
-        if self.consent.decision(corrector.id()) != Decision::Allowed {
+        if !corrector.local() && self.consent.decision(corrector.id()) != Decision::Allowed {
             let r = recipient_for(corrector.id(), corrector.display_name());
             self.pending_correction = Some(req);
             let _ = self.events.send(EngineEvent::ConsentRequired(r)).await;
             return;
         }
-        let Some(credential) = self
-            .credentials
-            .get(&ProviderId(corrector.id().to_string()))
-            .map(|s| s.expose().to_string())
-        else {
+        if credential.is_none() && !corrector.local() {
             self.say_error(&format!("correction: no key for {}", corrector.display_name()))
                 .await;
             return;
-        };
+        }
         if req.range == CorrectionRange::ClickToClick {
             // The shell turns the two clicks into a selection first; a
             // request that still says click-to-click came without a shell.
@@ -1488,7 +1517,7 @@ impl Engine {
             // Bounded: while it runs, dictated words wait (see `hold`).
             let result = match tokio::time::timeout(
                 RANGE_CORRECTION_TIMEOUT,
-                corrector.correct(&original, &language, Some(&credential)),
+                corrector.correct(&original, &language, credential.as_deref()),
             )
             .await
             {

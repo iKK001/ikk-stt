@@ -142,6 +142,7 @@ fn start_cfg() -> StartConfig {
         command_locale: "de-CH".into(),
         flow_ms: 0,
         correction: false,
+        corrector: String::new(),
         correction_rewrites: false,
     }
 }

@@ -105,6 +105,7 @@ pub fn start_config(settings: &Settings) -> StartConfig {
         },
         flow_ms: 10,
         correction: settings.text.live_correction,
+        corrector: settings.text.corrector.clone(),
         correction_rewrites: settings.text.correction_rewrites,
     }
 }

@@ -1,0 +1,29 @@
+[package]
+name = "ikk-ondevice"
+description = "On-device text correction without an account or network: LanguageTool's grammar rules through nlprule and Hunspell spelling through spellbook"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ikk-stt.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+# LanguageTool's rules as a pure-Rust engine (MIT/Apache-2.0; the rule
+# binaries derive from LanguageTool 5.2, LGPL-2.1).
+nlprule = "0.6.4"
+# Hunspell-compatible spell checking (MPL-2.0); dictionaries in `dict/`.
+spellbook = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+# Fetches the rule binaries for the chosen languages once at build time.
+nlprule-build = "0.6.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

@@ -170,7 +170,7 @@ enum Cmd {
     /// (time to focus the text), select the range in the app in front, send
     /// it to the corrector, paste the answer over it.
     Correct {
-        /// languagetool, openai or anthropic
+        /// ondevice (no key), languagetool, openai or anthropic
         #[arg(long, default_value = "languagetool")]
         corrector: String,
         /// cursor_to_end, whole_text
@@ -722,7 +722,10 @@ async fn main() -> anyhow::Result<()> {
             delay,
             between,
         } => {
-            let key = if key_from_app {
+            // The on-device corrector needs no key.
+            let key = if corrector == "ondevice" {
+                String::new()
+            } else if key_from_app {
                 credential_from_app(&corrector)?
             } else {
                 credential_from_env(&corrector, key_env.as_deref())?
@@ -1140,13 +1143,15 @@ async fn run_correct(
         anyhow::bail!("unknown corrector {corrector}; have {:?}", reg.corrector_ids());
     }
     let mut engine = Engine::spawn(reg, ikk_output::default_sink());
-    engine
-        .send(EngineCommand::SetCredential(
-            ProviderId(corrector.clone()),
-            Secret::new(key),
-        ))
-        .await;
-    engine.send(EngineCommand::GrantConsent(corrector.clone())).await;
+    if !key.is_empty() {
+        engine
+            .send(EngineCommand::SetCredential(
+                ProviderId(corrector.clone()),
+                Secret::new(key),
+            ))
+            .await;
+        engine.send(EngineCommand::GrantConsent(corrector.clone())).await;
+    }
     eprintln!("focus the text to correct … {delay} s");
     tokio::time::sleep(Duration::from_secs(delay)).await;
     if let Some((from, to)) = between {

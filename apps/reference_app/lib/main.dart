@@ -2178,6 +2178,7 @@ class _HomeScreenState extends State<HomeScreen> {
               value: corrector,
               isExpanded: true,
               items: [
+                DropdownMenuItem(value: 'ondevice', child: Text(_t['correctorOnDevice'])),
                 DropdownMenuItem(value: 'languagetool', child: Text(_t['correctorLanguageTool'])),
                 DropdownMenuItem(value: 'openai', child: Text(_t['correctorOpenAi'])),
                 DropdownMenuItem(value: 'anthropic', child: Text(_t['correctorAnthropic'])),
@@ -2188,6 +2189,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
+            if (corrector == 'ondevice')
+              Padding(
+                padding: const EdgeInsets.only(top: 4, bottom: 8),
+                child: Text(_t['onDeviceBody'], style: Theme.of(context).textTheme.bodySmall),
+              ),
             if (corrector == 'languagetool') ...[
               Row(children: [
                 Icon(_ltStored ? Icons.check_circle : Icons.key_off,
@@ -2217,7 +2223,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
             if (corrector == 'openai') ..._correctorKeyRows('openai', 'OpenAI'),
             if (corrector == 'anthropic') ..._correctorKeyRows('anthropic', 'Anthropic'),
-            if (corrector != 'languagetool')
+            if (corrector != 'ondevice')
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(_t['fallbackOnDevice'], style: Theme.of(context).textTheme.bodySmall),
+              ),
+            if (corrector == 'openai' || corrector == 'anthropic')
               TextField(
                 controller: aiModelCtl,
                 decoration: InputDecoration(labelText: _t['aiModel'], helperText: _t['aiModelHelper']),

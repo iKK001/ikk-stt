@@ -487,6 +487,10 @@ impl ProviderRegistry {
             .cloned()
             .or_else(|| self.corrector())
     }
+    /// The corrector that runs on the device, if one is registered.
+    pub fn local_corrector(&self) -> Option<Arc<dyn TextCorrector>> {
+        self.correctors.iter().find(|c| c.local()).cloned()
+    }
     pub fn corrector_ids(&self) -> Vec<&'static str> {
         self.correctors.iter().map(|c| c.id()).collect()
     }
@@ -505,6 +509,12 @@ pub trait TextCorrector: Send + Sync {
     /// limits); without it the anonymous service is used.
     /// Returns the corrected text, or `None` when nothing needs changing.
     async fn correct(&self, text: &str, language: &str, credential: Option<&str>) -> Result<Option<String>, SttError>;
+    /// Runs on the device: needs neither a credential nor consent, since
+    /// no text leaves the machine. The engine uses such a corrector when
+    /// the chosen one has no key.
+    fn local(&self) -> bool {
+        false
+    }
     /// Text-model correctors: which model to ask (empty = the default).
     /// Rule-based checkers ignore it.
     fn set_model(&self, _model: &str) {}

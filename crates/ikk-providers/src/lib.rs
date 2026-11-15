@@ -36,6 +36,9 @@ pub fn register_all(reg: &mut ProviderRegistry) {
     reg.register(Box::new(elevenlabs::ElevenLabs));
     #[cfg(feature = "azure")]
     reg.register(Box::new(azure::Azure));
+    // First: the corrector that works without an account; the engine
+    // falls back to it when the chosen one has no key.
+    reg.set_corrector(std::sync::Arc::new(ikk_ondevice::OnDevice));
     #[cfg(feature = "languagetool")]
     reg.set_corrector(std::sync::Arc::new(languagetool::LanguageTool));
     reg.set_corrector(std::sync::Arc::new(llm::AiCorrector::openai()));
