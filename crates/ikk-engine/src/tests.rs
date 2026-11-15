@@ -1164,5 +1164,9 @@ fn replacement_follows_case_and_sign_of_the_replaced_text() {
     // not know keep theirs).
     assert_eq!(super::shape_replacement("alte", "Neue."), "neue");
     assert_eq!(super::shape_replacement("alte", "Haus"), "haus");
-    assert_eq!(super::shape_replacement("alte Haus", "Neue Scheune."), "Neue Scheune");
+    assert_eq!(super::shape_replacement("alte Haus", "Neue Scheune."), "neue Scheune");
+    assert_eq!(
+        super::shape_replacement("alte", "Das grosse Haus am See"),
+        "das grosse Haus am See"
+    );
 }

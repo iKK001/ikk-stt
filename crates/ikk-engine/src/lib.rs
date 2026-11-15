@@ -211,6 +211,9 @@ struct ReplaceByVoice {
     last_final: Option<Instant>,
     /// The voice detector hears speech right now.
     speech: bool,
+    /// When the voice detector last heard the speech end: the reading that
+    /// covers the end of the thought arrives after this moment.
+    speech_ended_at: Option<Instant>,
 }
 
 /// Replace by voice: the thought counts as finished this long after the
@@ -219,6 +222,9 @@ struct ReplaceByVoice {
 const REPLACE_SETTLE: Duration = Duration::from_millis(2000);
 /// Nothing heard for this long: the selection is left as it was.
 const REPLACE_TIMEOUT: Duration = Duration::from_secs(20);
+/// After the speech ended, the reading that covers its end is waited for
+/// this long at most; then what came goes in.
+const REPLACE_LAST_READING: Duration = Duration::from_secs(8);
 
 /// Rest after the checker said "too many requests".
 const CORRECTION_PAUSE: Duration = Duration::from_secs(60);
@@ -1216,6 +1222,7 @@ impl Engine {
                 let _ = self.events.try_send(EngineEvent::Speech(false));
                 if let Some(r) = self.replace.as_mut() {
                     r.speech = false;
+                    r.speech_ended_at = Some(Instant::now());
                     self.schedule_replace_tick();
                 }
                 true
@@ -1583,7 +1590,9 @@ impl Engine {
             cfg.session.refine_preview = false;
             cfg.pause = cfg.pause.min(Duration::from_millis(1500));
             cfg.session.endpointing = cfg.pause;
-            cfg.session.chunk_interval = cfg.session.chunk_interval.min(Duration::from_millis(1500));
+            // The whole short thought as one clip: no cut at a word gap
+            // whose later piece could arrive after the first was taken.
+            cfg.session.chunk_interval = Duration::from_secs(15);
             cfg.correction = false;
             if let Err(e) = self.start(*cfg).await {
                 self.say_error(&format!("replace: {e}")).await;
@@ -1629,6 +1638,7 @@ impl Engine {
             started: Instant::now(),
             last_final: None,
             speech: false,
+            speech_ended_at: None,
         });
         self.schedule_replace_tick();
         let _ = self.events.send(EngineEvent::ReplaceListening { original }).await;
@@ -1704,9 +1714,22 @@ impl Engine {
             }
             return;
         }
-        if r.last_final
-            .is_some_and(|t| t.elapsed() >= REPLACE_SETTLE - Duration::from_millis(50))
-        {
+        // Words came. The thought is finished when a reading arrived after
+        // the speech ended (the one that covers its end) and has settled —
+        // not merely when the last words are two seconds old, which closed
+        // the replacement while the last piece was still being read and
+        // kept only the first words. Without a speech end from the voice
+        // detector the settle time alone decides; after the speech end a
+        // reading is waited for at most REPLACE_LAST_READING.
+        let settled = r
+            .last_final
+            .is_some_and(|t| t.elapsed() >= REPLACE_SETTLE - Duration::from_millis(50));
+        let done = match (r.speech_ended_at, r.last_final) {
+            (Some(ended), Some(last)) if last > ended => last.elapsed() >= Duration::from_millis(900),
+            (Some(ended), _) => ended.elapsed() >= REPLACE_LAST_READING,
+            (None, _) => settled,
+        };
+        if done {
             self.finish_and_close().await;
         } else {
             self.schedule_replace_tick();
@@ -2130,11 +2153,15 @@ fn shape_replacement(original: &str, spoken: &str) -> String {
     if let (Some(o), Some(n)) = (first_orig, first_new) {
         if o.is_uppercase() && n.is_lowercase() {
             text = n.to_uppercase().chain(text.chars().skip(1)).collect();
-        } else if o.is_lowercase() && n.is_uppercase() && !orig.contains(' ') && !text.contains(' ') {
-            let lowered: String = n.to_lowercase().chain(text.chars().skip(1)).collect();
-            let word = lowered.trim_end_matches(|c: char| ".,;:!?".contains(c));
+        } else if o.is_lowercase() && n.is_uppercase() {
+            // The recogniser capitalises the first word of anything it
+            // hears; mid-sentence that capital goes again when the word is
+            // an ordinary one (names it does not know keep theirs).
+            let first: String = text.split_whitespace().next().unwrap_or("").to_string();
+            let lowered_first: String = n.to_lowercase().chain(first.chars().skip(1)).collect();
+            let word = lowered_first.trim_end_matches(|c: char| ".,;:!?".contains(c));
             if ikk_text::dictionary::is_word(word) {
-                text = lowered;
+                text = n.to_lowercase().chain(text.chars().skip(1)).collect();
             }
         }
     }
