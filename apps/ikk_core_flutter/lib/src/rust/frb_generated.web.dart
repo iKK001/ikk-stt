@@ -67,6 +67,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_32(dynamic raw);
 
   @protected
+  double dco_decode_f_64(dynamic raw);
+
+  @protected
   InputDevice dco_decode_input_device(dynamic raw);
 
   @protected
@@ -80,6 +83,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Float32List dco_decode_list_prim_f_32_strict(dynamic raw);
+
+  @protected
+  Float64List dco_decode_list_prim_f_64_strict(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -138,6 +144,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
   InputDevice sse_decode_input_device(SseDeserializer deserializer);
 
   @protected
@@ -153,6 +162,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Float32List sse_decode_list_prim_f_32_strict(SseDeserializer deserializer);
+
+  @protected
+  Float64List sse_decode_list_prim_f_64_strict(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -221,6 +233,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
   void sse_encode_input_device(InputDevice self, SseSerializer serializer);
 
   @protected
@@ -241,6 +256,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_prim_f_32_strict(
     Float32List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_f_64_strict(
+    Float64List self,
     SseSerializer serializer,
   );
 

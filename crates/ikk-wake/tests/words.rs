@@ -128,7 +128,10 @@ fn segmenter_cuts_a_word_out_of_silence() {
     let mut stream: Vec<f32> = (0..SAMPLE_RATE_HZ as usize).map(|_| 0.001 * rng.next()).collect();
     let word = speak(STOP, 1.0, 1.0, 0.001, 41);
     stream.extend_from_slice(&word);
-    stream.extend((0..SAMPLE_RATE_HZ as usize).map(|_| 0.001 * rng.next()));
+    // Two seconds of room after the word: the segmenter waits PAUSE_MS
+    // (0.8 s, room for the gaps inside a slow speaker's phrase) plus the
+    // detector's own hangover before it closes the utterance.
+    stream.extend((0..2 * SAMPLE_RATE_HZ as usize).map(|_| 0.001 * rng.next()));
     let mut got = Vec::new();
     for chunk in stream.chunks(160) {
         if let Some(u) = seg.push(chunk) {
@@ -137,6 +140,8 @@ fn segmenter_cuts_a_word_out_of_silence() {
     }
     assert_eq!(got.len(), 1, "exactly one utterance");
     let len = got[0].len() as f32 / word.len() as f32;
-    assert!((0.8..2.5).contains(&len), "utterance length ratio {len}");
+    // Pre-roll, the word, then the pause and the detector's hangover
+    // (about 1.8 s of room); the features trim the quiet edges anyway.
+    assert!((0.8..3.5).contains(&len), "utterance length ratio {len}");
     assert_eq!(trained().detect(&got[0]), Some(Command::Stop));
 }

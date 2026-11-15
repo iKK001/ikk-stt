@@ -461,7 +461,9 @@ async fn say(mic: &Mic, samples: &[f32]) {
     let tx = mic.lock().unwrap().clone().expect("microphone open");
     let mut padded = vec![0.0005f32; 16_000];
     padded.extend_from_slice(samples);
-    padded.extend(std::iter::repeat_n(0.0005f32, 16_000));
+    // Two seconds of room after the word (the command segmenter waits
+    // 0.8 s of pause plus the detector's hangover).
+    padded.extend(std::iter::repeat_n(0.0005f32, 32_000));
     for chunk in padded.chunks(1600) {
         let _ = tx
             .send(AudioFrame {

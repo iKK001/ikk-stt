@@ -91,6 +91,193 @@ pub enum Intent {
     Spelled(String),
     // --- punctuation said as a word on its own
     Punctuation(String),
+    /// "Zitat": the opening quotation mark of the dictation language.
+    QuoteOpen,
+    /// "Zitat Ende": its closing mark.
+    QuoteClose,
+    /// "Wiederherstellen": redo.
+    Redo,
+    /// "Groß <Wort>": the next dictated word starts with a capital.
+    CapitalizeNext,
+}
+
+/// Commands that may also stand at the start or the end of a dictated
+/// final ("… Zitat", "Groß Hallo"): typography, no cursor moves, so a
+/// word that happens to match cannot wreck the text.
+pub fn inline_ok(intent: &Intent) -> bool {
+    matches!(
+        intent,
+        Intent::Punctuation(_)
+            | Intent::QuoteOpen
+            | Intent::QuoteClose
+            | Intent::NewLine
+            | Intent::NewParagraph
+            | Intent::CapitalizeNext
+    )
+}
+
+/// A dictated piece with its spoken signs turned into signs: "Hallo Welt
+/// Punkt wie geht es dir Fragezeichen" → "Hallo Welt. Wie geht es dir?".
+/// Commands may stand anywhere, without a pause; `quotes` are the
+/// dictation language's marks for Zitat / Zitat Ende. `None` when the piece
+/// holds no such command.
+pub struct Inline {
+    pub text: String,
+    /// The piece ended with "Groß": the next piece starts with a capital.
+    pub capitalize_next: bool,
+}
+
+pub fn apply_inline(text: &str, locale: &str, quotes: (&str, &str)) -> Option<Inline> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 2 {
+        return None;
+    }
+    let mut out = String::new();
+    let mut found = false;
+    let mut capitalize = false;
+    let mut i = 0;
+    while i < words.len() {
+        let mut matched = None;
+        for k in (1..=3).rev() {
+            if i + k > words.len() {
+                continue;
+            }
+            let phrase = words[i..i + k].join(" ");
+            if let Some(intent) = match_command(&phrase, locale).filter(inline_ok) {
+                matched = Some((k, intent));
+                break;
+            }
+        }
+        match matched {
+            Some((k, intent)) => {
+                found = true;
+                i += k;
+                match intent {
+                    Intent::Punctuation(p) => {
+                        push_sign(&mut out, &p);
+                        if matches!(p.as_str(), "." | "!" | "?" | "…") {
+                            capitalize = true;
+                        }
+                    }
+                    Intent::QuoteOpen => push_sign(&mut out, quotes.0),
+                    Intent::QuoteClose => push_sign(&mut out, quotes.1),
+                    Intent::NewLine => {
+                        out.push('\n');
+                        capitalize = true;
+                    }
+                    Intent::NewParagraph => {
+                        out.push_str("\n\n");
+                        capitalize = true;
+                    }
+                    Intent::CapitalizeNext => capitalize = true,
+                    _ => {}
+                }
+            }
+            None => {
+                let mut w = words[i].to_string();
+                if capitalize {
+                    let mut chars = w.chars();
+                    if let Some(first) = chars.next() {
+                        w = first.to_uppercase().collect::<String>() + chars.as_str();
+                    }
+                    capitalize = false;
+                }
+                push_word(&mut out, &w);
+                i += 1;
+            }
+        }
+    }
+    found.then_some(Inline {
+        text: out,
+        capitalize_next: capitalize,
+    })
+}
+
+/// Signs that attach to the word before them.
+const AFTER_PREV: &str = ".,;:!?)]}»”’“…%°";
+/// Signs that attach to the word after them.
+const BEFORE_NEXT: &str = "([{„«‹‘#";
+/// Signs glued to both sides.
+const TIGHT: &str = "-/@";
+
+fn push_word(out: &mut String, w: &str) {
+    let tail = out.chars().next_back();
+    let glue = match tail {
+        None => true,
+        Some(c) => c == '\n' || c == '\u{202F}' || BEFORE_NEXT.contains(c) || TIGHT.contains(c),
+    };
+    if !glue {
+        out.push(' ');
+    }
+    out.push_str(w);
+}
+
+fn push_sign(out: &mut String, sign: &str) {
+    let first = sign.chars().next().unwrap_or(' ');
+    let tail = out.chars().next_back();
+    let after_prev = AFTER_PREV.contains(first) || sign.starts_with('\u{202F}') || TIGHT.contains(first);
+    if sign == " " {
+        out.push(' ');
+        return;
+    }
+    if after_prev {
+        while out.ends_with(' ') {
+            out.pop();
+        }
+    } else if tail.is_some_and(|c| c != '\n' && c != ' ' && !BEFORE_NEXT.contains(c) && !TIGHT.contains(c)) {
+        out.push(' ');
+    }
+    out.push_str(sign);
+}
+
+/// A command phrase (up to three words) at the end of `text`: the text
+/// before it and the command. The recogniser's punctuation on the phrase
+/// does not matter.
+pub fn split_trailing(text: &str, locale: &str) -> Option<(String, Intent)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for k in (1..=3).rev() {
+        if words.len() <= k {
+            continue;
+        }
+        let phrase = words[words.len() - k..].join(" ");
+        if let Some(intent) = match_command(&phrase, locale).filter(inline_ok) {
+            return Some((words[..words.len() - k].join(" "), intent));
+        }
+    }
+    None
+}
+
+/// Like [`split_trailing`], but for any command, not only the inline ones:
+/// used when the engine already knows a command was spoken (the stop
+/// phrase that the recogniser wrote down as well).
+pub fn split_trailing_any(text: &str, locale: &str) -> Option<(String, Intent)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for k in (1..=4).rev() {
+        if words.len() <= k {
+            continue;
+        }
+        let phrase = words[words.len() - k..].join(" ");
+        if let Some(intent) = match_command(&phrase, locale) {
+            return Some((words[..words.len() - k].join(" "), intent));
+        }
+    }
+    None
+}
+
+/// A command phrase (up to three words) at the start of `text`: the
+/// command and the text after it.
+pub fn split_leading(text: &str, locale: &str) -> Option<(Intent, String)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for k in (1..=3).rev() {
+        if words.len() <= k {
+            continue;
+        }
+        let phrase = words[..k].join(" ");
+        if let Some(intent) = match_command(&phrase, locale).filter(inline_ok) {
+            return Some((intent, words[k..].join(" ")));
+        }
+    }
+    None
 }
 
 /// Letters, digits and marks the recogniser must spell: lower case, with ß
@@ -170,6 +357,34 @@ const PUNCTUATION: &[(&str, &str)] = &[
     ("prozentzeichen", "%"),
     ("schrägstrich", "/"),
     ("zwinkerndes gesicht", ";-)"),
+    ("smiley", ":-)"),
+    ("lachendes gesicht", ":-)"),
+    ("trauriges gesicht", ":-("),
+    ("leerzeichen", " "),
+    ("sternchen", "*"),
+    ("gleichheitszeichen", "="),
+    ("gleich zeichen", "="),
+    ("auslassungspunkte", "…"),
+    ("drei punkte", "…"),
+    ("eurozeichen", "€"),
+    ("euro zeichen", "€"),
+    ("dollarzeichen", "$"),
+    ("dollar zeichen", "$"),
+    ("gradzeichen", "°"),
+    ("et zeichen", "&"),
+    ("kaufmännisches und", "&"),
+    ("raute", "#"),
+    ("hashtag", "#"),
+    ("rückwärtsschrägstrich", "\\"),
+    ("senkrechter strich", "|"),
+    ("tilde", "~"),
+    ("eckige klammer auf", "["),
+    ("eckige klammer zu", "]"),
+    ("geschweifte klammer auf", "{"),
+    ("geschweifte klammer zu", "}"),
+    ("kleiner als", "<"),
+    ("grösser als", ">"),
+    ("größer als", ">"),
 ];
 
 /// Lower case, punctuation gone, ß kept, one space between words.
@@ -230,6 +445,16 @@ pub fn match_command(text: &str, locale: &str) -> Option<Intent> {
             "new line" => Some(Intent::NewLine),
             "new paragraph" => Some(Intent::NewParagraph),
             "stop dictation" => Some(Intent::StopDictation),
+            "quote" | "open quote" | "begin quote" => Some(Intent::QuoteOpen),
+            "end quote" | "unquote" | "close quote" => Some(Intent::QuoteClose),
+            "period" | "full stop" => Some(Intent::Punctuation(".".into())),
+            "comma" => Some(Intent::Punctuation(",".into())),
+            "question mark" => Some(Intent::Punctuation("?".into())),
+            "exclamation mark" => Some(Intent::Punctuation("!".into())),
+            "colon" => Some(Intent::Punctuation(":".into())),
+            "semicolon" => Some(Intent::Punctuation(";".into())),
+            "redo" => Some(Intent::Redo),
+            "capital" | "capitalize" => Some(Intent::CapitalizeNext),
             _ => None,
         };
     }
@@ -250,6 +475,30 @@ fn german(t: &str) -> Option<Intent> {
         }
         "neue zeile" => Some(NewLine),
         "neuer absatz" => Some(NewParagraph),
+        "zitat"
+        | "zitat anfang"
+        | "zitatanfang"
+        | "zitat beginn"
+        | "anführungszeichen auf"
+        | "anführungszeichen öffnen"
+        | "anführungsstriche unten"
+        | "gänsefüsschen auf"
+        | "gänsefüßchen auf" => Some(QuoteOpen),
+        "zitat ende"
+        | "zitatende"
+        | "ende zitat"
+        | "zitat schluss"
+        | "anführungszeichen zu"
+        | "anführungszeichen schliessen"
+        | "anführungszeichen schließen"
+        | "gänsefüsschen zu"
+        | "gänsefüßchen zu" => Some(QuoteClose),
+        "wiederherstellen" | "wiederholen" | "wieder herstellen" => Some(Redo),
+        "gross" | "groß" | "grossbuchstaben" | "großbuchstaben" | "grossbuchstabe" | "großbuchstabe" => {
+            Some(CapitalizeNext)
+        }
+        "nächstes wort" | "ein wort vor" | "wort vor" => Some(Words(1)),
+        "vorheriges wort" | "ein wort zurück" | "wort zurück" => Some(Words(-1)),
         "drücke eingabetaste" | "eingabetaste" => Some(PressEnter),
         "drücke tab" | "tabulator" => Some(PressTab),
         "streich das" | "lösch das" | "lösche das" => Some(DeleteThat),
@@ -411,6 +660,57 @@ mod tests {
 
     fn de(s: &str) -> Option<Intent> {
         match_command(s, "de-CH")
+    }
+
+    #[test]
+    fn signs_spoken_inside_a_sentence() {
+        let q = ("„", "“");
+        let r = apply_inline("Hallo Welt Punkt wie geht es dir Fragezeichen", "de-CH", q).unwrap();
+        assert_eq!(r.text, "Hallo Welt. Wie geht es dir?");
+        // After the question mark the next piece starts with a capital.
+        assert!(r.capitalize_next);
+        let r = apply_inline("er sagte Zitat kommt gut Zitat Ende und ging", "de-CH", q).unwrap();
+        assert_eq!(r.text, "er sagte „kommt gut“ und ging");
+        let r = apply_inline("erste Zeile Neue Zeile zweite Komma dritte Groß", "de-CH", q).unwrap();
+        assert_eq!(r.text, "erste Zeile\nZweite, dritte");
+        assert!(r.capitalize_next);
+        let r = apply_inline("Klammer auf so Klammer zu Bindestrich fertig", "de-CH", q).unwrap();
+        assert_eq!(r.text, "(so)-fertig");
+        assert!(apply_inline("ganz normale Wörter hier", "de-CH", q).is_none());
+        // Cursor commands are never signs.
+        assert!(apply_inline("gehe zum Zeilenende bitte", "de-CH", q).is_none());
+    }
+
+    #[test]
+    fn commands_at_the_edges_of_a_final() {
+        assert_eq!(
+            split_trailing("Hallo Welt Zitat", "de-CH"),
+            Some(("Hallo Welt".to_string(), Intent::QuoteOpen))
+        );
+        assert_eq!(
+            split_trailing("so geht das Zitat Ende.", "de-CH"),
+            Some(("so geht das".to_string(), Intent::QuoteClose))
+        );
+        assert_eq!(
+            split_trailing("das ist gut Punkt", "de-CH"),
+            Some(("das ist gut".to_string(), Intent::Punctuation(".".into())))
+        );
+        assert_eq!(
+            split_leading("Groß hallo welt", "de-CH"),
+            Some((Intent::CapitalizeNext, "hallo welt".to_string()))
+        );
+        // Cursor moves never come out of running text.
+        assert_eq!(split_trailing("gehe zum Zeilenende", "de-CH"), None);
+        assert_eq!(split_trailing("Zitat", "de-CH"), None);
+    }
+
+    #[test]
+    fn quotes_open_and_close() {
+        assert_eq!(de("Zitat"), Some(Intent::QuoteOpen));
+        assert_eq!(de("Zitat Ende."), Some(Intent::QuoteClose));
+        assert_eq!(de("Zitatende"), Some(Intent::QuoteClose));
+        assert_eq!(match_command("end quote", "en"), Some(Intent::QuoteClose));
+        assert_eq!(match_command("quote", "en"), Some(Intent::QuoteOpen));
     }
 
     #[test]

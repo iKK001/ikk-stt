@@ -21,6 +21,58 @@ pub struct Settings {
     /// The app itself (language of its own words).
     #[serde(default)]
     pub app: AppSettings,
+    /// Named voice profiles (see [`ProfileSettings`]). The top-level
+    /// `providers`, `sound` and `text` sections are always the active
+    /// profile's live copy, so the engine and the CLI read them unchanged.
+    #[serde(default)]
+    pub profiles: ProfileSettings,
+}
+
+/// User profiles: each one bundles everything that depends on the voice and
+/// the service (provider, language, correction, impaired-voice means, audio
+/// filters, trained words). `microphone` and `app` stay general. The shell
+/// copies the active profile into the top-level sections when it is
+/// chosen and the top-level sections back into it when they change; the
+/// engine never looks at this section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileSettings {
+    /// Id of the active profile; "default" is the built-in one that cannot
+    /// be deleted (the clear-speech setup).
+    #[serde(default = "default_profile_id")]
+    pub active: String,
+    #[serde(default)]
+    pub list: Vec<Profile>,
+}
+
+fn default_profile_id() -> String {
+    "default".into()
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            active: default_profile_id(),
+            list: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: String,
+    /// Icon name of the shell's icon set (e.g. "person", "mic").
+    #[serde(default)]
+    pub icon: String,
+    /// Index into the shell's colour set.
+    #[serde(default)]
+    pub color: u32,
+    pub providers: ProviderSettings,
+    pub sound: SoundSettings,
+    #[serde(default)]
+    pub text: TextSettings,
 }
 
 /// Settings of the shell, kept here so that they round-trip through the
@@ -43,9 +95,41 @@ pub struct TextSettings {
     /// Off: the corrected text is only shown in the app as a suggestion.
     #[serde(default)]
     pub correction_rewrites: bool,
+    /// Who corrects: "languagetool" (grammar and spelling rules) or a text
+    /// model, "openai" / "anthropic" (recognition errors from context as
+    /// well). Also the corrector of the on-demand correction button.
+    #[serde(default = "default_corrector")]
+    pub corrector: String,
+    /// Model name for a text-model corrector; empty = the vendor default.
+    #[serde(default)]
+    pub ai_model: String,
+    /// What the correction button corrects: "cursor_to_end", "whole_text"
+    /// or "click_to_click" (from one click position to the next).
+    #[serde(default = "default_correction_range")]
+    pub correction_range: String,
+    /// Word stems whose feminine plural gets the gender colon: "Autor" →
+    /// "Autor:innen" (also from "Autor innen", "AutorInnen", "Autor*innen").
+    #[serde(default = "default_gender_colon_words")]
+    pub gender_colon_words: Vec<String>,
+    /// German: the gender colon for every feminine plural of a person the
+    /// word list knows ("Lehrerinnen" → "Lehrer:innen"), on the device.
+    #[serde(default = "default_true")]
+    pub gender_colon_auto: bool,
     /// Training mode: words entered once and said a few times.
     #[serde(default)]
     pub training: TrainingSettings,
+}
+
+fn default_corrector() -> String {
+    "languagetool".into()
+}
+
+fn default_correction_range() -> String {
+    "cursor_to_end".into()
+}
+
+fn default_gender_colon_words() -> Vec<String> {
+    ["Autor", "Lektor", "Leser"].map(String::from).to_vec()
 }
 
 /// Learned words and whether they are used. Stored with the settings, on
@@ -388,6 +472,7 @@ impl Default for Settings {
             microphone: MicrophoneSettings::default(),
             text: TextSettings::default(),
             app: AppSettings::default(),
+            profiles: ProfileSettings::default(),
         }
     }
 }

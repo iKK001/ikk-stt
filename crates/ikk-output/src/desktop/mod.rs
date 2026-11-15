@@ -18,6 +18,49 @@ use crate::{AccessLevel, Chord, InsertStyle, OutputError, TargetStatus, TextSink
 
 pub use crate::Key;
 
+/// Platform primitives for actions outside a dictation session (the
+/// correction button): press a chord, paste text, read and set the
+/// clipboard. No focus guard: the user pressed a button for exactly this.
+pub fn press_chord(chord: Chord, n: usize) -> Result<(), OutputError> {
+    platform::press_chord(chord, n)
+}
+
+/// Paste `text` over the selection (clipboard, restored afterwards).
+pub fn paste_text(text: &str) -> Result<(), OutputError> {
+    platform::paste_clipboard(text)
+}
+
+/// One left click at a screen point (`shift`: extend a selection).
+pub fn click_at(x: f64, y: f64, shift: bool) -> Result<(), OutputError> {
+    platform::click_at(x, y, shift)
+}
+
+/// Press the left button at one point, move, release at another (tests).
+pub fn drag(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), OutputError> {
+    platform::drag(x1, y1, x2, y2)
+}
+
+/// Select the text between two screen points the user clicked: a click at
+/// the first, a Shift-click at the second — how every text editor extends a
+/// selection. Coordinates as the platform's click capture reports them.
+pub fn select_between(from: (f64, f64), to: (f64, f64)) -> Result<(), OutputError> {
+    platform::click_at(from.0, from.1, false)?;
+    std::thread::sleep(Duration::from_millis(160));
+    platform::click_at(to.0, to.1, true)?;
+    std::thread::sleep(Duration::from_millis(120));
+    Ok(())
+}
+
+pub fn clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+pub fn set_clipboard_text(text: &str) -> Result<(), OutputError> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| OutputError::Failed(format!("clipboard: {e}")))?;
+    cb.set_text(text.to_string())
+        .map_err(|e| OutputError::Failed(format!("clipboard set: {e}")))
+}
+
 const RETRIES: u32 = 3;
 const RETRY_BACKOFF: Duration = Duration::from_millis(60);
 

@@ -1,8 +1,8 @@
 //! Offline voice commands that switch dictation on and off, for people who
 //! cannot press a button.
 //!
-//! Speaker-dependent: the user records their own start word and stop word
-//! (three takes each). Heard utterances are compared with those recordings
+//! Speaker-dependent: the user records their own start command and stop
+//! command — a word or a short phrase each (three takes each). Heard utterances are compared with those recordings
 //! (MFCC features, dynamic time warping). Matching a person's own
 //! pronunciation works for impaired speech where generic recognizers fail.
 //! Everything runs on the device; no audio leaves it.
@@ -25,11 +25,13 @@ pub const SAMPLE_RATE_HZ: u32 = 16_000;
 pub enum WakeError {
     #[error("need at least {0} recordings")]
     TooFewTakes(usize),
-    #[error("recording {0} is too short or silent; speak the word clearly")]
+    #[error("recording {0} is too short or silent; speak the command clearly")]
     TakeTooShort(usize),
-    #[error("the recordings of this word differ too much; record them again more alike")]
+    #[error("the recordings of this command differ too much; record them again more alike")]
     TakesInconsistent,
-    #[error("start and stop word sound too alike; choose more different words")]
+    #[error(
+        "the start and the stop command sound too alike to be told apart; choose two that differ in more than one word"
+    )]
     WordsTooSimilar,
     #[error("stored voice commands are unreadable: {0}")]
     Storage(String),

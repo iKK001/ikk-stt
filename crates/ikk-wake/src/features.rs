@@ -136,9 +136,23 @@ pub fn trim_quiet_edges(samples: &[f32]) -> &[f32] {
     if peak <= 0.0 {
         return &samples[..0];
     }
-    let floor = peak * 1e-3; // -30 dB
-    let first = energy.iter().position(|&e| e > floor).unwrap_or(0);
-    let last = energy.iter().rposition(|&e| e > floor).unwrap_or(0);
+    // Two cuts: 30 dB under the loudest frame, and 8 dB over the room —
+    // the quietest fifth of the frames. The utterance arrives with the
+    // pause that ended it (0.8 s, room for the gaps in a phrase) and the
+    // detector's hangover; next to a ventilator that tail is louder than
+    // -30 dB and used to stay in, and it moved every comparison up.
+    let mut sorted = energy.clone();
+    sorted.sort_by(f32::total_cmp);
+    let room = sorted[sorted.len() / 5];
+    let loud = peak * 1e-3;
+    let above_room = room * 6.3;
+    let threshold = if above_room < peak * 0.1 {
+        loud.max(above_room)
+    } else {
+        loud
+    };
+    let first = energy.iter().position(|&e| e > threshold).unwrap_or(0);
+    let last = energy.iter().rposition(|&e| e > threshold).unwrap_or(0);
     let start = first * HOP;
     let end = ((last + 1) * HOP).min(samples.len());
     &samples[start..end]

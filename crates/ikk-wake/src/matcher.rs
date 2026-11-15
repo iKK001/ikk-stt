@@ -11,6 +11,10 @@ const MIN_FRAMES: usize = 25;
 /// Accept up to this factor above the worst distance between the user's
 /// own takes.
 const THRESHOLD_FACTOR: f32 = 1.35;
+/// Takes of this length (10 ms frames: one second) or more are a phrase
+/// and accept up to PHRASE_FACTOR above their own spread.
+const PHRASE_FRAMES: usize = 100;
+const PHRASE_FACTOR: f32 = 1.7;
 /// The winning word must be this much closer than the other one.
 const AMBIGUITY_MARGIN: f32 = 0.85;
 /// Very similar takes would give a limit so tight that the word, said a
@@ -51,14 +55,23 @@ impl VoiceCommands {
     /// Train both words from their takes (16 kHz mono each).
     pub fn train(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>]) -> Result<Self, WakeError> {
         let ex = Extractor::new();
-        let start = CommandModel::train(&ex, start_takes)?;
-        let stop = CommandModel::train(&ex, stop_takes)?;
+        let (start, start_worst) = CommandModel::train_measured(&ex, start_takes)?;
+        let (stop, stop_worst) = CommandModel::train_measured(&ex, stop_takes)?;
         let cross = start
             .templates
             .iter()
             .flat_map(|a| stop.templates.iter().map(move |b| dtw(a, b)))
             .fold(f32::INFINITY, f32::min);
-        if cross <= start.threshold.max(stop.threshold) {
+        // Told apart the way the spotter decides: a take of one command
+        // must be closer to its own command (at worst `worst`) than to the
+        // other one by the ambiguity margin. The acceptance thresholds do
+        // not enter here — their floor (MIN_THRESHOLD) is about missing a
+        // word said a little differently, and compared against it two
+        // short, consistently spoken commands looked "too alike" although
+        // the spotter would never confuse them. Phrases sharing a word
+        // ("Diktat starten" / "Diktat stoppen") still fail this when the
+        // differing word is too small a part of the phrase.
+        if cross * AMBIGUITY_MARGIN <= start_worst.max(stop_worst) {
             return Err(WakeError::WordsTooSimilar);
         }
         Ok(Self { start, stop })
@@ -81,6 +94,11 @@ impl VoiceCommands {
 
 impl CommandModel {
     fn train(ex: &Extractor, takes: &[Vec<f32>]) -> Result<Self, WakeError> {
+        Self::train_measured(ex, takes).map(|(m, _)| m)
+    }
+
+    /// The model and the worst distance between the takes.
+    fn train_measured(ex: &Extractor, takes: &[Vec<f32>]) -> Result<(Self, f32), WakeError> {
         if takes.len() < MIN_TAKES {
             return Err(WakeError::TooFewTakes(MIN_TAKES));
         }
@@ -105,16 +123,29 @@ impl CommandModel {
             return Err(WakeError::TakesInconsistent);
         }
         let mean_frames = templates.iter().map(|t| t.len() as f32).sum::<f32>() / templates.len() as f32;
-        Ok(Self {
-            templates,
-            threshold: (worst * THRESHOLD_FACTOR).max(MIN_THRESHOLD),
-            mean_frames,
-        })
+        Ok((
+            Self {
+                templates,
+                threshold: (worst * THRESHOLD_FACTOR).max(MIN_THRESHOLD),
+                mean_frames,
+            },
+            worst,
+        ))
     }
 
     /// The acceptance limit, also for words trained before MIN_THRESHOLD.
+    /// A phrase (a second of speech or more) gets more room than a single
+    /// word: its takes are more alike than a day's repetitions of it, and
+    /// other speech lands far away from a long pattern anyway (one
+    /// speaker's phrase: hits 21–29, misses 35–44, noise and other speech
+    /// 78 and more).
     pub fn limit(&self) -> f32 {
-        self.threshold.max(MIN_THRESHOLD)
+        let threshold = if self.mean_frames >= PHRASE_FRAMES as f32 {
+            self.threshold * PHRASE_FACTOR / THRESHOLD_FACTOR
+        } else {
+            self.threshold
+        };
+        threshold.max(MIN_THRESHOLD)
     }
 
     /// Smallest distance to any take, or None if the length rules it out.

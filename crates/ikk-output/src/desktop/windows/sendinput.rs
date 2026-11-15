@@ -20,6 +20,7 @@ extern "system" {
     fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
     fn SetFocus(h_wnd: *mut c_void) -> *mut c_void;
     fn SendInput(c_inputs: u32, p_inputs: *const InputRecord, cb_size: i32) -> u32;
+    fn SetCursorPos(x: i32, y: i32) -> i32;
     fn SendMessageTimeoutW(
         h_wnd: *mut c_void,
         msg: u32,
@@ -61,7 +62,7 @@ struct MouseInput {
 #[repr(C)]
 union InputUnion {
     ki: KeybdInput,
-    _mi: MouseInput,
+    mi: MouseInput,
 }
 
 /// Win32 `INPUT`. The union is pointer-aligned, so on 64-bit Windows the
@@ -78,7 +79,10 @@ const _: () = assert!(std::mem::size_of::<InputRecord>() == 40);
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(std::mem::size_of::<InputRecord>() == 28);
 
+const INPUT_MOUSE: u32 = 0;
 const INPUT_KEYBOARD: u32 = 1;
+const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
 const KEYEVENTF_KEYUP: u32 = 0x0002;
 const KEYEVENTF_UNICODE: u32 = 0x0004;
 const DESKTOP_SWITCHDESKTOP: u32 = 0x0100;
@@ -182,6 +186,58 @@ pub fn press_vk_with(mods: &[u16], vk: u16, n: usize) -> Result<(), OutputError>
         records.push(record(*m, 0, KEYEVENTF_KEYUP));
     }
     send(&records)
+}
+
+fn mouse(flags: u32) -> InputRecord {
+    InputRecord {
+        r#type: INPUT_MOUSE,
+        u: InputUnion {
+            mi: MouseInput {
+                dx: 0,
+                dy: 0,
+                mouse_data: 0,
+                dw_flags: flags,
+                time: 0,
+                dw_extra_info: 0,
+            },
+        },
+    }
+}
+
+/// A left click at screen pixel (`x`, `y`); with `shift` held it extends a
+/// text selection.
+pub fn click_at(x: i32, y: i32, shift: bool) -> Result<(), OutputError> {
+    if unsafe { SetCursorPos(x, y) } == 0 {
+        return Err(OutputError::Failed("SetCursorPos failed".into()));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    if shift {
+        send(&[
+            record(VK_SHIFT, 0, 0),
+            mouse(MOUSEEVENTF_LEFTDOWN),
+            mouse(MOUSEEVENTF_LEFTUP),
+            record(VK_SHIFT, 0, KEYEVENTF_KEYUP),
+        ])
+    } else {
+        send(&[mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)])
+    }
+}
+
+/// Press at one point, move in steps, release at another.
+pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), OutputError> {
+    if unsafe { SetCursorPos(x1, y1) } == 0 {
+        return Err(OutputError::Failed("SetCursorPos failed".into()));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    send(&[mouse(MOUSEEVENTF_LEFTDOWN)])?;
+    for i in 1..=8 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let x = x1 + (x2 - x1) * i / 8;
+        let y = y1 + (y2 - y1) * i / 8;
+        let _ = unsafe { SetCursorPos(x, y) };
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    send(&[mouse(MOUSEEVENTF_LEFTUP)])
 }
 
 pub fn ctrl_v() -> Result<(), OutputError> {

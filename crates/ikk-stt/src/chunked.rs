@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ikk_audio::vad::{VadEvent, VadMode, VoiceActivityDetector};
 use ikk_audio::AudioFrame;
@@ -272,6 +272,19 @@ impl ChunkedBatchSession {
             self.send_window(true).await;
             return;
         }
+        // A short thought — a lone "Punkt", "Neue Zeile", one word — ends
+        // soon after the speech: it got no window before, and nothing is
+        // gained by waiting out the long pause.
+        let spoken = self.thought_len.saturating_sub(self.thought_quiet);
+        if spoken >= MIN_CHUNK
+            && spoken < MIN_RELEASE_WINDOW
+            && self.thought_quiet >= SHORT_THOUGHT_PAUSE
+            && self.thought_speech.is_some_and(|p| p >= SURE_SPEECH_PROB)
+        {
+            info!(ms = spoken.as_millis() as u64, "short thought ends early");
+            self.send_window(true).await;
+            return;
+        }
         if self.thought_quiet >= self.pause {
             // The speaker stopped (by the noise model, not the level: a
             // ventilator keeps the level up for ever): the thought ends
@@ -487,8 +500,15 @@ const ENDING_OFFSET: Duration = Duration::from_millis(600);
 /// This many identical readings in a row (one per step) end the thought:
 /// the speaker has stopped, whatever the level and the noise model say.
 const STALE_READINGS: usize = 4;
-/// A short thought that is all the pause left needs speech this sure.
-const SURE_SPEECH_PROB: f32 = 0.8;
+/// A short thought needs speech this sure to be sent at all: a breath or
+/// the ventilator alone reads as invented words. A spoken "Punkt" or "Neue
+/// Zeile" next to a ventilator scores 0.65–0.8, so the bar sits below that;
+/// noise stays under 0.5.
+const SURE_SPEECH_PROB: f32 = 0.65;
+/// A short thought (less speech than MIN_RELEASE_WINDOW) ends after this
+/// much quiet instead of the full pause: a lone command or word would
+/// otherwise wait out the pause (4 s) and, said softly, be dropped.
+const SHORT_THOUGHT_PAUSE: Duration = Duration::from_millis(1200);
 
 impl Agreed {
     fn new(windows: usize) -> Self {
@@ -1058,6 +1078,8 @@ async fn run_ordered(
     // Agreement mode: which sequence numbers are windows (and last ones),
     // the recent results of the thought, how many words are out already.
     let mut windows: BTreeMap<u64, (bool, bool, Duration, Duration)> = BTreeMap::new();
+    // When each upload went out, for the latency line in the log.
+    let mut sent_at: BTreeMap<u64, Instant> = BTreeMap::new();
     let mut agreed = Agreed::new(cfg.agreement.map_or(1, |a| a.windows));
     let mut timed = TimedAgreed::new(cfg.agreement.map_or(1, |a| a.windows), cfg.learned.clone());
     // What the current thought sounded like so far, for the hints.
@@ -1126,6 +1148,7 @@ async fn run_ordered(
                 }
             }
             uploaded += clip.frames.iter().map(|f| f.duration()).sum::<Duration>();
+            sent_at.insert(seq, Instant::now());
             tokio::spawn(transcribe_chunk(
                 provider.clone(),
                 cfg_req,
@@ -1150,6 +1173,11 @@ async fn run_ordered(
             },
             Some((seq, outcome, throttled)) = done_rx.recv(), if in_flight > 0 => {
                 in_flight -= 1;
+                if let Some(t) = sent_at.remove(&seq) {
+                    // The provider's answer time: the first thing to look at
+                    // when words come late.
+                    info!(seq, after_ms = t.elapsed().as_millis() as u64, "provider answered");
+                }
                 if throttled {
                     // The provider pushed back: halve the parallelism.
                     limit = (limit / 2).max(1);

@@ -103,6 +103,29 @@ impl FfiEngine {
     pub fn transfer_to_target(&self) -> Result<(), String> {
         self.send(EngineCommand::TransferToTarget)
     }
+    /// The correction button: correct the range chosen in the settings
+    /// with the corrector chosen there.
+    pub fn correct_now(&self, settings_json: &str) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        self.send(EngineCommand::CorrectRange(ikk_engine::config::correct_request(
+            &settings,
+        )))
+    }
+    /// The correction range named in the settings ("cursor_to_end",
+    /// "whole_text", "click_to_click"), for shells that arm a click capture.
+    pub fn correction_range(settings_json: &str) -> Result<String, String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        Ok(settings.text.correction_range.trim().to_string())
+    }
+    /// Click to click: the two screen points the user clicked become a
+    /// selection (click, Shift-click), then the selection is corrected.
+    pub fn correct_between(&self, settings_json: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        ikk_output::desktop::select_between(from, to).map_err(|e| e.to_string())?;
+        let mut req = ikk_engine::config::correct_request(&settings);
+        req.range = ikk_engine::CorrectionRange::Selection;
+        self.send(EngineCommand::CorrectRange(req))
+    }
     pub fn clear_session_text(&self) -> Result<(), String> {
         self.send(EngineCommand::ClearSessionText)
     }

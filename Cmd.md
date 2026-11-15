@@ -21,6 +21,17 @@ there, only the commands marked *text* work; the others are reported as
 words of the offline voice commands; "Geh schlafen" and "Wach auf" are
 whatever you trained them as.
 
+**Inside a sentence.** The signs (all the punctuation words, Zitat / Zitat
+Ende, Neue Zeile, Neuer Absatz, Groß) work anywhere in the flow of
+dictation, without a pause before or after them: "Hallo Welt Punkt wie
+geht es dir Fragezeichen" becomes "Hallo Welt. Wie geht es dir?", "er sagte
+Zitat kommt gut Zitat Ende" becomes "er sagte „kommt gut“". Spacing follows
+the sign (none before . , ; : ! ? and closing marks, none after opening
+marks, none around Bindestrich and Schrägstrich), and the word after a
+sentence end, a new line or "Groß" starts with a capital. Commands that
+move the cursor or delete must still stand alone, so a word that happens
+to match cannot harm the text.
+
 Where a command needs the dictated text ("Streich das", "Markier Lösung"),
 the engine uses what it typed itself in this session. After a move it
 cannot follow (a line up, a page down, undo, paste), it no longer knows
@@ -83,6 +94,12 @@ the end ("Gehe zum Dokumentende") or a new session starts.
 | **Satzzeichen** (said on their own) | | |
 | Punkt · Komma · Ausrufezeichen · Fragezeichen · Doppelpunkt · Semikolon / Strichpunkt | . , ! ? : ; | all, *text* |
 | Apostroph · Klammer auf / zu · Anführungszeichen (unten / oben) · Gedankenstrich · Bindestrich · Unterstrich | ' ( ) „ “ – - _ | all, *text* |
+| Groß ‹Wort› · Großbuchstaben ‹Wort› | the next dictated word starts with a capital | all, *text* |
+| Wiederherstellen | redo (Cmd+Shift+Z / Ctrl+Y) | desktop |
+| Nächstes Wort · Vorheriges Wort | one word right / left | desktop |
+| Leerzeichen · Sternchen · Gleichheitszeichen · Auslassungspunkte · Eurozeichen · Dollarzeichen · Gradzeichen · Et-Zeichen · Raute · Smiley · Zwinkerndes Gesicht · eckige / geschweifte Klammer auf / zu · kleiner als · grösser als · senkrechter Strich · Tilde · Rückwärtsschrägstrich | ␠ * = … € $ ° & # :-) ;-) [ ] { } < > \| ~ \\ | all, *text* |
+| Anführungszeichen auf / zu · Gänsefüsschen auf / zu | same as Zitat / Zitat Ende | all, *text* |
+| Zitat · Zitat Ende | the opening and the closing quotation mark of the dictation language: „ “ German, « » Swiss German, Italian, Spanish, Portuguese, « » with narrow spaces French, „ ” Croatian and Serbian, “ ” otherwise; the word after "Zitat" joins without a space | all, *text* |
 | At / Klammeraffe · Pluszeichen · Und-Zeichen · Paragraphenzeichen · Nummernzeichen · Prozentzeichen · Schrägstrich · Zwinkerndes Gesicht | @ + & § # % / ;-) | all, *text* |
 
 ## From the guide, not implemented

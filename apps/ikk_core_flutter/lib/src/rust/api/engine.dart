@@ -11,6 +11,10 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 abstract class IkkEngine implements RustOpaqueInterface {
   void clearSessionText();
 
+  /// The correction button from the app: correct the chosen range in the
+  /// focused app with the chosen corrector.
+  void correctNow({required String settingsJson});
+
   static IkkEngine create() =>
       RustLib.instance.api.crateApiEngineIkkEngineCreate();
 
@@ -20,6 +24,10 @@ abstract class IkkEngine implements RustOpaqueInterface {
 
   /// Engine events as JSON; may be called again (e.g. after hot restart).
   Stream<String> events();
+
+  /// Where the floating buttons are (top-left corner, screen points), or
+  /// empty when they do not exist on this platform.
+  Float64List floatingPosition();
 
   void grantConsent({required String provider});
 
@@ -32,6 +40,13 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// service works after a reboot without opening the app.
   void setCredential({required String provider, required String secret});
 
+  /// Move the floating buttons there.
+  void setFloatingPosition({required double x, required double y});
+
+  /// Shrinking buttons: small and darker while the mouse is elsewhere,
+  /// a little larger than plain under it. Off: always the plain size.
+  void setFloatingShrink({required bool on_});
+
   /// Offline voice commands on (model JSON from `voice_train`) or off
   /// (`None`). `settings_json`: what a voice start dictates with.
   void setVoiceCommands({String? commandsJson, required String settingsJson});
@@ -40,8 +55,9 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// no dictation, no listening meanwhile, on every platform.
   void setVoiceTraining({required bool active});
 
-  /// Floating microphone button over all apps (desktop): a click toggles
-  /// dictation with the remembered settings; red while listening.
+  /// Floating buttons over all apps (desktop): the microphone toggles
+  /// dictation with the remembered settings (red while listening); the
+  /// correction button corrects the text at the cursor.
   void showFloatingButton({required bool show_});
 
   /// The app's dictate button: a click, so the voice listener is on again.

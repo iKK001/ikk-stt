@@ -96,18 +96,34 @@ impl IkkEngine {
         zeroize::Zeroize::zeroize(&mut secret);
         r
     }
-    /// Floating microphone button over all apps (desktop): a click toggles
-    /// dictation with the remembered settings; red while listening.
+    /// Floating buttons over all apps (desktop): the microphone toggles
+    /// dictation with the remembered settings (red while listening); the
+    /// correction button corrects the text at the cursor.
     #[frb(sync)]
     pub fn show_floating_button(&self, show: bool) {
         if show {
-            ikk_overlay::show(std::sync::Arc::new(|| {
-                if let Some(s) = crate::shared::get() {
-                    if let Err(e) = s.click_toggle() {
-                        log::warn!("floating button: {e}");
+            ikk_overlay::show(
+                std::sync::Arc::new(|| {
+                    if let Some(s) = crate::shared::get() {
+                        if let Err(e) = s.click_toggle() {
+                            log::warn!("floating button: {e}");
+                        }
                     }
-                }
-            }));
+                }),
+                Some(std::sync::Arc::new(|| {
+                    if let Some(s) = crate::shared::get() {
+                        if let Err(e) = s.correct_now() {
+                            log::warn!("correction button: {e}");
+                        }
+                    }
+                })),
+                Some(std::sync::Arc::new(|x, y| {
+                    // The shell remembers where the buttons were left.
+                    if let Some(s) = crate::shared::get() {
+                        let _ = s.events.send(format!("{{\"FloatingMoved\":{{\"x\":{x},\"y\":{y}}}}}"));
+                    }
+                })),
+            );
             ikk_overlay::set_listening(self.inner.listening.load(std::sync::atomic::Ordering::SeqCst));
             ikk_overlay::set_standby(self.inner.standby.load(std::sync::atomic::Ordering::SeqCst));
         } else {
@@ -135,6 +151,30 @@ impl IkkEngine {
     #[frb(sync)]
     pub fn transfer_to_target(&self) -> Result<(), String> {
         self.inner.engine.transfer_to_target()
+    }
+    /// Where the floating buttons are (top-left corner, screen points), or
+    /// empty when they do not exist on this platform.
+    #[frb(sync)]
+    pub fn floating_position(&self) -> Vec<f64> {
+        ikk_overlay::position().map(|(x, y)| vec![x, y]).unwrap_or_default()
+    }
+    /// Move the floating buttons there.
+    #[frb(sync)]
+    pub fn set_floating_position(&self, x: f64, y: f64) {
+        ikk_overlay::set_position(x, y);
+    }
+    /// Shrinking buttons: small and darker while the mouse is elsewhere,
+    /// a little larger than plain under it. Off: always the plain size.
+    #[frb(sync)]
+    pub fn set_floating_shrink(&self, on: bool) {
+        ikk_overlay::set_shrink(on);
+    }
+    /// The correction button from the app: correct the chosen range in the
+    /// focused app with the chosen corrector.
+    #[frb(sync)]
+    pub fn correct_now(&self, settings_json: String) -> Result<(), String> {
+        self.inner.remember_settings(&settings_json);
+        self.inner.engine.correct_now(&settings_json)
     }
     #[frb(sync)]
     pub fn clear_session_text(&self) -> Result<(), String> {

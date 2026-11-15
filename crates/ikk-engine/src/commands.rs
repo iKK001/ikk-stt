@@ -32,6 +32,8 @@ pub(crate) struct Dictation {
     pub spell_mode: bool,
     /// "Schreib das": only the next final is spelled.
     pub spell_next: bool,
+    /// "Groß": the next dictated word starts with a capital letter.
+    pub capitalize_next: bool,
 }
 
 /// Where spoken words stand in the typed text: `(chars_after, len)` —
@@ -112,6 +114,13 @@ impl Engine {
         }
         if self.dictation.caps {
             return Some(processed.to_uppercase());
+        }
+        if self.dictation.capitalize_next {
+            self.dictation.capitalize_next = false;
+            let mut chars = processed.chars();
+            if let Some(first) = chars.next() {
+                return Some(first.to_uppercase().collect::<String>() + chars.as_str());
+            }
         }
         Some(processed.to_string())
     }
@@ -212,10 +221,12 @@ impl Engine {
             NewLine => {
                 let _ = self.emit_text("\n").await;
                 self.dictation.pieces.push("\n".into());
+                self.dictation.capitalize_next = true;
             }
             NewParagraph => {
                 let _ = self.emit_text("\n\n").await;
                 self.dictation.pieces.push("\n\n".into());
+                self.dictation.capitalize_next = true;
             }
             PressEnter => {
                 self.press(Chord::key(Key::Return), 1);
@@ -266,6 +277,24 @@ impl Engine {
                 self.press(Chord::shortcut('z'), 1);
                 self.unknown_caret();
             }
+            Redo => {
+                // Cmd+Shift+Z on macOS, Ctrl+Y elsewhere.
+                let chord = if mac {
+                    Chord::Char(
+                        'z',
+                        Modifiers {
+                            shift: true,
+                            command: true,
+                            word: false,
+                        },
+                    )
+                } else {
+                    Chord::shortcut('y')
+                };
+                self.press(chord, 1);
+                self.unknown_caret();
+            }
+            CapitalizeNext => self.dictation.capitalize_next = true,
             Cut => {
                 self.press(Chord::shortcut('x'), 1);
                 self.unknown_caret();
@@ -531,10 +560,44 @@ impl Engine {
                 self.dictation.pieces.push(text);
             }
             Punctuation(p) => {
+                // A sentence end as a command of its own: the next piece
+                // starts with a capital, as after a spoken "Punkt" inside
+                // a piece.
+                if matches!(p.as_str(), "." | "!" | "?" | "…") {
+                    self.dictation.capitalize_next = true;
+                }
                 let _ = self.emit_text(&p).await;
                 self.dictation.pieces.push(p);
             }
+            QuoteOpen => {
+                let (open, _) = quotation_marks(&self.language);
+                let text = if self.session_text.is_empty() || self.session_text.ends_with(char::is_whitespace) {
+                    open.to_string()
+                } else {
+                    format!(" {open}")
+                };
+                let _ = self.emit_text(&text).await;
+                self.dictation.pieces.push(text);
+            }
+            QuoteClose => {
+                let (_, close) = quotation_marks(&self.language);
+                let _ = self.emit_text(close).await;
+                self.dictation.pieces.push(close.to_string());
+            }
         }
+    }
+}
+
+/// The quotation marks of a dictation language (ISO-639-3): German „…“,
+/// Swiss German, French, Italian, Spanish and Portuguese «…» (French with
+/// its narrow spaces inside), Croatian and Serbian „…”, otherwise “…”.
+pub(crate) fn quotation_marks(language: &str) -> (&'static str, &'static str) {
+    match language.trim() {
+        "deu" => ("„", "“"),
+        "gsw" | "ita" | "spa" | "por" => ("«", "»"),
+        "fra" => ("«\u{202F}", "\u{202F}»"),
+        "hrv" | "srp" => ("„", "”"),
+        _ => ("“", "”"),
     }
 }
 

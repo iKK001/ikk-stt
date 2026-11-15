@@ -46,9 +46,10 @@ pub fn recipient_for(provider_id: &str, display_name: &str) -> Recipient {
         ),
         "openai" => (
             "https://openai.com/policies/privacy-policy/",
-            vec![Use::Transcription, Use::Suggestions, Use::Translation],
+            vec![Use::Transcription, Use::Suggestions, Use::Translation, Use::Correction],
         ),
         "languagetool" => ("https://languagetool.org/legal/privacy", vec![Use::Correction]),
+        "anthropic" => ("https://www.anthropic.com/privacy", vec![Use::Correction]),
         _ => ("", vec![Use::Transcription]),
     };
     Recipient {
@@ -165,7 +166,7 @@ mod tests {
         c.save(&path).unwrap();
         let back = ConsentState::load(&path).unwrap();
         assert_eq!(back.decision("openai"), Decision::Allowed);
-        assert_eq!(back.records["openai"].recipient.uses.len(), 3);
+        assert_eq!(back.records["openai"].recipient.uses.len(), 4);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

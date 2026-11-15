@@ -1219,6 +1219,7 @@ dependencies = [
 name = "ikk-overlay"
 version = "0.0.1"
 dependencies = [
+ "objc2-foundation",
  "tracing",
  "windows",
 ]

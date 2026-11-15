@@ -123,6 +123,47 @@ pub struct StartConfig {
     pub correction_rewrites: bool,
 }
 
+/// The correction button's provider call gets this long; dictated words
+/// wait meanwhile, so it is short.
+const RANGE_CORRECTION_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// What the correction button corrects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CorrectionRange {
+    /// From the caret to the end of the text.
+    CursorToEnd,
+    WholeText,
+    /// From one click position to the next. The shell captures the two
+    /// clicks and makes the selection (see `ikk_overlay::capture_clicks`),
+    /// then asks for [`CorrectionRange::Selection`].
+    ClickToClick,
+    /// The text is selected already: copy it as it is.
+    Selection,
+}
+
+impl CorrectionRange {
+    /// From the settings value (`text.correction_range`).
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "whole_text" => CorrectionRange::WholeText,
+            "click_to_click" => CorrectionRange::ClickToClick,
+            _ => CorrectionRange::CursorToEnd,
+        }
+    }
+}
+
+/// An on-demand correction (the correction button next to the microphone).
+#[derive(Debug, Clone)]
+pub struct CorrectRequest {
+    pub range: CorrectionRange,
+    /// Corrector id ("languagetool", "openai", "anthropic").
+    pub corrector: String,
+    /// Model override for text-model correctors; empty = default.
+    pub model: String,
+    /// Settings language (ISO-639-3), empty = auto.
+    pub language: String,
+}
+
 /// Live correction of a session: one request in flight at a time, the
 /// answer applied to the newest segments it covered.
 struct Correction {
@@ -182,6 +223,14 @@ pub enum EngineCommand {
     },
     /// The minimum gap between correction requests has passed.
     CorrectionTick(u64),
+    /// The correction button: correct the chosen range in the focused app.
+    CorrectRange(CorrectRequest),
+    /// The corrector answered for a range correction.
+    ApplyRangeCorrection {
+        original: String,
+        prior_clipboard: Option<String>,
+        result: Result<Option<String>, String>,
+    },
     Shutdown,
 }
 
@@ -209,6 +258,12 @@ pub enum EngineEvent {
     /// Live correction without rewriting: how the checker would write the
     /// text so far. Shown by the shell, never typed.
     Suggestion(String),
+    /// The correction button finished: the range was replaced (`changed`)
+    /// or needed no change; `chars` of text were looked at.
+    Corrected {
+        changed: bool,
+        chars: usize,
+    },
     /// A voice command was understood but not carried out (why).
     CommandRefused(String),
     /// The phrase a voice command was recognised from, for the shell's
@@ -350,6 +405,14 @@ pub struct Engine {
     self_tx: mpsc::Sender<EngineCommand>,
     correction: Option<Correction>,
     correction_generation: u64,
+    /// A correction-button request waiting for the user's consent.
+    pending_correction: Option<CorrectRequest>,
+    /// A correction is working in the target: finals arriving meanwhile
+    /// are held here and typed afterwards, and nothing else touches the
+    /// field (no flow ticks, no refinements, no live correction).
+    hold: Option<String>,
+    /// The range of the correction in progress.
+    correcting: Option<CorrectionRange>,
     /// What the voice commands know about the dictation.
     dictation: commands::Dictation,
     /// The segment the last final went into.
@@ -360,6 +423,12 @@ pub struct Engine {
     typed_log: Vec<(Instant, usize)>,
     /// Stopping by voice: text still in flight belongs to the stop word.
     discard_pending: bool,
+    /// The session is draining after a spoken stop: a late final that is
+    /// the stop phrase is dropped, everything else is typed.
+    voice_stopped: bool,
+    /// The session's dictation language (ISO-639-3): quotation marks,
+    /// and other typography the commands need.
+    language: String,
 }
 
 impl Engine {
@@ -399,11 +468,16 @@ impl Engine {
             self_tx,
             correction: None,
             correction_generation: 0,
+            pending_correction: None,
+            hold: None,
+            correcting: None,
             dictation: commands::Dictation::default(),
             last_segment: None,
             voice: None,
             typed_log: Vec::new(),
             discard_pending: false,
+            voice_stopped: false,
+            language: String::new(),
         };
         let task = tokio::spawn(engine.run(cmd_rx));
         EngineHandle {
@@ -457,7 +531,7 @@ impl Engine {
                 },
                 // A fixed deadline: the audio frames that wake this loop
                 // every few milliseconds must not restart the pause.
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.live.due())), if self.live.flow_has_pending() => {
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.live.due())), if self.live.flow_has_pending() && self.hold.is_none() => {
                     self.flow_tick().await;
                 }
             }
@@ -486,6 +560,16 @@ impl Engine {
                     .await;
                 if self.state == EngineState::AwaitingConsent {
                     self.set_state(EngineState::Idle).await;
+                }
+                // The correction button asked for this consent: go on.
+                if let Some(req) = self.pending_correction.take() {
+                    let same = self
+                        .registry
+                        .corrector_named(&req.corrector)
+                        .is_some_and(|c| c.id() == id);
+                    if same {
+                        self.correct_range(req).await;
+                    }
                 }
                 Ok(())
             }
@@ -543,6 +627,18 @@ impl Engine {
                     standby_peak: f32::NEG_INFINITY,
                     standby_level_at: Instant::now(),
                 });
+                Ok(())
+            }
+            EngineCommand::CorrectRange(req) => {
+                self.correct_range(req).await;
+                Ok(())
+            }
+            EngineCommand::ApplyRangeCorrection {
+                original,
+                prior_clipboard,
+                result,
+            } => {
+                self.apply_range_correction(original, prior_clipboard, result).await;
                 Ok(())
             }
             EngineCommand::ApplyCorrection {
@@ -631,6 +727,7 @@ impl Engine {
         c.in_flight = true;
         c.dirty = false;
         c.last_request = Some(Instant::now());
+        corrector.set_gender_colon(self.text_cfg.gender_colon_auto || !self.text_cfg.gender_colon.is_empty());
         let (generation, language, tx) = (c.generation, c.language.clone(), self.self_tx.clone());
         tokio::spawn(async move {
             let (result, throttled) = match corrector.correct(&text, &language, Some(&credential)).await {
@@ -661,6 +758,9 @@ impl Engine {
         result: Result<Option<String>, String>,
         throttled: bool,
     ) {
+        if self.hold.is_some() {
+            return; // a correction button job owns the field
+        }
         let Some(c) = self.correction.as_mut() else { return };
         if c.generation != generation {
             return;
@@ -796,28 +896,19 @@ impl Engine {
         }
     }
 
-    /// The stop word was heard during dictation: take back what was typed
-    /// for it, drop what is still in flight, stop.
-    async fn stop_by_voice(&mut self, utterance_secs: f32) {
+    /// The stop word was heard during dictation: the microphone closes,
+    /// but everything said before it is still finished — the readings in
+    /// flight, the last thought, the corrections — and typed. Nothing
+    /// already written is taken back. Only a final that is the stop phrase
+    /// itself (or ends with it) is left out while the session drains.
+    async fn stop_by_voice(&mut self, _utterance_secs: f32) {
         let _ = self
             .events
             .send(EngineEvent::VoiceCommand(ikk_wake::Command::Stop))
             .await;
-        // The utterance plus the pause that ended it, plus provider latency.
-        let since = Instant::now()
-            .checked_sub(Duration::from_secs_f32(utterance_secs + 0.9))
-            .unwrap_or_else(Instant::now);
-        let typed: usize = self.typed_log.iter().filter(|(t, _)| *t >= since).map(|(_, n)| n).sum();
-        if typed > 0 && self.output_mode == OutputMode::Inject {
-            if let Err(e) = self.sink.backspace(typed) {
-                warn!(%e, "could not take back the stop word");
-            }
-        }
-        let keep = self.session_text.chars().count().saturating_sub(typed);
-        self.session_text = self.session_text.chars().take(keep).collect();
-        self.discard_pending = true;
+        self.voice_stopped = true;
         self.stop().await;
-        self.discard_pending = false;
+        self.voice_stopped = false;
     }
 
     async fn start(&mut self, mut cfg: StartConfig) -> Result<(), EngineError> {
@@ -925,6 +1016,7 @@ impl Engine {
         if standby_closed {
             let _ = self.events.send(EngineEvent::VoiceStandby(false)).await;
         }
+        self.language = cfg.session.language.clone();
         info!(
             provider = %cfg.session.provider.0,
             transfer = ?cfg.session.transfer,
@@ -1067,22 +1159,50 @@ impl Engine {
                         }
                     }
                 }
-                let Some(shaped) = self.shape_final(&processed) else {
-                    return;
-                };
-                let with_space = if self.session_text.is_empty() || self.dictation.selection > 0 {
-                    shaped
-                } else {
-                    format!(" {shaped}")
-                };
-                let _ = self.emit_text(&with_space).await;
-                self.note_piece(&with_space);
-                let _ = self
-                    .events
-                    .send(EngineEvent::Transcript(TranscriptEvent::Final(
-                        with_space.trim().to_string(),
-                    )))
-                    .await;
+                // Spoken signs anywhere in the piece ("Hallo Welt Punkt wie
+                // geht es dir Fragezeichen", "… Zitat …", "Groß hallo"):
+                // rendered into the text, no pause needed around them.
+                let mut text = processed;
+                let mut capitalize_next = false;
+                if !self.command_locale.is_empty() {
+                    let quotes = commands::quotation_marks(&self.language);
+                    if let Some(inline) = ikk_commands::apply_inline(&text, &self.command_locale, quotes) {
+                        let _ = self.events.send(EngineEvent::CommandHeard(text.clone())).await;
+                        text = inline.text;
+                        capitalize_next = inline.capitalize_next;
+                    }
+                }
+                if !text.is_empty() {
+                    let Some(shaped) = self.shape_final(&text) else {
+                        return;
+                    };
+                    // A piece that starts with a sign ("Punkt") joins the text
+                    // before it without a space.
+                    let tight = shaped
+                        .chars()
+                        .next()
+                        .is_some_and(|c| ".,;:!?)]}»”’…%°\n".contains(c) || c == '\u{202F}');
+                    let with_space = if self.session_text.is_empty()
+                        || self.dictation.selection > 0
+                        || self.after_opening_quote()
+                        || tight
+                    {
+                        shaped
+                    } else {
+                        format!(" {shaped}")
+                    };
+                    let _ = self.emit_text(&with_space).await;
+                    self.note_piece(&with_space);
+                    let _ = self
+                        .events
+                        .send(EngineEvent::Transcript(TranscriptEvent::Final(
+                            with_space.trim().to_string(),
+                        )))
+                        .await;
+                }
+                if capitalize_next {
+                    self.dictation.capitalize_next = true;
+                }
                 self.schedule_correction().await;
             }
             TranscriptEvent::Error(class) => {
@@ -1123,6 +1243,9 @@ impl Engine {
     /// finals with it (in place, common prefix kept).
     async fn apply_refined(&mut self, segments: usize, text: String) {
         tracing::debug!(segments, text = %text, "refined");
+        if self.hold.is_some() {
+            return; // a correction owns the field; the quick text stands
+        }
         let processed = ikk_text::process(&self.text_cfg, &text);
         if processed.is_empty() {
             return;
@@ -1185,6 +1308,9 @@ impl Engine {
 
     /// Full-text replacement (batch pass). Fallback mode just swaps the text.
     async fn replace_all(&mut self, text: &str) {
+        if self.hold.is_some() {
+            return; // a correction owns the field
+        }
         self.session_text = text.to_string();
         if self.output_mode != OutputMode::Inject {
             return;
@@ -1232,11 +1358,35 @@ impl Engine {
             for ev in late {
                 match ev {
                     TranscriptEvent::Final(t) => {
-                        let t = ikk_text::process(&self.text_cfg, &t);
+                        let mut t = ikk_text::process(&self.text_cfg, &t);
                         if t.is_empty() || self.discard_pending {
                             continue;
                         }
-                        let with_space = if self.session_text.is_empty() {
+                        if !self.command_locale.is_empty() {
+                            // The spoken stop phrase came through the recogniser
+                            // too: not typed. Words before it are.
+                            if self.voice_stopped {
+                                if ikk_commands::match_command(&t, &self.command_locale)
+                                    == Some(ikk_commands::Intent::StopDictation)
+                                {
+                                    continue;
+                                }
+                                if let Some((before, ikk_commands::Intent::StopDictation)) =
+                                    ikk_commands::split_trailing_any(&t, &self.command_locale)
+                                {
+                                    t = before;
+                                    if t.is_empty() {
+                                        continue;
+                                    }
+                                }
+                            }
+                            // Spoken signs inside the piece, as during the session.
+                            let quotes = commands::quotation_marks(&self.language);
+                            if let Some(inline) = ikk_commands::apply_inline(&t, &self.command_locale, quotes) {
+                                t = inline.text;
+                            }
+                        }
+                        let with_space = if self.session_text.is_empty() || self.after_opening_quote() {
                             t
                         } else {
                             format!(" {t}")
@@ -1267,6 +1417,177 @@ impl Engine {
         // goes straight from dictating to waiting.
         self.maintain_standby().await;
         self.set_state(EngineState::Idle).await;
+    }
+
+    /// The correction button: select the range in the focused app, copy
+    /// it, send it to the corrector, then paste the answer over the
+    /// selection. Desktop only; the mobile hosts do it themselves.
+    async fn correct_range(&mut self, req: CorrectRequest) {
+        if self.hold.is_some() {
+            self.say_error("correction: one is running already").await;
+            return;
+        }
+        if matches!(self.state, EngineState::AwaitingConsent | EngineState::Error) {
+            self.say_error("correction: not while the engine waits for consent or shows an error")
+                .await;
+            return;
+        }
+        let Some(corrector) = self.registry.corrector_named(&req.corrector) else {
+            self.say_error("correction: no corrector available").await;
+            return;
+        };
+        if self.consent.decision(corrector.id()) != Decision::Allowed {
+            let r = recipient_for(corrector.id(), corrector.display_name());
+            self.pending_correction = Some(req);
+            let _ = self.events.send(EngineEvent::ConsentRequired(r)).await;
+            return;
+        }
+        let Some(credential) = self
+            .credentials
+            .get(&ProviderId(corrector.id().to_string()))
+            .map(|s| s.expose().to_string())
+        else {
+            self.say_error(&format!("correction: no key for {}", corrector.display_name()))
+                .await;
+            return;
+        };
+        if req.range == CorrectionRange::ClickToClick {
+            // The shell turns the two clicks into a selection first; a
+            // request that still says click-to-click came without a shell.
+            self.say_error("correction: click to click needs the app's floating button")
+                .await;
+            return;
+        }
+        let range = req.range;
+        // While dictating: the typed text stays as it is until the
+        // correction is through; words that arrive meanwhile wait.
+        self.hold = Some(String::new());
+        self.correcting = Some(range);
+        let selected = tokio::task::spawn_blocking(move || select_and_copy(range))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        let (original, prior_clipboard) = match selected {
+            Ok(v) => v,
+            Err(e) => {
+                self.say_error(&format!("correction: {e}")).await;
+                self.end_hold(false).await;
+                return;
+            }
+        };
+        info!(
+            chars = original.chars().count(),
+            corrector = corrector.id(),
+            dictating = self.state != EngineState::Idle,
+            "correcting a range; the field is held meanwhile"
+        );
+        corrector.set_model(&req.model);
+        corrector.set_gender_colon(self.text_cfg.gender_colon_auto || !self.text_cfg.gender_colon.is_empty());
+        let (language, tx) = (req.language.clone(), self.self_tx.clone());
+        tokio::spawn(async move {
+            let started = Instant::now();
+            // Bounded: while it runs, dictated words wait (see `hold`).
+            let result = match tokio::time::timeout(
+                RANGE_CORRECTION_TIMEOUT,
+                corrector.correct(&original, &language, Some(&credential)),
+            )
+            .await
+            {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err(format!(
+                    "the corrector did not answer within {} s",
+                    RANGE_CORRECTION_TIMEOUT.as_secs()
+                )),
+            };
+            info!(
+                ms = started.elapsed().as_millis() as u64,
+                ok = result.is_ok(),
+                "corrector answered"
+            );
+            let _ = tx
+                .send(EngineCommand::ApplyRangeCorrection {
+                    original,
+                    prior_clipboard,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    async fn apply_range_correction(
+        &mut self,
+        original: String,
+        prior: Option<String>,
+        result: Result<Option<String>, String>,
+    ) {
+        let outcome = match result {
+            Ok(Some(text)) => {
+                let chars = text.chars().count();
+                tokio::task::spawn_blocking(move || paste_over_selection(&text, prior))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+                    .map(|_| (true, chars))
+            }
+            Ok(None) => {
+                let chars = original.chars().count();
+                let _ = tokio::task::spawn_blocking(move || leave_selection(prior)).await;
+                Ok((false, chars))
+            }
+            Err(e) => {
+                let _ = tokio::task::spawn_blocking(move || leave_selection(prior)).await;
+                Err(e)
+            }
+        };
+        let changed = matches!(outcome, Ok((true, _)));
+        match outcome {
+            Ok((changed, chars)) => {
+                let _ = self.events.send(EngineEvent::Corrected { changed, chars }).await;
+            }
+            Err(e) => self.say_error(&format!("correction: {e}")).await,
+        }
+        self.end_hold(changed).await;
+    }
+
+    /// The correction is through: the engine's picture of the field is
+    /// stale where text was replaced or the caret moved, so the typed
+    /// history is forgotten (new words append at the caret, nothing is
+    /// rewritten), the voice commands' caret is placed, and the words held
+    /// back meanwhile are typed.
+    async fn end_hold(&mut self, changed: bool) {
+        let range = self.correcting.take();
+        let moved = changed || matches!(range, Some(CorrectionRange::ClickToClick | CorrectionRange::Selection));
+        if moved {
+            self.live.reset();
+            self.last_segment = None;
+            if let Some(c) = self.correction.as_mut() {
+                c.checked.clear();
+            }
+        }
+        self.dictation.caret_from_end = match range {
+            Some(CorrectionRange::CursorToEnd | CorrectionRange::WholeText) => Some(0),
+            _ => None,
+        };
+        let held = self.hold.take().unwrap_or_default();
+        info!(
+            held_chars = held.chars().count(),
+            moved, "correction done; the field is free again"
+        );
+        if !held.trim().is_empty() {
+            let _ = self.emit_text(&held).await;
+        }
+    }
+
+    /// The text so far ends with an opening quotation mark (or a line
+    /// break): the next word joins without a space.
+    fn after_opening_quote(&self) -> bool {
+        self.session_text
+            .chars()
+            .next_back()
+            .is_some_and(|c| matches!(c, '„' | '“' | '«' | '‹' | '‘' | '\u{202F}' | '\n' | '(' | '['))
+    }
+
+    async fn say_error(&mut self, msg: &str) {
+        warn!("{msg}");
+        let _ = self.events.send(EngineEvent::Error(msg.to_string())).await;
     }
 
     async fn transfer(&mut self) -> Result<(), EngineError> {
@@ -1336,8 +1657,13 @@ impl Engine {
     /// live typer appends it (immediately or via the typing queue); a failure
     /// or a verification mismatch switches to fallback and keeps the text.
     async fn emit_text(&mut self, text: &str) -> Result<usize, OutputError> {
-        self.session_text.push_str(text);
         let n = text.chars().count();
+        if let Some(held) = self.hold.as_mut() {
+            // A correction is working in the field: typed afterwards.
+            held.push_str(text);
+            return Ok(n);
+        }
+        self.session_text.push_str(text);
         if self.output_mode == OutputMode::Fallback {
             return Ok(n);
         }
@@ -1418,3 +1744,86 @@ fn same_standby_capture(a: &StartConfig, b: &StartConfig) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+mod range_keys {
+    //! The correction button's keystrokes: select, copy, paste, and the
+    //! user's clipboard put back afterwards.
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    use ikk_output::desktop as d;
+    use ikk_output::{Chord, Key, Modifiers};
+
+    use super::CorrectionRange;
+
+    /// Something no app would have on the clipboard: tells a served copy
+    /// from a stale clipboard.
+    const MARKER: &str = "\u{200B}ikk-copy\u{200B}";
+
+    pub fn select_and_copy(range: CorrectionRange) -> Result<(String, Option<String>), String> {
+        let prior = d::clipboard_text();
+        let _ = d::set_clipboard_text(MARKER);
+        let select = match range {
+            CorrectionRange::Selection => None,
+            CorrectionRange::WholeText => Some(Chord::shortcut('a')),
+            _ => Some({
+                let m = Modifiers {
+                    shift: true,
+                    command: true,
+                    word: false,
+                };
+                // Cmd+Shift+Down (macOS) / Ctrl+Shift+End: to the end of the text.
+                if cfg!(target_os = "macos") {
+                    Chord::Key(Key::Down, m)
+                } else {
+                    Chord::Key(Key::End, m)
+                }
+            }),
+        };
+        if let Some(select) = select {
+            d::press_chord(select, 1).map_err(|e| e.to_string())?;
+            sleep(Duration::from_millis(80));
+        }
+        d::press_chord(Chord::shortcut('c'), 1).map_err(|e| e.to_string())?;
+        // The app in front needs a moment to serve the copy.
+        let mut text = String::new();
+        for _ in 0..12 {
+            sleep(Duration::from_millis(60));
+            if let Some(t) = d::clipboard_text() {
+                if t != MARKER {
+                    text = t;
+                    break;
+                }
+            }
+        }
+        if text.trim().is_empty() {
+            restore(prior);
+            return Err("nothing selected to correct".into());
+        }
+        Ok((text, prior))
+    }
+
+    pub fn paste_over_selection(text: &str, prior: Option<String>) -> Result<(), String> {
+        d::paste_text(text).map_err(|e| e.to_string())?;
+        // The paste helper puts the copied selection back after a moment;
+        // the user's own clipboard comes back after that.
+        std::thread::spawn(move || {
+            sleep(Duration::from_millis(3500));
+            restore(prior);
+        });
+        Ok(())
+    }
+
+    /// Nothing to change: collapse the selection to its end.
+    pub fn leave_selection(prior: Option<String>) -> Result<(), String> {
+        let _ = d::press_chord(Chord::key(Key::Right), 1);
+        restore(prior);
+        Ok(())
+    }
+
+    fn restore(prior: Option<String>) {
+        let _ = d::set_clipboard_text(prior.as_deref().unwrap_or(""));
+    }
+}
+
+use range_keys::{leave_selection, paste_over_selection, select_and_copy};

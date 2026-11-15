@@ -189,6 +189,43 @@ impl Shared {
 
     /// A click on a microphone button: off switches everything off, on
     /// switches the listener back on and starts dictating.
+    /// The floating correction button: with the remembered settings. For a
+    /// click-to-click range the button arms a capture of the next two clicks
+    /// (orange); pressing it again cancels; the two points become the
+    /// selection that is corrected.
+    pub fn correct_now(&self) -> Result<(), String> {
+        let json = self
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .ok_or_else(|| "no settings yet".to_string())?;
+        if ikk_overlay::cancel_capture() {
+            return Ok(());
+        }
+        if ikk_ffi::engine::FfiEngine::correction_range(&json)? == "click_to_click" {
+            let armed = ikk_overlay::capture_clicks(
+                2,
+                std::time::Duration::from_secs(20),
+                std::sync::Arc::new(move |points| {
+                    if points.len() < 2 {
+                        return;
+                    }
+                    if let Some(s) = get() {
+                        if let Err(e) = s.engine.correct_between(&json, points[0], points[1]) {
+                            log::warn!("click to click: {e}");
+                        }
+                    }
+                }),
+            );
+            if armed {
+                return Ok(());
+            }
+            return Err("click to click is not available on this platform".into());
+        }
+        self.engine.correct_now(&json)
+    }
+
     pub fn click_toggle(&self) -> Result<bool, String> {
         if self.listening.load(Ordering::SeqCst) {
             self.engine.stop()?;

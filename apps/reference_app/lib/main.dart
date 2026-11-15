@@ -1,7 +1,9 @@
-// ikk-stt reference app. Thin shell over the Rust engine: settings in three
-// areas (provider, sound, microphone), API key in the keychain, consent
-// dialog before audio leaves the device, dictation into the focused app with
-// the automatic fallback window. AGPL-3.0-or-later.
+// ikk-stt reference app. Thin shell over the Rust engine: user profiles
+// (provider, language, correction, voice rhythm, filters, trained words),
+// general settings (app language, microphone, floating button), the text of
+// earlier sessions, API keys in the keychain, consent dialog before audio
+// leaves the device, dictation into the focused app with the automatic
+// fallback window. AGPL-3.0-or-later.
 
 import 'dart:async';
 import 'dart:convert';
@@ -18,6 +20,9 @@ import 'theme.dart';
 import 'ui_strings.dart';
 import 'app_name.dart';
 import 'platform_extras.dart';
+import 'profiles.dart';
+import 'history.dart';
+import 'background.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -65,7 +70,12 @@ class _HomeScreenState extends State<HomeScreen> {
   // Plain file of earlier versions; moved into _voiceFile once.
   late String _voicePath;
   // The recorded voice commands, encrypted; the key is in the secure store.
-  late String _voiceFile;
+  // One file per profile ("trained with the profile's voice"); the Default
+  // profile keeps the file name of earlier versions.
+  late String _voiceDir;
+  String get _voiceFile => _profiles.activeIsDefault
+      ? '$_voiceDir${Platform.pathSeparator}voice_commands.bin'
+      : '$_voiceDir${Platform.pathSeparator}voice_commands_${_profiles.activeId}.bin';
   late String _uiPath;
   Map<String, dynamic> _settings = {};
   List<String> _providers = [];
@@ -117,6 +127,22 @@ class _HomeScreenState extends State<HomeScreen> {
   int _recordedMs = 0;
   String _suggestion = '';
 
+  // ------------------------------------------------ shell
+  Profiles get _profiles => Profiles(_settings);
+  late HistoryStore _history;
+  /// 0 profiles, 1 general, 2 history.
+  int _tab = 0;
+  static const _wizardSteps = 7;
+  /// Open wizard: step index, the profile it edits, whether it was just
+  /// created (cancel deletes it) and which profile was active before.
+  int? _wizardStep;
+  String? _wizardId;
+  bool _wizardNew = false;
+  String? _wizardPrevActive;
+  final _nameCtl = TextEditingController();
+  final _subCtl = TextEditingController();
+  bool get _mobile => Platform.isIOS || Platform.isAndroid;
+
   @override
   void initState() {
     super.initState();
@@ -132,9 +158,23 @@ class _HomeScreenState extends State<HomeScreen> {
     _consentPath = '$dir${Platform.pathSeparator}consent.json';
     _voicePath = '$dir${Platform.pathSeparator}voice_commands.json';
     // Windows: %LOCALAPPDATA%, so the recordings never roam to other PCs.
-    _voiceFile = '${localDataDir() ?? dir}${Platform.pathSeparator}voice_commands.bin';
+    _voiceDir = localDataDir() ?? dir;
     _uiPath = '$dir${Platform.pathSeparator}ui.json';
+    _history = HistoryStore(dir);
     _settings = jsonDecode(await settingsLoad(path: _settingsPath)) as Map<String, dynamic>;
+    // First start after the update: the profile list is built from the
+    // settings as they are (see Profiles.ensure).
+    final hadProfiles = _profiles.byId(kDefaultProfileId) != null;
+    _profiles.ensure(
+      defaultTitle: _t['defaultProfile'],
+      defaultSubtitle: _t['defaultProfileSub'],
+      impairedTitle: _t['impairedProfileTitle'],
+    );
+    if (!hadProfiles) {
+      try {
+        await settingsSave(path: _settingsPath, json: jsonEncode(_settings));
+      } catch (_) {}
+    }
     _providers = about().providers;
     try {
       _engine.loadConsent(consentJson: await consentLoad(path: _consentPath));
@@ -144,10 +184,14 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (_) {}
     await _loadKey();
     await _loadLtKey();
+    await _loadCorrectorKey('openai');
+    await _loadCorrectorKey('anthropic');
     _events = _engine.events().listen(_onEvent);
     _engine.rememberSettings(settingsJson: jsonEncode(_settings));
     await _loadVoice();
     await _loadFloating();
+    await _loadBackground();
+    await _applyButtonPosition();
     if (mounted) setState(() {});
   }
 
@@ -240,9 +284,11 @@ class _HomeScreenState extends State<HomeScreen> {
       _rememberKeyTail(k);
       _keyCtl.text = '';
     });
+    if (_correctorKeyCtls.containsKey(_provider)) await _loadCorrectorKey(_provider);
   }
 
   Future<void> _saveSettings() async {
+    _profiles.storeActive();
     final json = jsonEncode(_settings);
     try {
       await settingsSave(path: _settingsPath, json: json);
@@ -274,10 +320,12 @@ class _HomeScreenState extends State<HomeScreen> {
             _uploadedMs = 0;
             _recordedMs = 0;
           }
+          final wasRunning = _state != 'Idle';
           _state = v as String;
           if (_state == 'Idle') {
             _interim = '';
             _speech = false;
+            if (wasRunning && _finals.isNotEmpty) _history.add(_finals.join('\n'));
           }
         case 'Speech':
           _speech = v as bool;
@@ -329,10 +377,20 @@ class _HomeScreenState extends State<HomeScreen> {
           _error = v as String;
         case 'Suggestion':
           _suggestion = v as String;
+        case 'Corrected':
+          final c = v as Map<String, dynamic>;
+          _snack(_t[c['changed'] == true ? 'corrected' : 'nothingToCorrect']);
         case 'CommandRefused':
           _snack(_t.commandRefused(v as String));
         case 'CommandHeard':
           _snack(_t.commandDone(v as String));
+        case 'FloatingMoved':
+          // Dragged by hand: that is where they open next time, and no
+          // saved position is "the chosen one" any more.
+          final m = v as Map<String, dynamic>;
+          _ui['button_position'] = {'x': (m['x'] as num).toDouble(), 'y': (m['y'] as num).toDouble()};
+          _ui.remove('position_selected');
+          _saveUi();
         case 'Command':
           break;
         default:
@@ -370,7 +428,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (ok == true) {
       _engine.grantConsent(provider: r['id'] as String);
-      _start();
+      // A text checker's consent (live correction, correction button):
+      // the engine goes on by itself; only audio consent came from a start.
+      if (!textOnly) _start();
     } else {
       _engine.denyConsent(provider: r['id'] as String);
     }
@@ -379,38 +439,251 @@ class _HomeScreenState extends State<HomeScreen> {
   // ------------------------------------------------ floating button
 
   final bool _floatingSupported = floatingButtonSupported();
-  bool _floatingOn = true;
+  // Shell preferences outside the engine's settings file (ui.json).
+  Map<String, dynamic> _ui = {};
 
-  Future<void> _loadFloating() async {
-    if (!_floatingSupported) return;
+  Future<void> _loadUi() async {
+    if (_ui.isNotEmpty) return;
     try {
       final f = File(_uiPath);
-      if (await f.exists()) {
-        _floatingOn = (jsonDecode(await f.readAsString()) as Map<String, dynamic>)['floating_button'] as bool? ?? true;
-      }
+      if (await f.exists()) _ui = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
     } catch (_) {}
-    _engine.showFloatingButton(show_: _floatingOn);
   }
 
-  Future<void> _setFloating(bool on) async {
-    _floatingOn = on;
-    _engine.showFloatingButton(show_: on);
+  Future<void> _saveUi() async {
     try {
-      await File(_uiPath).writeAsString(jsonEncode({'floating_button': on}));
+      await File(_uiPath).writeAsString(jsonEncode(_ui));
     } catch (_) {}
-    setState(() {});
+  }
+
+  /// The buttons are always there on the platforms that have them: the
+  /// microphone and the correction button are the way to work without
+  /// the window. (An earlier switch could hide them; its stored value is
+  /// no longer read.)
+  Future<void> _loadFloating() async {
+    if (!_floatingSupported) return;
+    await _loadUi();
+    _engine.showFloatingButton(show_: true);
+    if (_shrinkSupported) _engine.setFloatingShrink(on_: _shrinkButtons);
+  }
+
+  /// Desktop buttons can shrink away from the mouse (ui.json
+  /// `button_shrink`, on unless switched off).
+  bool get _shrinkSupported => Platform.isMacOS || Platform.isWindows;
+  bool get _shrinkButtons => _ui['button_shrink'] as bool? ?? true;
+
+  // ------------------------------------------------ button positions
+
+  bool get _buttonsMovable => _floatingSupported || Platform.isAndroid;
+
+  List<Map<String, dynamic>> get _savedPositions =>
+      ((_ui['positions'] ??= <dynamic>[]) as List).cast<Map<String, dynamic>>();
+
+  /// Where the buttons are right now (screen points; Android: layout x, y).
+  Future<List<double>?> _currentButtonPosition() async {
+    if (Platform.isAndroid) return hostButtonPosition();
+    if (!_floatingSupported) return null;
+    final p = _engine.floatingPosition();
+    return p.length >= 2 ? [p[0], p[1]] : null;
+  }
+
+  Future<void> _moveButtons(double x, double y) async {
+    if (Platform.isAndroid) {
+      await setHostButtonPosition(x, y);
+    } else if (_floatingSupported) {
+      _engine.setFloatingPosition(x: x, y: y);
+    }
+  }
+
+  /// At start: the chosen saved position, else where they were left.
+  Future<void> _applyButtonPosition() async {
+    if (!_buttonsMovable) return;
+    await _loadUi();
+    final chosen = _ui['position_selected'] as String?;
+    Map<String, dynamic>? target;
+    if (chosen != null) {
+      target = _savedPositions.where((p) => p['name'] == chosen).firstOrNull;
+    }
+    target ??= _ui['button_position'] as Map<String, dynamic>?;
+    if (target == null) return;
+    final x = (target['x'] as num?)?.toDouble();
+    final y = (target['y'] as num?)?.toDouble();
+    if (x == null || y == null) return;
+    // The buttons are created a moment after the show call.
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await _moveButtons(x, y);
+  }
+
+  Future<void> _saveCurrentPosition() async {
+    final pos = await _currentButtonPosition();
+    if (pos == null) {
+      _snack(_t['positionUnknown']);
+      return;
+    }
+    final ctl = TextEditingController();
+    if (!mounted) return;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(_t['savePosition']),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          decoration: InputDecoration(labelText: _t['positionName']),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(_t['cancel'])),
+          FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim()), child: Text(_t['save'])),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    final list = _savedPositions;
+    list.removeWhere((p) => p['name'] == name);
+    list.add({'name': name, 'x': pos[0], 'y': pos[1]});
+    _ui['position_selected'] = name;
+    _ui['button_position'] = {'x': pos[0], 'y': pos[1]};
+    await _saveUi();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _choosePosition(Map<String, dynamic> p) async {
+    final x = (p['x'] as num).toDouble();
+    final y = (p['y'] as num).toDouble();
+    await _moveButtons(x, y);
+    _ui['position_selected'] = p['name'];
+    _ui['button_position'] = {'x': x, 'y': y};
+    await _saveUi();
+    _snack(_t.fmt('positionApplied', {'n': p['name']}));
+    if (mounted) setState(() {});
+  }
+
+  Widget _positionsSection() {
+    final chosen = _ui['position_selected'] as String?;
+    final list = _savedPositions;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_t['positionsTitle'], style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(_t['positionsBody']),
+            const SizedBox(height: 8),
+            if (list.isEmpty) Text(_t['noPositions'], style: Theme.of(context).textTheme.bodySmall),
+            for (final p in list)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(p['name'] == chosen ? Icons.radio_button_checked : Icons.radio_button_off),
+                title: Text(p['name'] as String),
+                subtitle: Text('${(p['x'] as num).round()} · ${(p['y'] as num).round()}'),
+                onTap: () => _choosePosition(p),
+                trailing: IconButton(
+                  tooltip: _t['remove'],
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () async {
+                    list.remove(p);
+                    if (chosen == p['name']) _ui.remove('position_selected');
+                    await _saveUi();
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ),
+            const SizedBox(height: 4),
+            FilledButton.tonalIcon(
+              onPressed: _saveCurrentPosition,
+              icon: const Icon(Icons.add_location_alt_outlined),
+              label: Text(_t['savePosition']),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------ background mode
+
+  bool _keepRunning = true;
+  /// Registered to start with the session; null while unknown.
+  bool? _loginItem;
+
+  Future<void> _loadBackground() async {
+    if (!BackgroundControl.supported) return;
+    await _loadUi();
+    _keepRunning = _ui['keep_running'] as bool? ?? true;
+    await BackgroundControl.setKeepRunning(_keepRunning);
+    _loginItem = await BackgroundControl.isLoginItem();
+  }
+
+  Widget _backgroundSection() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_t['backgroundTitle'], style: Theme.of(context).textTheme.titleMedium),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['keepRunning']),
+              subtitle: Text(_t['keepRunningBody']),
+              value: _keepRunning,
+              onChanged: (on) async {
+                _keepRunning = on;
+                _ui['keep_running'] = on;
+                await BackgroundControl.setKeepRunning(on);
+                await _saveUi();
+                if (mounted) setState(() {});
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['startAtLogin']),
+              subtitle: Text(_t['startAtLoginBody']),
+              value: _loginItem ?? false,
+              onChanged: _loginItem == null
+                  ? null
+                  : (on) async {
+                      final (state, error) = await BackgroundControl.setLoginItem(on);
+                      if (error != null) _snack(_t.fmt('loginItemFailed', {'e': error}));
+                      if (state != null) _loginItem = state;
+                      if (mounted) setState(() {});
+                    },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _floatingSection() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(_t['floatingTitle']),
-          subtitle: Text(_t['floatingBody']),
-          value: _floatingOn,
-          onChanged: _setFloating,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_t['floatingTitle'], style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(_t['floatingBody']),
+            const SizedBox(height: 4),
+            Text(_t['floatingNote'], style: Theme.of(context).textTheme.bodySmall),
+            if (_shrinkSupported)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(_t['shrinkButtons']),
+                subtitle: Text(_t['shrinkButtonsBody']),
+                value: _shrinkButtons,
+                onChanged: (on) async {
+                  _ui['button_shrink'] = on;
+                  _engine.setFloatingShrink(on_: on);
+                  await _saveUi();
+                  if (mounted) setState(() {});
+                },
+              ),
+          ],
         ),
       ),
     );
@@ -561,7 +834,9 @@ class _HomeScreenState extends State<HomeScreen> {
             retry ? _StepKind.retry : _StepKind.listening,
           );
           try {
-            final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 8);
+            // A slow speaker's two-word command needs time; the room is
+            // measured first as well.
+            final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 12);
             if (cancelled) break;
             takes[word]!.add(take);
             retry = false;
@@ -712,134 +987,627 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _events?.cancel();
     _keyCtl.dispose();
+    _nameCtl.dispose();
+    _subCtl.dispose();
+    for (final c in _correctorKeyCtls.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // The widgets without settings at hand (licences page, platform cards)
-    // read the language from here.
+    // The widgets without settings at hand (licences page, platform cards,
+    // history) read the language from here.
     UiStrings.current = _t;
-    final listening = _state == 'Listening' || _state == 'Finishing';
     if (_settings.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    final impairedMode = (_settings['sound'] as Map<String, dynamic>)['impaired_voice'] != false;
+    if (_wizardStep != null) return _wizardScaffold();
+    return _mobile ? _mobileShell() : _desktopShell();
+  }
+
+  bool get _listening => _state == 'Listening' || _state == 'Finishing';
+
+  /// Phones and tablets: three tabs at the bottom, the profile chips as a
+  /// row at the top of the Profiles tab. The in-app microphone button
+  /// stays where no floating button exists (iOS).
+  Widget _mobileShell() {
+    final titles = [_t['profiles'], _t['general'], _t['history']];
     return Scaffold(
       appBar: AppBar(
-        title: const Text(appName),
-        actions: [
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.language),
-            tooltip: _t.appLanguage,
-            initialValue: _appLanguage.isEmpty ? 'eng' : _appLanguage,
-            onSelected: (code) {
-              (_settings['app'] ??= <String, dynamic>{})['language'] = code == 'eng' ? '' : code;
-              _saveSettings();
-              setState(() {});
-            },
-            itemBuilder: (_) => [
-              for (final code in UiStrings.codes) PopupMenuItem(value: code, child: Text(UiStrings.of(code).name)),
-            ],
-          ),
-          IconButton(icon: const Icon(Icons.info_outline), onPressed: () => _showAbout(context)),
+        title: Text(titles[_tab]),
+        actions: [IconButton(icon: const Icon(Icons.info_outline), tooltip: _t['about'], onPressed: () => _showAbout(context))],
+      ),
+      body: switch (_tab) {
+        0 => _profilePage(showChips: true),
+        1 => _generalPage(),
+        _ => HistoryPane(key: ValueKey(_history), store: _history),
+      },
+      floatingActionButton: _floatingSupported ? null : _micFab(),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+        destinations: [
+          NavigationDestination(icon: const Icon(Icons.people_outline), selectedIcon: const Icon(Icons.people), label: _t['profiles']),
+          NavigationDestination(icon: const Icon(Icons.tune), label: _t['general']),
+          NavigationDestination(icon: const Icon(Icons.history), label: _t['history']),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+    );
+  }
+
+  /// Desktop: sidebar with the profiles, General and History on the left,
+  /// the chosen page on the right.
+  Widget _desktopShell() {
+    final scheme = Theme.of(context).colorScheme;
+    final profiles = _profiles.list;
+    final activeId = _profiles.activeId;
+    final title = switch (_tab) {
+      0 => _profiles.active['title'] as String? ?? '',
+      1 => _t['general'],
+      _ => _t['history'],
+    };
+    return Scaffold(
+      body: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _voiceModeSection(),
-          // The cards that exist only for the impaired setup, right under
-          // the switch, sliding in and out with it.
-          AnimatedSize(
-            duration: const Duration(milliseconds: 350),
-            curve: Curves.easeInOut,
-            alignment: Alignment.topCenter,
-            child: impairedMode
-                ? Column(children: [
-                    const SizedBox(height: 16),
-                    _impairedSoundSection(),
-                    const SizedBox(height: 16),
-                    _trainingSection(),
-                  ])
-                : const SizedBox.shrink(),
-          ),
-          const SizedBox(height: 16),
-          _providerSection(),
-          const SizedBox(height: 16),
-          _correctionSection(),
-          const SizedBox(height: 16),
-          _soundSection(),
-          const SizedBox(height: 16),
-          _micSection(),
-          const SizedBox(height: 16),
-          _voiceSection(),
-          if (_floatingSupported) ...[const SizedBox(height: 16), _floatingSection()],
-          if (otherAppsCard() case final card?) ...[const SizedBox(height: 16), card],
-          const SizedBox(height: 24),
-          Center(
-            child: FilledButton.icon(
-              style: FilledButton.styleFrom(minimumSize: const Size(220, 64)),
-              onPressed: listening ? _stop : _start,
-              icon: Icon(listening ? Icons.stop : Icons.mic),
-              label: Text(_t[listening ? 'stop' : 'dictate'], style: const TextStyle(fontSize: 20)),
+          SizedBox(
+            width: 272,
+            child: Material(
+              color: scheme.surfaceContainerLow,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+                    child: Text(appName, style: Theme.of(context).textTheme.titleLarge),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+                    child: Text(_t['profiles'].toUpperCase(),
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant, letterSpacing: 1)),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      children: [
+                        for (final p in profiles)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: ProfileChip(
+                              profile: p,
+                              selected: _tab == 0 && p['id'] == activeId,
+                              onTap: () => _activateProfile(p['id'] as String),
+                            ),
+                          ),
+                        AddProfileChip(label: _t['newProfile'], onTap: () => _startWizard()),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  ListTile(
+                    leading: const Icon(Icons.tune),
+                    title: Text(_t['general']),
+                    selected: _tab == 1,
+                    onTap: () => setState(() => _tab = 1),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.history),
+                    title: Text(_t['history']),
+                    selected: _tab == 2,
+                    onTap: () => setState(() => _tab = 2),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: Text(_t['about']),
+                    onTap: () => _showAbout(context),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 6),
-          // What the next session will actually use, so stale settings
-          // never go unnoticed.
-          Center(
-            child: Text(
-              _activeSummary(),
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall,
+          const VerticalDivider(width: 1),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                  child: Text(title, style: Theme.of(context).textTheme.headlineSmall),
+                ),
+                Expanded(
+                  child: switch (_tab) {
+                    0 => _profilePage(showChips: false),
+                    1 => _generalPage(),
+                    _ => HistoryPane(key: ValueKey(_history), store: _history, embedded: true),
+                  },
+                ),
+              ],
             ),
           ),
-          // What the session costs: agreement mode uploads every second of
-          // speech several times, so the ratio is what the provider bills.
-          if (_recordedMs > 0)
-            Center(
-              child: Text(
+        ],
+      ),
+      floatingActionButton: _floatingSupported ? null : _micFab(),
+    );
+  }
+
+  Widget _micFab() => FloatingActionButton.extended(
+        onPressed: _listening ? _stop : _start,
+        icon: Icon(_listening ? Icons.stop : Icons.mic),
+        label: Text(_t[_listening ? 'stop' : 'dictate']),
+      );
+
+  // ------------------------------------------------ profiles
+
+  Future<void> _activateProfile(String id) async {
+    if (id != _profiles.activeId) {
+      if (_listening) _stop();
+      _profiles.activate(id);
+      await _saveSettings();
+      await _loadKey();
+      _voiceModel = null;
+      _voiceOn = false;
+      await _loadVoice();
+      _applyVoice();
+      _snack(_t.fmt('profileSwitched', {'n': _profiles.active['title']}));
+    }
+    if (mounted) setState(() => _tab = 0);
+  }
+
+  Future<void> _deleteProfile(Map<String, dynamic> p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(_t['deleteProfile']),
+        content: Text(_t.fmt('deleteProfileBody', {'n': p['title']})),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_t['cancel'])),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(_t['remove'])),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final id = p['id'] as String;
+    final wasActive = id == _profiles.activeId;
+    if (wasActive && _listening) _stop();
+    try {
+      final f = File('$_voiceDir${Platform.pathSeparator}voice_commands_$id.bin');
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    _profiles.delete(id);
+    await _saveSettings();
+    if (wasActive) {
+      await _loadKey();
+      _voiceModel = null;
+      _voiceOn = false;
+      await _loadVoice();
+      _applyVoice();
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// The active profile: chips (phone), header, the six sections, status.
+  Widget _profilePage({required bool showChips}) {
+    final p = _profiles.active;
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        if (showChips) ...[
+          SizedBox(
+            height: 60,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: [
+                for (final q in _profiles.list)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ProfileChip(
+                      profile: q,
+                      selected: q['id'] == p['id'],
+                      compact: true,
+                      onTap: () => _activateProfile(q['id'] as String),
+                    ),
+                  ),
+                AddProfileChip(label: _t['newProfile'], compact: true, onTap: () => _startWizard()),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
+        _profileHeader(p),
+        const SizedBox(height: 16),
+        _providerSection(),
+        const SizedBox(height: 16),
+        _languageSection(),
+        const SizedBox(height: 16),
+        _correctionSection(),
+        const SizedBox(height: 16),
+        _impairedSection(),
+        const SizedBox(height: 16),
+        _filtersSection(),
+        const SizedBox(height: 16),
+        _commandsSection(),
+        const SizedBox(height: 16),
+        _statusStrip(),
+      ],
+    );
+  }
+
+  Widget _profileHeader(Map<String, dynamic> p) {
+    final color = profileColor(p);
+    final isDefault = p['id'] == kDefaultProfileId;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(14)),
+            child: Icon(profileIcon(p), color: Colors.white, size: 26),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(p['title'] as String? ?? '', style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                ((p['subtitle'] as String?)?.isNotEmpty ?? false) ? p['subtitle'] as String : _t['profileSettings'],
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ]),
+          ),
+          IconButton(
+            tooltip: _t['editProfile'],
+            icon: const Icon(Icons.edit_outlined),
+            onPressed: () => _startWizard(id: p['id'] as String),
+          ),
+          if (!isDefault)
+            IconButton(
+              tooltip: _t['deleteProfile'],
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => _deleteProfile(p),
+            ),
+        ]),
+      ),
+    );
+  }
+
+  /// What the next session runs with, what it costs, and what is going on
+  /// right now (state, level, errors, the fallback window's text).
+  Widget _statusStrip() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(_activeSummary(), style: Theme.of(context).textTheme.bodySmall),
+            if (_recordedMs > 0)
+              Text(
                 _t.fmt('usageLine', {
                   'u': _clock(_uploadedMs),
                   'r': _clock(_recordedMs),
                   'x': (_uploadedMs / _recordedMs).toStringAsFixed(1),
                 }),
-                textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodySmall,
               ),
+            const SizedBox(height: 8),
+            // What changes during dictation sits behind one fixed
+            // accessibility node per area whose label changes: nodes
+            // appearing and vanishing several times a second made Flutter's
+            // Windows accessibility bridge log "Failed to update ui::AXTree".
+            Semantics(
+              container: true,
+              label: _t.fmt('status', {'s': _state}),
+              child: ExcludeSemantics(child: Text('$_state${_speech ? ' · ${_t['speech']}' : ''}')),
             ),
-          const SizedBox(height: 8),
-          // What changes during dictation (status, level, interim text, the
-          // growing list of sentences) sits behind one fixed accessibility
-          // node per area whose label changes: nodes appearing, vanishing
-          // and shifting several times a second made Flutter's Windows
-          // accessibility bridge log "Failed to update ui::AXTree" lines.
-          Semantics(
-            container: true,
-            label: _t.fmt('status', {'s': _state}),
-            child: ExcludeSemantics(child: Center(child: Text('$_state${_speech ? ' · ${_t['speech']}' : ''}'))),
-          ),
-          const SizedBox(height: 8),
-          ExcludeSemantics(child: LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0))),
-          const SizedBox(height: 12),
-          if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          if (_fallbackReason != null) _fallbackCard(),
-          Semantics(
-            container: true,
-            label: _finals.isEmpty ? _t['noTextYet'] : _t.fmt('lastRecognised', {'s': _finals.last}),
-            child: ExcludeSemantics(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (_interim.isNotEmpty) Text(_interim, style: const TextStyle(fontStyle: FontStyle.italic)),
-                  const SizedBox(height: 12),
-                  ..._finals.reversed
-                      .take(20)
-                      .map((t) => Padding(padding: const EdgeInsets.symmetric(vertical: 2), child: Text(t))),
-                ],
+            const SizedBox(height: 6),
+            ExcludeSemantics(child: LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0))),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ],
+            if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t.fmt('suggested', {'s': _suggestion}))),
+            if (_fallbackReason != null) ...[const SizedBox(height: 8), _fallbackCard()],
+            if (_interim.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              ExcludeSemantics(child: Text(_interim, style: const TextStyle(fontStyle: FontStyle.italic))),
+            ],
+            if (_finals.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Semantics(
+                container: true,
+                label: _t.fmt('lastRecognised', {'s': _finals.last}),
+                child: ExcludeSemantics(child: Text(_finals.last, maxLines: 3, overflow: TextOverflow.ellipsis)),
               ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------ general settings
+
+  Widget _generalPage() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        _appLanguageSection(),
+        const SizedBox(height: 16),
+        _micSection(),
+        if (_floatingSupported) ...[const SizedBox(height: 16), _floatingSection()],
+        if (_buttonsMovable) ...[const SizedBox(height: 16), _positionsSection()],
+        if (BackgroundControl.supported) ...[const SizedBox(height: 16), _backgroundSection()],
+        if (otherAppsCard() case final card?) ...[const SizedBox(height: 16), card],
+      ],
+    );
+  }
+
+  Widget _appLanguageSection() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_t.appLanguage, style: Theme.of(context).textTheme.titleMedium),
+            DropdownButton<String>(
+              value: _appLanguage.isEmpty ? 'eng' : _appLanguage,
+              isExpanded: true,
+              items: [for (final code in UiStrings.codes) DropdownMenuItem(value: code, child: Text(UiStrings.of(code).name))],
+              onChanged: (code) {
+                if (code == null) return;
+                (_settings['app'] ??= <String, dynamic>{})['language'] = code == 'eng' ? '' : code;
+                _saveSettings();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------ wizard
+
+  Map<String, dynamic>? get _wizardProfile => _wizardId == null ? null : _profiles.byId(_wizardId!);
+
+  /// New profile (no [id]): created from the active one with the
+  /// impaired preset and made active, so the steps edit it live. An
+  /// existing profile is made active first for the same reason.
+  Future<void> _startWizard({String? id}) async {
+    if (_listening) _stop();
+    _wizardPrevActive = _profiles.activeId;
+    if (id == null) {
+      final n = _profiles.list.length;
+      final p = _profiles.create(title: '${_t['newProfile']} $n', impaired: true, color: n % kProfileColors.length);
+      _wizardNew = true;
+      id = p['id'] as String;
+    } else {
+      _wizardNew = false;
+    }
+    if (id != _profiles.activeId) {
+      _profiles.activate(id);
+      await _saveSettings();
+      await _loadKey();
+      _voiceModel = null;
+      _voiceOn = false;
+      await _loadVoice();
+      _applyVoice();
+    }
+    final p = _profiles.byId(id)!;
+    _nameCtl.text = p['title'] as String? ?? '';
+    _subCtl.text = p['subtitle'] as String? ?? '';
+    if (mounted) {
+      setState(() {
+        _wizardId = id;
+        _wizardStep = 0;
+        _tab = 0;
+      });
+    }
+  }
+
+  Future<void> _finishWizard() async {
+    final p = _wizardProfile;
+    if (p != null && (p['title'] as String? ?? '').trim().isEmpty) p['title'] = _t['newProfile'];
+    await _saveSettings();
+    if (mounted) setState(() => _wizardStep = null);
+  }
+
+  Future<void> _cancelWizard() async {
+    if (_wizardNew && _wizardId != null) {
+      final id = _wizardId!;
+      _profiles.delete(id);
+      await _saveSettings();
+      if (_wizardPrevActive != null && _profiles.byId(_wizardPrevActive!) != null && _wizardPrevActive != _profiles.activeId) {
+        _profiles.activate(_wizardPrevActive!);
+        await _saveSettings();
+      }
+      await _loadKey();
+      _voiceModel = null;
+      _voiceOn = false;
+      await _loadVoice();
+      _applyVoice();
+    } else {
+      // Edits of an existing profile are saved as they are made.
+      await _saveSettings();
+    }
+    if (mounted) setState(() => _wizardStep = null);
+  }
+
+  Widget _wizardScaffold() {
+    final step = _wizardStep!;
+    final p = _wizardProfile;
+    if (p == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => setState(() => _wizardStep = null));
+      return const Scaffold(body: SizedBox.shrink());
+    }
+    final titles = ['stepProfile', 'stepProvider', 'stepLanguage', 'stepCorrection', 'stepImpaired', 'stepFilters', 'stepCommands'];
+    final body = switch (step) {
+      0 => _identityStep(p),
+      1 => _providerSection(),
+      2 => _languageSection(),
+      3 => _correctionSection(),
+      4 => _impairedSection(),
+      5 => _filtersSection(),
+      _ => _commandsSection(),
+    };
+    final last = step == _wizardSteps - 1;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          if (step > 0) {
+            setState(() => _wizardStep = step - 1);
+          } else {
+            _cancelWizard();
+          }
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: IconButton(icon: const Icon(Icons.close), tooltip: _t['cancel'], onPressed: _cancelWizard),
+          title: Text(_t.fmt('stepOf', {'n': step + 1, 't': _wizardSteps})),
+        ),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                LinearProgressIndicator(value: (step + 1) / _wizardSteps),
+                const SizedBox(height: 16),
+                Text(_t[titles[step]], style: Theme.of(context).textTheme.headlineSmall),
+                const SizedBox(height: 4),
+                Text(_t['${titles[step]}Body']),
+                const SizedBox(height: 16),
+                body,
+              ],
             ),
           ),
-        ],
+        ),
+        bottomNavigationBar: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(children: [
+              if (step > 0)
+                OutlinedButton.icon(
+                  onPressed: () => setState(() => _wizardStep = step - 1),
+                  icon: const Icon(Icons.chevron_left),
+                  label: Text(_t['back']),
+                ),
+              const Spacer(),
+              FilledButton.icon(
+                onPressed: last ? _finishWizard : () => setState(() => _wizardStep = step + 1),
+                icon: Icon(last ? Icons.check : Icons.chevron_right),
+                label: Text(_t[last ? 'finish' : 'next']),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Step 0: name, subtitle, icon and colour.
+  Widget _identityStep(Map<String, dynamic> p) {
+    final isDefault = p['id'] == kDefaultProfileId;
+    final color = profileColor(p);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(16)),
+                child: Icon(profileIcon(p), color: Colors.white, size: 30),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(p['title'] as String? ?? '', style: Theme.of(context).textTheme.titleMedium),
+                  if ((p['subtitle'] as String? ?? '').isNotEmpty) Text(p['subtitle'] as String),
+                ]),
+              ),
+            ]),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _nameCtl,
+              enabled: !isDefault,
+              decoration: InputDecoration(labelText: _t['profileName'], helperText: isDefault ? _t['defaultFixedName'] : null),
+              onChanged: (v) => setState(() => p['title'] = v),
+            ),
+            TextField(
+              controller: _subCtl,
+              decoration: InputDecoration(labelText: _t['profileSubtitle']),
+              onChanged: (v) => setState(() => p['subtitle'] = v),
+            ),
+            const SizedBox(height: 16),
+            Text(_t['profileIcon'], style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final e in kProfileIcons.entries)
+                  Semantics(
+                    button: true,
+                    selected: p['icon'] == e.key,
+                    label: e.key,
+                    child: Material(
+                      color: p['icon'] == e.key ? color : Theme.of(context).colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => setState(() => p['icon'] = e.key),
+                        child: SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: Icon(e.value, color: p['icon'] == e.key ? Colors.white : null),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text(_t['profileColor'], style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var i = 0; i < kProfileColors.length; i++)
+                  Semantics(
+                    button: true,
+                    selected: (p['color'] as num?)?.toInt() == i,
+                    label: '${_t['profileColor']} ${i + 1}',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(24),
+                      onTap: () => setState(() => p['color'] = i),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: kProfileColors[i],
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: (p['color'] as num?)?.toInt() == i ? Theme.of(context).colorScheme.onSurface : Colors.transparent,
+                            width: 3,
+                          ),
+                        ),
+                        child: (p['color'] as num?)?.toInt() == i ? const Icon(Icons.check, color: Colors.white) : null,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1122,18 +1890,28 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// The floating buttons' look in the cards: a grey disc, a black glyph.
+  static Widget _badge(IconData icon) => CircleAvatar(
+        radius: 16,
+        backgroundColor: const Color(0xFFDDDDDD),
+        child: Icon(icon, size: 18, color: Colors.black),
+      );
+
+  Map<String, dynamic> get _providerOpts =>
+      (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
+
   Widget _providerSection() {
-    final opts = (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
-    final batch = (opts['transfer'] ?? 'Batch') == 'Batch';
-    final vocab = ((opts['keywords'] as List?) ?? const []).join(', ');
-    if (_vocabCtl.text != vocab && !_vocabFocused) _vocabCtl.text = vocab;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['providerTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Row(children: [
+              _badge(Icons.mic),
+              const SizedBox(width: 10),
+              Text(_t['providerTitle'], style: Theme.of(context).textTheme.titleMedium),
+            ]),
             DropdownButton<String>(
               value: _providers.contains(_provider) ? _provider : null,
               isExpanded: true,
@@ -1144,47 +1922,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 await _saveSettings();
                 await _loadKey();
                 setState(() {});
-              },
-            ),
-            DropdownButton<String>(
-              value: _settings['providers']['language'] as String,
-              isExpanded: true,
-              items: kLanguages.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
-              onChanged: (l) {
-                _settings['providers']['language'] = l;
-                _saveSettings();
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(_t['batchUpload']),
-              subtitle: Text(_t['batchBody']),
-              value: batch,
-              onChanged: (b) {
-                final o = Map<String, dynamic>.from(opts);
-                o['transfer'] = b ? 'Batch' : 'Streaming';
-                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
-                _saveSettings();
-              },
-            ),
-            TextField(
-              controller: _vocabCtl,
-              focusNode: _vocabFocus,
-              decoration: InputDecoration(labelText: _t['vocabLabel'], helperText: _t['vocabHelper']),
-              onChanged: (v) {
-                final o = Map<String, dynamic>.from(opts);
-                o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
-                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
-                _vocabDirty = true;
-                // Saved while typing, so no Enter or click elsewhere is needed.
-                _vocabTimer?.cancel();
-                _vocabTimer = Timer(const Duration(milliseconds: 600), _saveVocab);
-              },
-              onSubmitted: (_) => _saveVocab(),
-              onEditingComplete: _saveVocab,
-              onTapOutside: (_) {
-                _vocabFocus.unfocus();
-                _saveVocab();
               },
             ),
             _keyStatus(),
@@ -1299,6 +2036,84 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _ltStored = false;
   String? _ltTail;
 
+  // Keys of the text-model correctors, stored like provider keys
+  // (`api_key:<id>`). The OpenAI key is the speech provider's key as well:
+  // entered in either place, it serves both.
+  final _correctorKeyCtls = {'openai': TextEditingController(), 'anthropic': TextEditingController()};
+  final Map<String, (bool, String?)> _correctorKeys = {};
+
+  Future<void> _loadCorrectorKey(String id) async {
+    try {
+      final k = await _secure.read(key: 'api_key:$id') ?? '';
+      _correctorKeys[id] = (k.isNotEmpty, k.isEmpty ? null : k.substring(k.length > 4 ? k.length - 4 : 0));
+      if (k.isNotEmpty) _engine.setCredential(provider: id, secret: k);
+    } catch (_) {
+      _correctorKeys[id] = (false, null);
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveCorrectorKey(String id) async {
+    final k = _correctorKeyCtls[id]!.text.trim();
+    if (k.isEmpty) return;
+    try {
+      _engine.setCredential(provider: id, secret: k);
+      await _secure.write(key: 'api_key:$id', value: k);
+      _correctorKeyCtls[id]!.text = '';
+      _snack(_t.keySaved(_keyStoreName));
+    } catch (e) {
+      _snack(_t.savingFailed('$e'));
+    }
+    await _loadCorrectorKey(id);
+    // The speech provider's card shows the same key.
+    if (id == _provider) await _loadKey();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _removeCorrectorKey(String id) async {
+    try {
+      await _secure.delete(key: 'api_key:$id');
+      _engine.setCredential(provider: id, secret: '');
+    } catch (_) {}
+    await _loadCorrectorKey(id);
+    if (id == _provider) await _loadKey();
+    if (mounted) setState(() {});
+  }
+
+  /// Key status and entry for a text-model corrector.
+  List<Widget> _correctorKeyRows(String id, String name) {
+    final (stored, tail) = _correctorKeys[id] ?? (false, null);
+    return [
+      Row(children: [
+        Icon(stored ? Icons.check_circle : Icons.key_off, size: 18, color: stored ? Colors.green.shade700 : Colors.orange.shade800),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(stored
+              ? _t.fmt('keyFound', {'p': name, 's': _keyStoreName, 'k': tail ?? ''})
+              : _t.fmt('keyNone', {'p': name})),
+        ),
+        if (stored) TextButton(onPressed: () => _removeCorrectorKey(id), child: Text(_t['remove'])),
+      ]),
+      Row(children: [
+        Expanded(
+          child: TextField(
+            controller: _correctorKeyCtls[id],
+            obscureText: true,
+            decoration: InputDecoration(
+              labelText: stored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': name}),
+              helperText: id == 'openai' ? _t['openAiKeyShared'] : null,
+            ),
+            onSubmitted: (_) => _saveCorrectorKey(id),
+          ),
+        ),
+        const SizedBox(width: 8),
+        FilledButton(onPressed: () => _saveCorrectorKey(id), child: Text(_t['save'])),
+      ]),
+    ];
+  }
+
+  Map<String, dynamic> get _text => (_settings['text'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+
   Future<void> _loadLtKey() async {
     try {
       final k = await _secure.read(key: 'api_key:languagetool') ?? '';
@@ -1340,13 +2155,103 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _correctionSection() {
     final on = (_settings['text'] as Map<String, dynamic>?)?['live_correction'] as bool? ?? false;
+    final corrector = _text['corrector'] as String? ?? 'languagetool';
+    final range = _text['correction_range'] as String? ?? 'cursor_to_end';
+    final aiModelCtl = TextEditingController(text: _text['ai_model'] as String? ?? '');
+    aiModelCtl.selection = TextSelection.collapsed(offset: aiModelCtl.text.length);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['correctionTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Row(children: [
+              _badge(Icons.auto_fix_high),
+              const SizedBox(width: 10),
+              Text(_t['correctionTitle'], style: Theme.of(context).textTheme.titleMedium),
+            ]),
+            // Who corrects: rules (LanguageTool) or a text model, for the
+            // live correction and the correction button alike — and right
+            // under it the account or key that corrector needs.
+            Text(_t['correctorTitle'], style: Theme.of(context).textTheme.titleSmall),
+            DropdownButton<String>(
+              value: corrector,
+              isExpanded: true,
+              items: [
+                DropdownMenuItem(value: 'languagetool', child: Text(_t['correctorLanguageTool'])),
+                DropdownMenuItem(value: 'openai', child: Text(_t['correctorOpenAi'])),
+                DropdownMenuItem(value: 'anthropic', child: Text(_t['correctorAnthropic'])),
+              ],
+              onChanged: (c) {
+                if (c == null) return;
+                _text['corrector'] = c;
+                _saveSettings();
+              },
+            ),
+            if (corrector == 'languagetool') ...[
+              Row(children: [
+                Icon(_ltStored ? Icons.check_circle : Icons.key_off,
+                    size: 18, color: _ltStored ? Colors.green.shade700 : Colors.orange.shade800),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(_ltStored ? _t.fmt('ltFound', {'s': _keyStoreName, 'k': _ltTail}) : _t['ltNone']),
+                ),
+                if (_ltStored) TextButton(onPressed: _removeLtKey, child: Text(_t['remove'])),
+              ]),
+              TextField(
+                controller: _ltUserCtl,
+                decoration: InputDecoration(labelText: _t['ltEmail']),
+              ),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _ltKeyCtl,
+                    obscureText: true,
+                    decoration: InputDecoration(labelText: _t['apiKey'], hintText: _t['ltKeyHint']),
+                    onSubmitted: (_) => _saveLtKey(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(onPressed: _saveLtKey, child: Text(_t['save'])),
+              ]),
+            ],
+            if (corrector == 'openai') ..._correctorKeyRows('openai', 'OpenAI'),
+            if (corrector == 'anthropic') ..._correctorKeyRows('anthropic', 'Anthropic'),
+            if (corrector != 'languagetool')
+              TextField(
+                controller: aiModelCtl,
+                decoration: InputDecoration(labelText: _t['aiModel'], helperText: _t['aiModelHelper']),
+                onSubmitted: (v) {
+                  _text['ai_model'] = v.trim();
+                  _saveSettings();
+                },
+                onTapOutside: (_) {
+                  if ((_text['ai_model'] as String? ?? '') != aiModelCtl.text.trim()) {
+                    _text['ai_model'] = aiModelCtl.text.trim();
+                    _saveSettings();
+                  }
+                },
+              ),
+            const SizedBox(height: 12),
+            // What the correction button next to the microphone corrects.
+            Text(_t['rangeTitle'], style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 6),
+            SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: [
+                ButtonSegment(value: 'click_to_click', label: Text(_t['rangeClickToClick'])),
+                ButtonSegment(value: 'cursor_to_end', label: Text(_t['rangeCursorToEnd'])),
+                ButtonSegment(value: 'whole_text', label: Text(_t['rangeWholeText'])),
+              ],
+              selected: {range},
+              onSelectionChanged: (sel) {
+                _text['correction_range'] = sel.first;
+                _saveSettings();
+              },
+            ),
+            const SizedBox(height: 4),
+            Text(_t[range == 'click_to_click' ? 'rangeClickNote' : 'rangeNote'], style: Theme.of(context).textTheme.bodySmall),
+            const Divider(height: 24),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['correctionSwitch']),
@@ -1374,88 +2279,219 @@ class _HomeScreenState extends State<HomeScreen> {
                   : null,
             ),
             if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t.fmt('suggested', {'s': _suggestion}))),
-            Row(children: [
-              Icon(_ltStored ? Icons.check_circle : Icons.info_outline,
-                  size: 18, color: _ltStored ? Colors.green : Colors.grey),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(_ltStored ? _t.fmt('ltFound', {'s': _keyStoreName, 'k': _ltTail}) : _t['ltNone']),
-              ),
-              if (_ltStored) TextButton(onPressed: _removeLtKey, child: Text(_t['remove'])),
-            ]),
-            TextField(
-              controller: _ltUserCtl,
-              decoration: InputDecoration(labelText: _t['ltEmail']),
-            ),
-            Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _ltKeyCtl,
-                  obscureText: true,
-                  decoration: InputDecoration(labelText: _t['apiKey'], hintText: _t['ltKeyHint']),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton(onPressed: _saveLtKey, child: Text(_t['save'])),
-            ]),
           ],
         ),
       ),
     );
   }
 
-  /// The fine-tuning fold of the Sound card (and the test entries of the
-  /// microphone list) is open.
+  /// The fine-tuning folds (and the test entries of the microphone list)
+  /// are open.
   bool _advanced = false;
 
-  Widget _soundSection() {
-    final sound = _settings['sound'] as Map<String, dynamic>;
-    final vad = sound['vad'] as Map<String, dynamic>;
-    final impaired = sound['impaired_voice'] != false;
+  /// Transcription language and the words the recogniser should expect.
+  Widget _languageSection() {
+    final opts = _providerOpts;
+    final vocab = ((opts['keywords'] as List?) ?? const []).join(', ');
+    if (_vocabCtl.text != vocab && !_vocabFocused) _vocabCtl.text = vocab;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['soundTitle'], style: Theme.of(context).textTheme.titleMedium),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(_t['agc']),
-              subtitle: Text(_t['agcBody']),
-              value: sound['agc'] as bool? ?? true,
-              onChanged: (b) {
-                sound['agc'] = b;
+            Text(_t['stepLanguage'], style: Theme.of(context).textTheme.titleMedium),
+            DropdownButton<String>(
+              value: _settings['providers']['language'] as String,
+              isExpanded: true,
+              items: kLanguages.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
+              onChanged: (l) {
+                _settings['providers']['language'] = l;
                 _saveSettings();
               },
             ),
-            if (!impaired)
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(_t['rnnoise']),
-                value: sound['denoise'] != 'Off',
-                onChanged: (b) {
-                  sound['denoise'] = b ? 'RnNoise' : 'Off';
-                  _saveSettings();
-                },
+            TextField(
+              controller: _vocabCtl,
+              focusNode: _vocabFocus,
+              decoration: InputDecoration(labelText: _t['vocabLabel'], helperText: _t['vocabHelper']),
+              onChanged: (v) {
+                final o = Map<String, dynamic>.from(opts);
+                o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
+                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+                _vocabDirty = true;
+                // Saved while typing, so no Enter or click elsewhere is needed.
+                _vocabTimer?.cancel();
+                _vocabTimer = Timer(const Duration(milliseconds: 600), _saveVocab);
+              },
+              onSubmitted: (_) => _saveVocab(),
+              onEditingComplete: _saveVocab,
+              onTapOutside: (_) {
+                _vocabFocus.unfocus();
+                _saveVocab();
+              },
+            ),
+            _genderColonSwitch(),
+            _genderColonField(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// German: the gender colon for every feminine plural the word list
+  /// knows, plus the stems below.
+  Widget _genderColonSwitch() {
+    return SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(_t['genderColonAuto']),
+      subtitle: Text(_t['genderColonAutoBody']),
+      value: _text['gender_colon_auto'] as bool? ?? true,
+      onChanged: (b) {
+        _text['gender_colon_auto'] = b;
+        _saveSettings();
+      },
+    );
+  }
+
+  /// Word stems that get the gender colon in their feminine plural.
+  Widget _genderColonField() {
+    final words = ((_text['gender_colon_words'] as List?) ?? const ['Autor', 'Lektor', 'Leser']).join(', ');
+    final ctl = TextEditingController(text: words);
+    ctl.selection = TextSelection.collapsed(offset: words.length);
+    void save(String v) {
+      _text['gender_colon_words'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
+      _saveSettings();
+    }
+
+    return TextField(
+      controller: ctl,
+      decoration: InputDecoration(labelText: _t['genderColonLabel'], helperText: _t['genderColonHelper']),
+      onSubmitted: save,
+      onTapOutside: (_) {
+        if (ctl.text != words) save(ctl.text);
+      },
+    );
+  }
+
+  /// Voice and rhythm: the clear-speech or impaired preset, batch upload,
+  /// and how the recording is cut (chunks and pause, or readings of the
+  /// thought so far with agreed words only).
+  Widget _impairedSection() {
+    final sound = _settings['sound'] as Map<String, dynamic>;
+    final vad = sound['vad'] as Map<String, dynamic>;
+    final impaired = sound['impaired_voice'] != false;
+    final opts = _providerOpts;
+    final batch = (opts['transfer'] ?? 'Batch') == 'Batch';
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_t['voiceKind'], style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            SegmentedButton<bool>(
+              segments: [
+                ButtonSegment(value: false, label: Text(_t['clearSpeech']), icon: const Icon(Icons.record_voice_over_outlined)),
+                ButtonSegment(value: true, label: Text(_t['impairedSpeech']), icon: const Icon(Icons.accessibility_new)),
+              ],
+              selected: {impaired},
+              onSelectionChanged: (sel) {
+                setState(() => Profiles.applyVoicePreset(_settings, sel.first));
+                _saveSettings();
+              },
+            ),
+            const SizedBox(height: 8),
+            Text(_t[impaired ? 'impairedOn' : 'impairedOff'], style: Theme.of(context).textTheme.bodySmall),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['batchUpload']),
+              subtitle: Text(_t['batchBody']),
+              value: batch,
+              onChanged: (b) {
+                final o = Map<String, dynamic>.from(opts);
+                o['transfer'] = b ? 'Batch' : 'Streaming';
+                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+                _saveSettings();
+              },
+            ),
+            if (impaired) ...[
+              _stepper(
+                label: _t['pauseThought'],
+                value: vad['silence_duration_ms'] as num,
+                min: 1500,
+                max: 6000,
+                step: 100,
+                unit: 'ms',
+                onChanged: (v) => vad['silence_duration_ms'] = v.round(),
               ),
-            ExpansionTile(
-              tilePadding: EdgeInsets.zero,
-              title: Text(_t['advanced']),
-              subtitle: Text(_t[impaired ? 'advGain' : 'advGainChunk']),
-              initiallyExpanded: _advanced,
-              onExpansionChanged: (open) => setState(() => _advanced = open),
-              children: [
-                _stepper(
-                  label: _t['preamp'],
-                  value: sound['preamp_gain_db'] as num,
-                  min: 0,
-                  max: 24,
-                  step: 1,
-                  unit: 'dB',
-                  onChanged: (v) => sound['preamp_gain_db'] = v.toDouble(),
-                ),
-                if (!impaired) ...[
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text(_t['advanced']),
+                subtitle: Text(_t['impairedAdvBody']),
+                initiallyExpanded: _advanced,
+                onExpansionChanged: (open) => setState(() => _advanced = open),
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(_t['agreedOnly']),
+                    subtitle: Text(_t['agreedOnlyBody']),
+                    value: vad['agreement'] == true,
+                    onChanged: (b) {
+                      vad['agreement'] = b;
+                      _saveSettings();
+                    },
+                  ),
+                  if (vad['agreement'] == true) ...[
+                    _stepper(
+                      label: _t['agreementStep'],
+                      value: (vad['agreement_step_ms'] as num? ?? 1000),
+                      min: 500,
+                      max: 3000,
+                      step: 250,
+                      unit: 'ms',
+                      onChanged: (v) => vad['agreement_step_ms'] = v.round(),
+                    ),
+                    _stepper(
+                      label: _t['agreementSpan'],
+                      value: (vad['agreement_span_ms'] as num? ?? 8000) / 1000,
+                      min: 4,
+                      max: 20,
+                      step: 1,
+                      unit: 's',
+                      onChanged: (v) => vad['agreement_span_ms'] = (v * 1000).round(),
+                    ),
+                  ],
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(_t['recheck']),
+                    value: vad['refine'] == true,
+                    onChanged: (b) {
+                      vad['refine'] = b;
+                      _saveSettings();
+                    },
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(_t['quickText']),
+                    value: vad['type_quick_text'] == true,
+                    onChanged: vad['refine'] == true
+                        ? (b) {
+                            vad['type_quick_text'] = b;
+                            _saveSettings();
+                          }
+                        : null,
+                  ),
+                ],
+              ),
+            ] else
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text(_t['advanced']),
+                subtitle: Text(_t['advGainChunk']),
+                initiallyExpanded: _advanced,
+                onExpansionChanged: (open) => setState(() => _advanced = open),
+                children: [
                   _stepper(
                     label: _t['chunkLength'],
                     value: (vad['chunk_interval_ms'] as num) / 1000,
@@ -1476,26 +2512,24 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   Text(_t['chunkNote'], style: Theme.of(context).textTheme.bodySmall),
                 ],
-              ],
-            ),
+              ),
           ],
         ),
       ),
     );
   }
 
-  /// What only the impaired setup uses; shown under the master switch.
-  Widget _impairedSoundSection() {
+  /// What is done to the sound before it leaves the device.
+  Widget _filtersSection() {
     final sound = _settings['sound'] as Map<String, dynamic>;
-    final vad = sound['vad'] as Map<String, dynamic>;
+    final impaired = sound['impaired_voice'] != false;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['impairedSoundTitle'], style: Theme.of(context).textTheme.titleMedium),
-            Text(_t['impairedSoundBody']),
+            Text(_t['stepFilters'], style: Theme.of(context).textTheme.titleMedium),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['noiseFilter']),
@@ -1506,63 +2540,34 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveSettings();
               },
             ),
-            _stepper(
-              label: _t['pauseThought'],
-              value: vad['silence_duration_ms'] as num,
-              min: 1500,
-              max: 6000,
-              step: 100,
-              unit: 'ms',
-              onChanged: (v) => vad['silence_duration_ms'] = v.round(),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['rnnoise']),
+              subtitle: impaired ? Text(_t['rnnoiseImpairedBody']) : null,
+              value: sound['denoise'] != 'Off',
+              onChanged: (b) {
+                sound['denoise'] = b ? 'RnNoise' : 'Off';
+                _saveSettings();
+              },
             ),
-            ExpansionTile(
-              tilePadding: EdgeInsets.zero,
-              title: Text(_t['advanced']),
-              subtitle: Text(_t['impairedAdvBody']),
-              initiallyExpanded: _advanced,
-              onExpansionChanged: (open) => setState(() => _advanced = open),
-              children: [
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_t['agreedOnly']),
-                  subtitle: Text(_t['agreedOnlyBody']),
-                  value: vad['agreement'] == true,
-                  onChanged: (b) {
-                    vad['agreement'] = b;
-                    _saveSettings();
-                  },
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_t['recheck']),
-                  value: vad['refine'] == true,
-                  onChanged: (b) {
-                    vad['refine'] = b;
-                    _saveSettings();
-                  },
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_t['quickText']),
-                  value: vad['type_quick_text'] == true,
-                  onChanged: vad['refine'] == true
-                      ? (b) {
-                          vad['type_quick_text'] = b;
-                          _saveSettings();
-                        }
-                      : null,
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_t['rnnoise']),
-                  subtitle: Text(_t['rnnoiseImpairedBody']),
-                  value: sound['denoise'] != 'Off',
-                  onChanged: (b) {
-                    sound['denoise'] = b ? 'RnNoise' : 'Off';
-                    _saveSettings();
-                  },
-                ),
-              ],
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['agc']),
+              subtitle: Text(_t['agcBody']),
+              value: sound['agc'] as bool? ?? true,
+              onChanged: (b) {
+                sound['agc'] = b;
+                _saveSettings();
+              },
+            ),
+            _stepper(
+              label: _t['preamp'],
+              value: sound['preamp_gain_db'] as num,
+              min: 0,
+              max: 24,
+              step: 1,
+              unit: 'dB',
+              onChanged: (v) => sound['preamp_gain_db'] = v.toDouble(),
             ),
           ],
         ),
@@ -1570,60 +2575,13 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Master switch between the released pipeline for clear speech and the
-  /// impaired-voice setup under development. Each side writes its whole
-  /// profile, so later experiments change only the impaired side.
-  Widget _voiceModeSection() {
-    final sound = _settings['sound'] as Map<String, dynamic>;
-    final impaired = sound['impaired_voice'] != false;
-    return Card(
-      child: SwitchListTile(
-        title: Text(_t['impairedVoice']),
-        subtitle: Text(_t[impaired ? 'impairedOn' : 'impairedOff']),
-        value: impaired,
-        onChanged: (b) {
-          setState(() => _applyVoiceProfile(b));
-          _saveSettings();
-        },
-      ),
-    );
-  }
-
-  void _applyVoiceProfile(bool impaired) {
-    final sound = _settings['sound'] as Map<String, dynamic>;
-    final vad = sound['vad'] as Map<String, dynamic>;
-    final options = _settings['providers']['options'] as Map<String, dynamic>;
-    final o = Map<String, dynamic>.from(options[_provider] as Map<String, dynamic>? ?? {});
-    sound['impaired_voice'] = impaired;
-    // Common to both: automatic gain, no RNNoise, no tone shaping.
-    sound['agc'] = true;
-    sound['denoise'] = 'Off';
-    sound['gate'] = false;
-    sound['highpass_hz'] = 0.0;
-    sound['presence_db'] = 0.0;
-    sound['compressor'] = false;
-    sound['trill_filler'] = false;
-    if (impaired) {
-      sound['noise_profile'] = true;
-      vad['chunk_interval_ms'] = 3000;
-      vad['silence_duration_ms'] = 4000;
-      vad['refine'] = true;
-      vad['type_quick_text'] = true;
-      vad['agreement'] = true;
-      vad['agreement_step_ms'] = 1000;
-      vad['agreement_windows'] = 4;
-      vad['agreement_span_ms'] = 8000;
-      o['transfer'] = 'Batch';
-    } else {
-      // v0.0.1(51), the release for clear speech.
-      sound['noise_profile'] = false;
-      vad['chunk_interval_ms'] = 2000;
-      vad['silence_duration_ms'] = 900;
-      vad['refine'] = false;
-      vad['agreement'] = false;
-      o['transfer'] = 'Streaming';
-    }
-    options[_provider] = o;
+  /// Start and stop by voice, and the trained words.
+  Widget _commandsSection() {
+    return Column(children: [
+      _voiceSection(),
+      const SizedBox(height: 16),
+      _trainingSection(),
+    ]);
   }
 
   /// Milliseconds as m:ss.
@@ -1782,8 +2740,8 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(_t.fmt('aboutTitle', {'a': appName})),
-        content: Text('App 0.1.0+1\nCore ${a.coreVersion} (build ${a.buildNumber}, ${a.gitSha}, ${a.buildDate})\n'
-            '${a.targetOs}-${a.targetArch}\n${_t['coreLicense']}: ${a.coreLicense}\n${_t['providers']}: ${a.providers.join(', ')}'),
+        content: Text('${_t.fmt('aboutVersion', {'v': a.coreVersion, 'b': a.buildNumber, 'd': a.buildDate})}\n'
+            '${_t['providers']}: ${a.providers.join(', ')}'),
         actions: [
           TextButton(
             onPressed: () {
@@ -1806,14 +2764,14 @@ class LicensesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = UiStrings.current;
     return DefaultTabController(
-      length: 3,
+      length: 2,
       child: Scaffold(
         appBar: AppBar(
           title: Text(t['licenses']),
-          bottom: TabBar(tabs: [Tab(text: t['license']), Tab(text: t['notice']), Tab(text: t['thirdParty'])]),
+          bottom: TabBar(tabs: [Tab(text: t['license']), Tab(text: t['notice'])]),
         ),
         body: TabBarView(
-          children: [licenseText(), noticeText(), thirdPartyText()]
+          children: [licenseText(), noticeText()]
               .map((t) => SingleChildScrollView(padding: const EdgeInsets.all(16), child: SelectableText(t)))
               .toList(),
         ),

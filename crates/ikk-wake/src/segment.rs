@@ -8,10 +8,14 @@ use ikk_audio::vad::{VadEvent, VadMode, VoiceActivityDetector};
 use crate::SAMPLE_RATE_HZ;
 
 const PREROLL_SAMPLES: usize = SAMPLE_RATE_HZ as usize / 4; // 250 ms
-/// Commands are short; longer speech is dictation, not a command.
-const MAX_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 3;
-/// Pause that ends a command utterance.
-const PAUSE_MS: u32 = 400;
+/// Commands are short phrases (one to a few words); longer speech is
+/// dictation, not a command. Six seconds leaves room for a slow speaker's
+/// two or three words.
+const MAX_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 6;
+/// Pause that ends a command utterance. Impaired speakers leave 0.3–0.8 s
+/// between the words of one phrase (measured on the reference samples), so
+/// a shorter pause would cut "Diktat starten" into two utterances.
+const PAUSE_MS: u32 = 800;
 
 pub struct Segmenter {
     vad: VoiceActivityDetector,

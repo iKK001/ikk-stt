@@ -12,3 +12,7 @@ Future<String?> ensureMicPermission() async => null;
 
 /// Extra settings card below the microphone settings, or null.
 Widget? otherAppsCard() => null;
+
+/// No host-drawn button on this platform (the engine draws it).
+Future<List<double>?> hostButtonPosition() async => null;
+Future<void> setHostButtonPosition(double x, double y) async {}

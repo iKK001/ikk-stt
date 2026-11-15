@@ -11,7 +11,8 @@ const CALIBRATION: Duration = Duration::from_millis(600);
 const MIN_SNR: f32 = 2.5;
 const MIN_LEVEL: f32 = 0.003;
 const MIN_WORD: Duration = Duration::from_millis(250);
-const MAX_WORD: Duration = Duration::from_secs(3);
+/// A command may be a short phrase, said slowly.
+const MAX_WORD: Duration = Duration::from_secs(6);
 
 fn rms(s: &[f32]) -> f32 {
     if s.is_empty() {
@@ -20,9 +21,10 @@ fn rms(s: &[f32]) -> f32 {
     (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt()
 }
 
-/// Record one spoken word with the microphone from the settings: measures
-/// the room first, then waits up to `timeout_secs` for an utterance that is
-/// clearly louder than the room and as long as a word. Opening the
+/// Record one spoken command (a word or a short phrase) with the microphone
+/// from the settings: measures the room first, then waits up to
+/// `timeout_secs` for an utterance that is clearly louder than the room
+/// and as long as a word at least. Opening the
 /// microphone, noise and clicks never count as a take.
 /// Call it while no dictation and no voice standby runs.
 pub fn record_take(settings_json: &str, timeout_secs: u32) -> Result<Vec<f32>, String> {

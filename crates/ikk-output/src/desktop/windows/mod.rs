@@ -209,6 +209,21 @@ fn set_private_text(cb: &mut arboard::Clipboard, text: &str) -> Result<(), Outpu
         .map_err(|e| OutputError::Failed(format!("clipboard set: {e}")))
 }
 
+/// A left click at screen pixel (`x`, `y`); with `shift` it extends a selection.
+pub fn click_at(x: f64, y: f64, shift: bool) -> Result<(), OutputError> {
+    sendinput::click_at(x.round() as i32, y.round() as i32, shift)
+}
+
+/// A drag with the left button from one screen pixel to another (tests).
+pub fn drag(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), OutputError> {
+    sendinput::drag(
+        x1.round() as i32,
+        y1.round() as i32,
+        x2.round() as i32,
+        y2.round() as i32,
+    )
+}
+
 pub fn paste_clipboard(text: &str) -> Result<(), OutputError> {
     let mut cb = arboard::Clipboard::new().map_err(|e| OutputError::Failed(format!("clipboard: {e}")))?;
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());

@@ -451,7 +451,8 @@ pub struct RoutingPolicy {
 #[derive(Default, Clone)]
 pub struct ProviderRegistry {
     providers: Vec<Arc<dyn Provider>>,
-    corrector: Option<Arc<dyn TextCorrector>>,
+    /// Correctors by id; the first one registered is the default.
+    correctors: Vec<Arc<dyn TextCorrector>>,
 }
 
 impl ProviderRegistry {
@@ -467,12 +468,27 @@ impl ProviderRegistry {
     pub fn ids(&self) -> Vec<ProviderId> {
         self.providers.iter().map(|p| p.id()).collect()
     }
-    /// The grammar and spelling checker for live correction, if any.
+    /// A text corrector (grammar checker or text model); the first one
+    /// registered is the default for sessions that name none.
     pub fn set_corrector(&mut self, c: Arc<dyn TextCorrector>) {
-        self.corrector = Some(c);
+        self.correctors.retain(|x| x.id() != c.id());
+        self.correctors.push(c);
     }
+    /// The default corrector, if any.
     pub fn corrector(&self) -> Option<Arc<dyn TextCorrector>> {
-        self.corrector.clone()
+        self.correctors.first().cloned()
+    }
+    /// The corrector with this id, or the default when the id is unknown
+    /// or empty.
+    pub fn corrector_named(&self, id: &str) -> Option<Arc<dyn TextCorrector>> {
+        self.correctors
+            .iter()
+            .find(|c| c.id() == id)
+            .cloned()
+            .or_else(|| self.corrector())
+    }
+    pub fn corrector_ids(&self) -> Vec<&'static str> {
+        self.correctors.iter().map(|c| c.id()).collect()
     }
 }
 
@@ -489,6 +505,12 @@ pub trait TextCorrector: Send + Sync {
     /// limits); without it the anonymous service is used.
     /// Returns the corrected text, or `None` when nothing needs changing.
     async fn correct(&self, text: &str, language: &str, credential: Option<&str>) -> Result<Option<String>, SttError>;
+    /// Text-model correctors: which model to ask (empty = the default).
+    /// Rule-based checkers ignore it.
+    fn set_model(&self, _model: &str) {}
+    /// Text-model correctors: write feminine plurals of persons with the
+    /// gender colon ("Autor:innen"). Rule-based checkers ignore it.
+    fn set_gender_colon(&self, _on: bool) {}
 }
 
 #[cfg(test)]

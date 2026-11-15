@@ -12,6 +12,8 @@ pub mod deepgram;
 pub mod elevenlabs;
 #[cfg(feature = "languagetool")]
 pub mod languagetool;
+/// Text-model correctors (OpenAI, Anthropic): recognition errors from context.
+pub mod llm;
 #[cfg(feature = "openai")]
 pub mod openai;
 #[cfg(feature = "voiceitt")]
@@ -36,6 +38,8 @@ pub fn register_all(reg: &mut ProviderRegistry) {
     reg.register(Box::new(azure::Azure));
     #[cfg(feature = "languagetool")]
     reg.set_corrector(std::sync::Arc::new(languagetool::LanguageTool));
+    reg.set_corrector(std::sync::Arc::new(llm::AiCorrector::openai()));
+    reg.set_corrector(std::sync::Arc::new(llm::AiCorrector::anthropic()));
     // Windows' own recognizer is under investigation (its online dictation
     // returned nothing in tests): only offered with IKK_WINDOWS_SPEECH=1.
     if std::env::var("IKK_WINDOWS_SPEECH").is_ok_and(|v| v == "1") {

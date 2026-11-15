@@ -166,6 +166,33 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         keywords: Vec<String>,
     },
+    /// The correction button from the command line: after `--delay` seconds
+    /// (time to focus the text), select the range in the app in front, send
+    /// it to the corrector, paste the answer over it.
+    Correct {
+        /// languagetool, openai or anthropic
+        #[arg(long, default_value = "languagetool")]
+        corrector: String,
+        /// cursor_to_end, whole_text
+        #[arg(long, default_value = "cursor_to_end")]
+        range: String,
+        /// Text-model correctors: the model (empty = default).
+        #[arg(long, default_value = "")]
+        model: String,
+        #[arg(long, default_value = "deu")]
+        language: String,
+        #[arg(long)]
+        key_env: Option<String>,
+        /// Key from the app's keychain entry `api_key:<corrector>`.
+        #[arg(long)]
+        key_from_app: bool,
+        #[arg(long, default_value_t = 3)]
+        delay: u64,
+        /// Click to click without the floating button: select from screen
+        /// point x1,y1 to x2,y2 (points, origin top-left) and correct that.
+        #[arg(long, value_delimiter = ',', num_args = 4)]
+        between: Option<Vec<f64>>,
+    },
     /// Dictate from the microphone to stdout: live interim line, finals appended.
     /// `--mic file:/path/to.wav` replays a recording as the microphone.
     Dictate {
@@ -685,6 +712,36 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::Correct {
+            corrector,
+            range,
+            model,
+            language,
+            key_env,
+            key_from_app,
+            delay,
+            between,
+        } => {
+            let key = if key_from_app {
+                credential_from_app(&corrector)?
+            } else {
+                credential_from_env(&corrector, key_env.as_deref())?
+            };
+            let between = between.map(|b| ((b[0], b[1]), (b[2], b[3])));
+            let req = ikk_engine::CorrectRequest {
+                range: if between.is_some() {
+                    ikk_engine::CorrectionRange::Selection
+                } else {
+                    ikk_engine::CorrectionRange::parse(&range)
+                },
+                corrector: corrector.clone(),
+                model,
+                language,
+            };
+            {
+                run_correct(corrector, key, req, delay, between).await
+            }
+        }
         Cmd::Dictate {
             provider,
             key_env,
@@ -1066,4 +1123,65 @@ impl TextSink for StdoutSink {
     fn backspace(&mut self, _n: usize) -> Result<(), OutputError> {
         Ok(())
     }
+}
+
+/// The correction button's flow with a fresh engine: key, consent, wait,
+/// correct, report.
+async fn run_correct(
+    corrector: String,
+    key: String,
+    req: ikk_engine::CorrectRequest,
+    delay: u64,
+    between: Option<((f64, f64), (f64, f64))>,
+) -> anyhow::Result<()> {
+    let mut reg = ProviderRegistry::new();
+    ikk_providers::register_all(&mut reg);
+    if reg.corrector_named(&corrector).is_none_or(|c| c.id() != corrector) {
+        anyhow::bail!("unknown corrector {corrector}; have {:?}", reg.corrector_ids());
+    }
+    let mut engine = Engine::spawn(reg, ikk_output::default_sink());
+    engine
+        .send(EngineCommand::SetCredential(
+            ProviderId(corrector.clone()),
+            Secret::new(key),
+        ))
+        .await;
+    engine.send(EngineCommand::GrantConsent(corrector.clone())).await;
+    eprintln!("focus the text to correct … {delay} s");
+    tokio::time::sleep(Duration::from_secs(delay)).await;
+    if let Some((from, to)) = between {
+        // The two clicks of a click-to-click range, replayed: click, Shift-click.
+        tokio::task::spawn_blocking(move || ikk_output::desktop::select_between(from, to))
+            .await?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    engine.send(EngineCommand::CorrectRange(req)).await;
+    let started = Instant::now();
+    loop {
+        let left = Duration::from_secs(90).saturating_sub(started.elapsed());
+        match tokio::time::timeout(left, engine.events.recv()).await {
+            Ok(Some(EngineEvent::Corrected { changed, chars })) => {
+                eprintln!(
+                    "corrected after {:.1} s: changed={changed}, {chars} chars",
+                    started.elapsed().as_secs_f32()
+                );
+                break;
+            }
+            Ok(Some(EngineEvent::Error(e))) => {
+                eprintln!("[error] {e}");
+                break;
+            }
+            Ok(Some(EngineEvent::ConsentRequired(r))) => {
+                eprintln!("consent needed for {}", r.id);
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                eprintln!("no answer");
+                break;
+            }
+        }
+    }
+    engine.shutdown().await;
+    Ok(())
 }

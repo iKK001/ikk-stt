@@ -19,6 +19,24 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+
+# App icon: `dart run flutter_launcher_icons` regenerates every platform set
+# from assets/icon (master: assets/icon/logo.svg). Windows keeps the
+# multi-size windows/runner/resources/app_icon.ico made from the same mark.
+flutter_launcher_icons:
+  image_path: "assets/icon/logo_white_bg.png"
+  android: true
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon/logo.png"
+  ios: true
+  remove_alpha_ios: true
+  background_color_ios: "#FFFFFF"
+  macos:
+    generate: true
+    image_path: "assets/icon/logo_macos.png"
+  windows:
+    generate: false

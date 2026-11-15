@@ -10,6 +10,16 @@ use ikk_text::TextConfig;
 
 use crate::StartConfig;
 
+/// The correction button's request from the settings.
+pub fn correct_request(settings: &Settings) -> crate::CorrectRequest {
+    crate::CorrectRequest {
+        range: crate::CorrectionRange::parse(&settings.text.correction_range),
+        corrector: settings.text.corrector.clone(),
+        model: settings.text.ai_model.clone(),
+        language: settings.providers.language.clone(),
+    }
+}
+
 /// Builds a start configuration from the user's settings for the active
 /// provider. Credentials are not part of settings; the engine injects them.
 pub fn start_config(settings: &Settings) -> StartConfig {
@@ -82,6 +92,9 @@ pub fn start_config(settings: &Settings) -> StartConfig {
             auto_casing: false,
             vocabulary: Vec::new(),
             learned: settings.text.training.learned_words(),
+            gender_colon: settings.text.gender_colon_words.clone(),
+            gender_colon_auto: settings.text.gender_colon_auto
+                && matches!(settings.providers.language.as_str(), "deu" | "gsw"),
         },
         vad_mode,
         pause: Duration::from_millis(settings.sound.vad.silence_duration_ms as u64),
