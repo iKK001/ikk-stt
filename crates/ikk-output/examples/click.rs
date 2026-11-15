@@ -14,6 +14,11 @@ fn main() {
             ikk_output::desktop::drag(x, y, x2, y2).expect("drag");
             return;
         }
+        // `click x y double`: a double-click (selects the word under it).
+        if a.get(3).is_some_and(|s| s == "double") {
+            ikk_output::desktop::double_click_at(x, y).expect("double click");
+            return;
+        }
         ikk_output::desktop::click_at(x, y, shift).expect("click");
     }
 }

@@ -42,6 +42,11 @@ pub struct Shared {
     /// The user records voice commands: nothing listens or dictates, or
     /// the recorded words would be transcribed (and typed) as well.
     training: AtomicBool,
+    /// Replace by voice is armed: the next click names the word, or a
+    /// second press of the correction button names the range.
+    replace_armed: AtomicBool,
+    /// The switch: audio correction (replace by voice) instead of AI.
+    audio_mode: AtomicBool,
     /// Serialises writes to the encrypted store.
     #[allow(dead_code)]
     persist_lock: Mutex<()>,
@@ -75,6 +80,8 @@ pub fn get_or_create() -> Arc<Shared> {
                 mic_off: AtomicBool::new(false),
                 voice_applied: AtomicBool::new(false),
                 training: AtomicBool::new(false),
+                replace_armed: AtomicBool::new(false),
+                audio_mode: AtomicBool::new(false),
                 persist_lock: Mutex::new(()),
             });
             if let Some(mut rx) = shared.engine.take_events() {
@@ -100,6 +107,29 @@ fn on_event(s: &Shared, ev: &EngineEvent) {
                 ikk_overlay::set_listening(listening);
             }
         }
+        // Replace by voice: mark the selection while the engine listens,
+        // and let go of the yellow state when it is over.
+        EngineEvent::ReplaceListening { .. } => {
+            ikk_overlay::set_busy(ikk_overlay::Busy::Listening);
+            if let Some((x, y, w, h)) = ikk_output::desktop::selection_bounds() {
+                ikk_overlay::highlight(x, y, w, h);
+            }
+        }
+        // While a replacement waits for its words: speech over means the
+        // recogniser is at work (red) until the next words or the end.
+        EngineEvent::Speech(on) if s.replace_armed.load(Ordering::SeqCst) => {
+            ikk_overlay::set_busy(if *on {
+                ikk_overlay::Busy::Listening
+            } else {
+                ikk_overlay::Busy::Processing
+            });
+        }
+        EngineEvent::Corrected { .. } => ikk_overlay::set_busy(ikk_overlay::Busy::None),
+        EngineEvent::Error(message) if message.starts_with("correction:") => {
+            ikk_overlay::set_busy(ikk_overlay::Busy::None)
+        }
+        EngineEvent::Replaced { .. } => s.end_replace(),
+        EngineEvent::Error(message) if message.starts_with("replace:") => s.end_replace(),
         // Button colour: brand blue while waiting for the start word.
         EngineEvent::VoiceStandby(on) => {
             s.standby.store(*on, Ordering::SeqCst);
@@ -121,6 +151,10 @@ impl Shared {
                 return;
             }
             *s = Some(json.to_string());
+        }
+        // The correction button shows the range it corrects.
+        if let Ok(range) = ikk_ffi::engine::FfiEngine::correction_range(json) {
+            ikk_overlay::set_range_mode(ikk_overlay::RangeMode::parse(&range));
         }
         self.persist();
     }
@@ -200,30 +234,169 @@ impl Shared {
             .ok()
             .and_then(|s| s.clone())
             .ok_or_else(|| "no settings yet".to_string())?;
+        // The mode and the range decide what one press does; the arc on the
+        // wand runs from the moment the range is fixed until the answer.
+        let audio = self.audio_mode.load(Ordering::SeqCst);
+        let range = ikk_ffi::engine::FfiEngine::correction_range(&json)?;
+        // A press while a click capture waits: cancel.
         if ikk_overlay::cancel_capture() {
+            self.end_replace();
             return Ok(());
         }
-        if ikk_ffi::engine::FfiEngine::correction_range(&json)? == "click_to_click" {
-            let armed = ikk_overlay::capture_clicks(
-                2,
-                std::time::Duration::from_secs(20),
-                std::sync::Arc::new(move |points| {
-                    if points.len() < 2 {
-                        return;
-                    }
-                    if let Some(s) = get() {
-                        if let Err(e) = s.engine.correct_between(&json, points[0], points[1]) {
-                            log::warn!("click to click: {e}");
+        match range.as_str() {
+            // Two clicks name the range; two on the same spot name that word.
+            "click_to_click" => {
+                self.arm(audio);
+                let armed = ikk_overlay::capture_clicks(
+                    2,
+                    std::time::Duration::from_secs(20),
+                    std::sync::Arc::new(move |points| {
+                        if points.len() < 2 {
+                            return;
                         }
-                    }
-                }),
-            );
-            if armed {
-                return Ok(());
+                        let (a, b) = (points[0], points[1]);
+                        let same_spot = (a.0 - b.0).abs() < 8.0 && (a.1 - b.1).abs() < 8.0;
+                        let Some(s) = get() else { return };
+                        s.busy_start(audio);
+                        let r = match (audio, same_spot) {
+                            (true, true) => s.engine.replace_by_voice(&json, Some(a), false),
+                            (true, false) => s.engine.replace_between(&json, a, b),
+                            (false, true) => s.engine.correct_word_at(&json, a),
+                            (false, false) => s.engine.correct_between(&json, a, b),
+                        };
+                        if let Err(e) = r {
+                            log::warn!("click to click: {e}");
+                            s.end_replace();
+                        }
+                    }),
+                );
+                if !armed {
+                    self.end_replace();
+                    return Err("click to click is not available on this platform".into());
+                }
+                Ok(())
             }
-            return Err("click to click is not available on this platform".into());
+            // One click names the word.
+            "single_word" => {
+                self.arm(audio);
+                let armed = ikk_overlay::capture_clicks(
+                    1,
+                    std::time::Duration::from_secs(15),
+                    std::sync::Arc::new(move |points| {
+                        let Some(&point) = points.first() else { return };
+                        let Some(s) = get() else { return };
+                        s.busy_start(audio);
+                        let r = if audio {
+                            s.engine.replace_by_voice(&json, Some(point), false)
+                        } else {
+                            s.engine.correct_word_at(&json, point)
+                        };
+                        if let Err(e) = r {
+                            log::warn!("single word: {e}");
+                            s.end_replace();
+                        }
+                    }),
+                );
+                if !armed {
+                    self.end_replace();
+                    return Err("single word needs the floating button on this platform".into());
+                }
+                Ok(())
+            }
+            // Cursor to end, whole text: at once.
+            _ => {
+                self.busy_start(audio);
+                if audio {
+                    self.replace_armed.store(true, Ordering::SeqCst);
+                    ikk_overlay::set_replace_armed(true);
+                }
+                let r = if audio {
+                    self.engine.replace_by_voice(&json, None, true)
+                } else {
+                    self.engine.correct_now(&json)
+                };
+                if r.is_err() {
+                    self.end_replace();
+                }
+                r
+            }
         }
-        self.engine.correct_now(&json)
+    }
+
+    /// A click capture waits: the wand turns yellow (audio) or orange (AI).
+    fn arm(&self, audio: bool) {
+        if audio {
+            self.replace_armed.store(true, Ordering::SeqCst);
+            ikk_overlay::set_replace_armed(true);
+        }
+    }
+
+    /// The range is fixed: the arc runs until the answer is there.
+    fn busy_start(&self, audio: bool) {
+        if audio {
+            self.replace_armed.store(true, Ordering::SeqCst);
+            ikk_overlay::set_replace_armed(true);
+            ikk_overlay::set_busy(ikk_overlay::Busy::Listening);
+        } else {
+            ikk_overlay::set_busy(ikk_overlay::Busy::Processing);
+        }
+    }
+
+    /// The switch flipped: audio correction (replace by voice) or AI.
+    pub fn set_audio_mode(&self, on: bool) {
+        self.audio_mode.store(on, Ordering::SeqCst);
+        ikk_overlay::set_audio_mode(on);
+        if !on && self.replace_armed.load(Ordering::SeqCst) {
+            let _ = ikk_overlay::cancel_capture();
+            self.end_replace();
+        }
+    }
+
+    /// Phones: replace by voice on text the host selected itself.
+    #[allow(dead_code)]
+    pub fn replace_host(&self, original: &str) -> Result<(), String> {
+        let json = self
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .ok_or_else(|| "open the app once to load settings".to_string())?;
+        if self.training.load(Ordering::SeqCst) {
+            return Err(TRAINING.into());
+        }
+        self.engine.replace_by_voice_host(&json, original)
+    }
+
+    /// Phones: correct text the host selected itself.
+    #[allow(dead_code)]
+    pub fn correct_host(&self, original: &str) -> Result<(), String> {
+        let json = self
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .ok_or_else(|| "open the app once to load settings".to_string())?;
+        self.engine.correct_host(&json, original)
+    }
+
+    /// The correction range named in the settings ("" when unknown).
+    #[allow(dead_code)]
+    pub fn correction_range(&self) -> String {
+        self.settings
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .and_then(|json| ikk_ffi::engine::FfiEngine::correction_range(&json).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replace by voice is over (done, cancelled or failed): the button
+    /// goes back to blue and the mark disappears.
+    pub fn end_replace(&self) {
+        self.replace_armed.store(false, Ordering::SeqCst);
+        ikk_overlay::set_replace_armed(false);
+        ikk_overlay::set_busy(ikk_overlay::Busy::None);
+        ikk_overlay::clear_highlight();
     }
 
     pub fn click_toggle(&self) -> Result<bool, String> {

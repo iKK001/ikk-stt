@@ -1146,3 +1146,23 @@ async fn refined_thought_arriving_at_stop_still_replaces_the_typed_text() {
     let typed = log.typed.lock().unwrap().concat();
     assert!(typed.ends_with("the whole thought at stop"), "typed: {typed:?}");
 }
+
+#[test]
+fn replacement_follows_case_and_sign_of_the_replaced_text() {
+    assert_eq!(super::shape_replacement("Haus", "maus"), "Maus");
+    assert_eq!(super::shape_replacement("haus", "Maus"), "maus");
+    assert_eq!(super::shape_replacement("Haus,", "Maus"), "Maus,");
+    assert_eq!(
+        super::shape_replacement("das alte Haus.", "das neue Haus"),
+        "das neue Haus."
+    );
+    assert_eq!(super::shape_replacement("Haus", "  "), "");
+    assert_eq!(super::shape_replacement("das", "Korner"), "Korner");
+    // The recogniser's sentence capital and full stop go for a short
+    // replacement of a lowercase word (the word list is case-blind, so a
+    // noun put in for an adjective loses its capital too; names it does
+    // not know keep theirs).
+    assert_eq!(super::shape_replacement("alte", "Neue."), "neue");
+    assert_eq!(super::shape_replacement("alte", "Haus"), "haus");
+    assert_eq!(super::shape_replacement("alte Haus", "Neue Scheune."), "Neue Scheune");
+}

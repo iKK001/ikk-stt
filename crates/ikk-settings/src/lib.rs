@@ -107,10 +107,6 @@ pub struct TextSettings {
     /// or "click_to_click" (from one click position to the next).
     #[serde(default = "default_correction_range")]
     pub correction_range: String,
-    /// Word stems whose feminine plural gets the gender colon: "Autor" →
-    /// "Autor:innen" (also from "Autor innen", "AutorInnen", "Autor*innen").
-    #[serde(default = "default_gender_colon_words")]
-    pub gender_colon_words: Vec<String>,
     /// German: the gender colon for every feminine plural of a person the
     /// word list knows ("Lehrerinnen" → "Lehrer:innen"), on the device.
     #[serde(default = "default_true")]
@@ -126,10 +122,6 @@ fn default_corrector() -> String {
 
 fn default_correction_range() -> String {
     "cursor_to_end".into()
-}
-
-fn default_gender_colon_words() -> Vec<String> {
-    ["Autor", "Lektor", "Leser"].map(String::from).to_vec()
 }
 
 /// Learned words and whether they are used. Stored with the settings, on
@@ -424,17 +416,20 @@ impl Default for ProviderSettings {
 }
 
 impl Default for SoundSettings {
+    /// The plain setup (the Default profile): automatic gain and nothing
+    /// else. Every filter tuned for particular voices is off and chosen
+    /// per personal profile.
     fn default() -> Self {
         Self {
             preamp_gain_db: 0.0,
-            impaired_voice: true,
+            impaired_voice: false,
             agc: true,
             gate: false,
             highpass_hz: 0.0,
             presence_db: 0.0,
             compressor: false,
             trill_filler: false,
-            noise_profile: true,
+            noise_profile: false,
             path_eq_db: Vec::new(),
             denoise: Denoise::Off,
             ios_session_mode: IosSessionMode::Default,
@@ -445,17 +440,18 @@ impl Default for SoundSettings {
 
 impl Default for VadSettings {
     fn default() -> Self {
-        // The "word by word" preset, measured on impaired speech: quick
-        // 3 s chunks, a thought ends after 4 s, then it is re-checked whole.
-        // Fluent speakers switch to 2 s / 0.9 s without re-check.
+        // The plain setup: a 0.9 s pause ends a piece, batch providers get
+        // 1.5 s pieces, no re-check, no agreed-words voting. The impaired
+        // preset (3 s pieces, 4 s pause, voting) is a personal profile's
+        // choice; its step, window and span values stay as defaults here.
         Self {
             silence_threshold_db: -45.0,
-            silence_duration_ms: 4000,
+            silence_duration_ms: 900,
             long_pause_ms: 2500,
-            chunk_interval_ms: 3000,
-            refine: true,
-            type_quick_text: true,
-            agreement: true,
+            chunk_interval_ms: 1500,
+            refine: false,
+            type_quick_text: false,
+            agreement: false,
             agreement_step_ms: 1000,
             agreement_windows: 4,
             agreement_span_ms: 8_000,
@@ -522,19 +518,16 @@ impl Settings {
         if self.schema_version < 3 && self.sound.vad.chunk_interval_ms == 12000 {
             self.sound.vad.chunk_interval_ms = Self::default().sound.vad.chunk_interval_ms;
         }
-        // v4: the defaults tuned for fluent speech (2 s chunks, 0.9 s
-        // pause, live streams, RNNoise) gave word salad for the people
-        // this is built for; every install moves to the word-by-word
-        // preset. The Fluent preset is one tap away.
+        // v4 (historical): installs before the profiles moved to the
+        // defaults of the day with RNNoise off. Today's defaults are the
+        // plain setup; the app's profile store sorts an old file into the
+        // Default profile and, when it was tuned, a personal one.
         if self.schema_version < 4 {
             let d = Self::default();
             self.sound.vad.chunk_interval_ms = d.sound.vad.chunk_interval_ms;
             self.sound.vad.silence_duration_ms = d.sound.vad.silence_duration_ms;
-            self.sound.vad.refine = true;
+            self.sound.vad.refine = d.sound.vad.refine;
             self.sound.denoise = Denoise::Off;
-            for o in self.providers.options.values_mut() {
-                o.transfer = TransferMode::Batch;
-            }
         }
         if self.schema_version < SCHEMA_VERSION {
             self.schema_version = SCHEMA_VERSION;
@@ -559,8 +552,11 @@ mod tests {
         let s = Settings::default();
         let back = Settings::from_json(&s.to_json().unwrap()).unwrap();
         assert_eq!(back.providers.active, "elevenlabs");
-        assert_eq!(back.sound.vad.silence_duration_ms, 4000);
-        assert!(back.sound.vad.refine);
+        assert_eq!(back.sound.vad.silence_duration_ms, 900);
+        assert!(!back.sound.vad.refine);
+        assert!(!back.sound.vad.agreement);
+        assert!(!back.sound.impaired_voice);
+        assert!(!back.sound.noise_profile);
         assert!(back.microphone.device_id.is_none());
         assert_eq!(back.active_options().transfer, TransferMode::Batch);
     }
@@ -616,11 +612,11 @@ mod tests {
             };
             s.sound.vad.chunk_interval_ms = 12000;
             s.migrate();
-            assert_eq!(s.sound.vad.chunk_interval_ms, 3000);
+            assert_eq!(s.sound.vad.chunk_interval_ms, 1500);
             assert_eq!(s.schema_version, SCHEMA_VERSION);
         }
-        // v3 installs ran the fluent defaults: they move to the preset,
-        // their provider entries to batch, RNNoise off.
+        // v3 installs: chunk and pause to the defaults, RNNoise off; the
+        // transfer choice is kept.
         let mut s = Settings {
             schema_version: 3,
             ..Default::default()
@@ -637,11 +633,11 @@ mod tests {
             },
         );
         s.migrate();
-        assert_eq!(s.sound.vad.chunk_interval_ms, 3000);
-        assert_eq!(s.sound.vad.silence_duration_ms, 4000);
-        assert!(s.sound.vad.refine);
+        assert_eq!(s.sound.vad.chunk_interval_ms, 1500);
+        assert_eq!(s.sound.vad.silence_duration_ms, 900);
+        assert!(!s.sound.vad.refine);
         assert_eq!(s.sound.denoise, Denoise::Off);
-        assert_eq!(s.providers.options["elevenlabs"].transfer, TransferMode::Batch);
+        assert_eq!(s.providers.options["elevenlabs"].transfer, TransferMode::Streaming);
         // A current file is left alone.
         let mut s = Settings::default();
         s.sound.vad.chunk_interval_ms = 2000;

@@ -1637,6 +1637,7 @@ dependencies = [
  "flutter_rust_bridge",
  "ikk-engine",
  "ikk-ffi",
+ "ikk-output",
  "ikk-overlay",
  "ikk-wake",
  "log",

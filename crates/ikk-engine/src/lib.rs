@@ -143,6 +143,9 @@ pub enum CorrectionRange {
     /// clicks and makes the selection (see `ikk_overlay::capture_clicks`),
     /// then asks for [`CorrectionRange::Selection`].
     ClickToClick,
+    /// The word under one click. The shell captures the click, selects the
+    /// word with a double-click and asks for [`CorrectionRange::Selection`].
+    Word,
     /// The text is selected already: copy it as it is.
     Selection,
 }
@@ -153,6 +156,7 @@ impl CorrectionRange {
         match s.trim() {
             "whole_text" => CorrectionRange::WholeText,
             "click_to_click" => CorrectionRange::ClickToClick,
+            "single_word" => CorrectionRange::Word,
             _ => CorrectionRange::CursorToEnd,
         }
     }
@@ -161,6 +165,10 @@ impl CorrectionRange {
 /// An on-demand correction (the correction button next to the microphone).
 #[derive(Debug, Clone)]
 pub struct CorrectRequest {
+    /// The host (a phone's accessibility service, a keyboard) already
+    /// selected the text and hands it over; the answer goes back as
+    /// [`EngineEvent::HostReplace`] instead of a paste.
+    pub host_text: Option<String>,
     pub range: CorrectionRange,
     /// Corrector id ("languagetool", "openai", "anthropic").
     pub corrector: String,
@@ -191,6 +199,26 @@ struct Correction {
     /// A delayed retry is already on its way.
     tick_pending: bool,
 }
+
+/// Replace by voice: the words spoken for a selection.
+struct ReplaceByVoice {
+    original: String,
+    prior_clipboard: Option<String>,
+    collected: String,
+    /// The engine opened the session for this and closes it afterwards.
+    own_session: bool,
+    started: Instant,
+    last_final: Option<Instant>,
+    /// The voice detector hears speech right now.
+    speech: bool,
+}
+
+/// Replace by voice: the thought counts as finished this long after the
+/// last words came back with no speech going on (batch answers for the
+/// tail of a thought take a moment to arrive).
+const REPLACE_SETTLE: Duration = Duration::from_millis(2000);
+/// Nothing heard for this long: the selection is left as it was.
+const REPLACE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Rest after the checker said "too many requests".
 const CORRECTION_PAUSE: Duration = Duration::from_secs(60);
@@ -231,6 +259,17 @@ pub enum EngineCommand {
     CorrectionTick(u64),
     /// The correction button: correct the chosen range in the focused app.
     CorrectRange(CorrectRequest),
+    /// Replace by voice: select `range` in the app in front (or take the
+    /// selection as it is), listen for one thought and paste it over the
+    /// selection. `start`: how to open a session when none is running.
+    ReplaceByVoice {
+        range: CorrectionRange,
+        start: Option<Box<StartConfig>>,
+        /// See [`CorrectRequest::host_text`].
+        host_text: Option<String>,
+    },
+    /// Internal: the spoken replacement has settled (or timed out).
+    ReplaceTick(u64),
     /// The corrector answered for a range correction.
     ApplyRangeCorrection {
         original: String,
@@ -266,6 +305,22 @@ pub enum EngineEvent {
     Suggestion(String),
     /// The correction button finished: the range was replaced (`changed`)
     /// or needed no change; `chars` of text were looked at.
+    /// A host that selected the text itself: put `text` over its selection
+    /// (the answer of a correction or a replacement by voice).
+    HostReplace {
+        text: String,
+    },
+    /// Replace by voice: the selection is read and the engine listens.
+    ReplaceListening {
+        original: String,
+    },
+    /// Replace by voice is over: `to` was pasted over `from` (`changed`),
+    /// or nothing was heard and the selection was left as it was.
+    Replaced {
+        from: String,
+        to: String,
+        changed: bool,
+    },
     Corrected {
         changed: bool,
         chars: usize,
@@ -431,6 +486,12 @@ pub struct Engine {
     typed_log: Vec<(Instant, usize)>,
     /// Stopping by voice: text still in flight belongs to the stop word.
     discard_pending: bool,
+    /// Replace by voice in progress: the selection waits for the words.
+    replace: Option<ReplaceByVoice>,
+    /// The running correction or replacement works on text a host selected:
+    /// the result goes back as `HostReplace`, nothing is pasted here.
+    host_mode: bool,
+    replace_generation: u64,
     /// The session is draining after a spoken stop: a late final that is
     /// the stop phrase is dropped, everything else is typed.
     voice_stopped: bool,
@@ -485,6 +546,9 @@ impl Engine {
             voice: None,
             typed_log: Vec::new(),
             discard_pending: false,
+            replace: None,
+            replace_generation: 0,
+            host_mode: false,
             voice_stopped: false,
             language: String::new(),
         };
@@ -642,6 +706,18 @@ impl Engine {
                 self.correct_range(req).await;
                 Ok(())
             }
+            EngineCommand::ReplaceByVoice {
+                range,
+                start,
+                host_text,
+            } => {
+                self.replace_by_voice(range, start, host_text).await;
+                Ok(())
+            }
+            EngineCommand::ReplaceTick(generation) => {
+                self.replace_tick(generation).await;
+                Ok(())
+            }
             EngineCommand::ApplyRangeCorrection {
                 original,
                 prior_clipboard,
@@ -759,7 +835,7 @@ impl Engine {
         c.in_flight = true;
         c.dirty = false;
         c.last_request = Some(Instant::now());
-        corrector.set_gender_colon(self.text_cfg.gender_colon_auto || !self.text_cfg.gender_colon.is_empty());
+        corrector.set_gender_colon(self.text_cfg.gender_colon_auto);
         let (generation, language, tx) = (c.generation, c.language.clone(), self.self_tx.clone());
         tokio::spawn(async move {
             let (result, throttled) = match corrector.correct(&text, &language, credential.as_deref()).await {
@@ -1131,10 +1207,17 @@ impl Engine {
         let ended = match self.vad.as_mut().map(|v| v.process(&frame.samples)) {
             Some(Some(VadEvent::SpeechStarted)) => {
                 let _ = self.events.try_send(EngineEvent::Speech(true));
+                if let Some(r) = self.replace.as_mut() {
+                    r.speech = true;
+                }
                 false
             }
             Some(Some(VadEvent::SpeechEnded)) => {
                 let _ = self.events.try_send(EngineEvent::Speech(false));
+                if let Some(r) = self.replace.as_mut() {
+                    r.speech = false;
+                    self.schedule_replace_tick();
+                }
                 true
             }
             _ => false,
@@ -1161,6 +1244,10 @@ impl Engine {
                 tracing::debug!(text = %text, "final");
                 let processed = ikk_text::process(&self.text_cfg, &text);
                 if processed.is_empty() {
+                    return;
+                }
+                if self.replace.is_some() {
+                    self.collect_replacement(processed).await;
                     return;
                 }
                 if !self.command_locale.is_empty() {
@@ -1355,6 +1442,10 @@ impl Engine {
     }
 
     async fn stop(&mut self) {
+        if self.replace.is_some() {
+            // The session closes anyway; the words so far go in.
+            let _ = self.finish_replace().await;
+        }
         if self.capture.is_none() && self.session.is_none() {
             if self.state != EngineState::Idle && self.state != EngineState::Error {
                 self.set_state(EngineState::Idle).await;
@@ -1452,6 +1543,232 @@ impl Engine {
         self.set_state(EngineState::Idle).await;
     }
 
+    /// Replace by voice: the selection (made by the shell, or made here
+    /// from `range`) is read, the engine listens — in the running session,
+    /// or in one it opens from `start` — and the first thought is pasted
+    /// over the selection. Desktop only; the mobile hosts do it themselves.
+    async fn replace_by_voice(
+        &mut self,
+        range: CorrectionRange,
+        start: Option<Box<StartConfig>>,
+        host_text: Option<String>,
+    ) {
+        if self.replace.is_some() || self.hold.is_some() {
+            self.say_error("replace: a correction is running already").await;
+            return;
+        }
+        if matches!(self.state, EngineState::AwaitingConsent | EngineState::Error) {
+            self.say_error("replace: not while the engine waits for consent or shows an error")
+                .await;
+            return;
+        }
+        if matches!(range, CorrectionRange::ClickToClick | CorrectionRange::Word) {
+            self.say_error("replace: click to click and single word need the app's floating button")
+                .await;
+            return;
+        }
+        let own_session = self.session.is_none();
+        if own_session {
+            let Some(mut cfg) = start else {
+                self.say_error("replace: no dictation running and no settings to start one")
+                    .await;
+                return;
+            };
+            // A replacement is one short thought, often one word: the agreed-
+            // words voting needs several readings of the same speech and
+            // would drop it, the re-check would come too late. One plain
+            // reading, a short pause, pieces cut soon after the speech.
+            cfg.session.agreement = None;
+            cfg.session.refine = false;
+            cfg.session.refine_preview = false;
+            cfg.pause = cfg.pause.min(Duration::from_millis(1500));
+            cfg.session.endpointing = cfg.pause;
+            cfg.session.chunk_interval = cfg.session.chunk_interval.min(Duration::from_millis(1500));
+            cfg.correction = false;
+            if let Err(e) = self.start(*cfg).await {
+                self.say_error(&format!("replace: {e}")).await;
+                return;
+            }
+            if self.session.is_none() {
+                // Consent or setup is being asked for; the user tries again.
+                return;
+            }
+        }
+        self.hold = Some(String::new());
+        self.correcting = Some(range);
+        self.host_mode = host_text.is_some();
+        let selected = match host_text {
+            Some(t) => Ok((t, None)),
+            None => tokio::task::spawn_blocking(move || select_and_copy(range))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string())),
+        };
+        let (original, prior_clipboard) = match selected {
+            Ok(v) => v,
+            Err(e) => {
+                self.host_mode = false;
+                self.say_error(&format!("replace: {e}")).await;
+                self.end_hold(false).await;
+                if own_session {
+                    self.discard_pending = true;
+                    self.stop().await;
+                    self.discard_pending = false;
+                }
+                return;
+            }
+        };
+        info!(
+            chars = original.chars().count(),
+            own_session, "replace by voice: listening for the words"
+        );
+        self.replace = Some(ReplaceByVoice {
+            original: original.clone(),
+            prior_clipboard,
+            collected: String::new(),
+            own_session,
+            started: Instant::now(),
+            last_final: None,
+            speech: false,
+        });
+        self.schedule_replace_tick();
+        let _ = self.events.send(EngineEvent::ReplaceListening { original }).await;
+    }
+
+    /// A final while a replacement runs: the words are the replacement;
+    /// a spoken stop ends it at once; spoken signs are rendered.
+    async fn collect_replacement(&mut self, processed: String) {
+        let mut text = processed;
+        if !self.command_locale.is_empty() {
+            if ikk_commands::match_command(&text, &self.command_locale) == Some(ikk_commands::Intent::StopDictation) {
+                self.finish_and_close().await;
+                return;
+            }
+            if let Some((before, ikk_commands::Intent::StopDictation)) =
+                ikk_commands::split_trailing_any(&text, &self.command_locale)
+            {
+                if let Some(r) = self.replace.as_mut() {
+                    if !before.trim().is_empty() {
+                        if !r.collected.is_empty() {
+                            r.collected.push(' ');
+                        }
+                        r.collected.push_str(before.trim());
+                    }
+                }
+                self.finish_and_close().await;
+                return;
+            }
+            let quotes = commands::quotation_marks(&self.language);
+            if let Some(inline) = ikk_commands::apply_inline(&text, &self.command_locale, quotes) {
+                text = inline.text;
+            }
+        }
+        if let Some(r) = self.replace.as_mut() {
+            if !text.trim().is_empty() {
+                if !r.collected.is_empty() {
+                    r.collected.push(' ');
+                }
+                r.collected.push_str(text.trim());
+            }
+            r.last_final = Some(Instant::now());
+        }
+        self.schedule_replace_tick();
+    }
+
+    fn schedule_replace_tick(&mut self) {
+        self.replace_generation += 1;
+        let (generation, tx) = (self.replace_generation, self.self_tx.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(REPLACE_SETTLE).await;
+            let _ = tx.send(EngineCommand::ReplaceTick(generation)).await;
+        });
+    }
+
+    /// The settle time is up: finish when words came and the speaker is
+    /// quiet, wait on while the speaker talks or nothing came yet, give
+    /// up after the timeout.
+    async fn replace_tick(&mut self, generation: u64) {
+        if generation != self.replace_generation {
+            return;
+        }
+        let Some(r) = self.replace.as_ref() else { return };
+        if r.speech {
+            self.schedule_replace_tick();
+            return;
+        }
+        if r.collected.is_empty() {
+            if r.started.elapsed() >= REPLACE_TIMEOUT {
+                info!("replace by voice: nothing heard; the selection stays");
+                self.finish_and_close().await;
+            } else {
+                self.schedule_replace_tick();
+            }
+            return;
+        }
+        if r.last_final
+            .is_some_and(|t| t.elapsed() >= REPLACE_SETTLE - Duration::from_millis(50))
+        {
+            self.finish_and_close().await;
+        } else {
+            self.schedule_replace_tick();
+        }
+    }
+
+    /// Finish, and close the session when the replacement opened it.
+    async fn finish_and_close(&mut self) {
+        if self.finish_replace().await {
+            self.discard_pending = true;
+            self.stop().await;
+            self.discard_pending = false;
+        }
+    }
+
+    /// Paste the collected words over the selection (or leave it when
+    /// nothing came) and free the field. Returns whether the replacement
+    /// had opened the session itself (the caller closes it).
+    async fn finish_replace(&mut self) -> bool {
+        let Some(r) = self.replace.take() else { return false };
+        self.replace_generation += 1;
+        let text = shape_replacement(&r.original, &r.collected);
+        let prior = r.prior_clipboard.clone();
+        let changed = !text.is_empty();
+        let host = std::mem::take(&mut self.host_mode);
+        let outcome = if host {
+            if changed {
+                let _ = self.events.send(EngineEvent::HostReplace { text: text.clone() }).await;
+            }
+            Ok(())
+        } else if changed {
+            let t = text.clone();
+            tokio::task::spawn_blocking(move || paste_over_selection(&t, prior))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        } else {
+            tokio::task::spawn_blocking(move || leave_selection(prior))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        };
+        info!(
+            from = %r.original,
+            to = %text,
+            changed,
+            ms = r.started.elapsed().as_millis() as u64,
+            "replace by voice done"
+        );
+        if let Err(e) = outcome {
+            self.say_error(&format!("replace: {e}")).await;
+        }
+        let _ = self
+            .events
+            .send(EngineEvent::Replaced {
+                from: r.original,
+                to: text,
+                changed,
+            })
+            .await;
+        self.end_hold(true).await;
+        r.own_session
+    }
+
     /// The correction button: select the range in the focused app, copy
     /// it, send it to the corrector, then paste the answer over the
     /// selection. Desktop only; the mobile hosts do it themselves.
@@ -1480,10 +1797,10 @@ impl Engine {
                 .await;
             return;
         }
-        if req.range == CorrectionRange::ClickToClick {
-            // The shell turns the two clicks into a selection first; a
-            // request that still says click-to-click came without a shell.
-            self.say_error("correction: click to click needs the app's floating button")
+        if matches!(req.range, CorrectionRange::ClickToClick | CorrectionRange::Word) {
+            // The shell turns the clicks into a selection first; a request
+            // that still names clicks came without a shell.
+            self.say_error("correction: click to click and single word need the app's floating button")
                 .await;
             return;
         }
@@ -1492,12 +1809,17 @@ impl Engine {
         // correction is through; words that arrive meanwhile wait.
         self.hold = Some(String::new());
         self.correcting = Some(range);
-        let selected = tokio::task::spawn_blocking(move || select_and_copy(range))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+        self.host_mode = req.host_text.is_some();
+        let selected = match req.host_text.clone() {
+            Some(t) => Ok((t, None)),
+            None => tokio::task::spawn_blocking(move || select_and_copy(range))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string())),
+        };
         let (original, prior_clipboard) = match selected {
             Ok(v) => v,
             Err(e) => {
+                self.host_mode = false;
                 self.say_error(&format!("correction: {e}")).await;
                 self.end_hold(false).await;
                 return;
@@ -1510,7 +1832,7 @@ impl Engine {
             "correcting a range; the field is held meanwhile"
         );
         corrector.set_model(&req.model);
-        corrector.set_gender_colon(self.text_cfg.gender_colon_auto || !self.text_cfg.gender_colon.is_empty());
+        corrector.set_gender_colon(self.text_cfg.gender_colon_auto);
         let (language, tx) = (req.language.clone(), self.self_tx.clone());
         tokio::spawn(async move {
             let started = Instant::now();
@@ -1548,7 +1870,13 @@ impl Engine {
         prior: Option<String>,
         result: Result<Option<String>, String>,
     ) {
+        let host = std::mem::take(&mut self.host_mode);
         let outcome = match result {
+            Ok(Some(text)) if host => {
+                let chars = text.chars().count();
+                let _ = self.events.send(EngineEvent::HostReplace { text }).await;
+                Ok((true, chars))
+            }
             Ok(Some(text)) => {
                 let chars = text.chars().count();
                 tokio::task::spawn_blocking(move || paste_over_selection(&text, prior))
@@ -1558,11 +1886,15 @@ impl Engine {
             }
             Ok(None) => {
                 let chars = original.chars().count();
-                let _ = tokio::task::spawn_blocking(move || leave_selection(prior)).await;
+                if !host {
+                    let _ = tokio::task::spawn_blocking(move || leave_selection(prior)).await;
+                }
                 Ok((false, chars))
             }
             Err(e) => {
-                let _ = tokio::task::spawn_blocking(move || leave_selection(prior)).await;
+                if !host {
+                    let _ = tokio::task::spawn_blocking(move || leave_selection(prior)).await;
+                }
                 Err(e)
             }
         };
@@ -1583,7 +1915,11 @@ impl Engine {
     /// back meanwhile are typed.
     async fn end_hold(&mut self, changed: bool) {
         let range = self.correcting.take();
-        let moved = changed || matches!(range, Some(CorrectionRange::ClickToClick | CorrectionRange::Selection));
+        let moved = changed
+            || matches!(
+                range,
+                Some(CorrectionRange::ClickToClick | CorrectionRange::Word | CorrectionRange::Selection)
+            );
         if moved {
             self.live.reset();
             self.last_segment = None;
@@ -1774,6 +2110,47 @@ fn same_standby_capture(a: &StartConfig, b: &StartConfig) -> bool {
 #[cfg(test)]
 mod tests;
 
+/// The spoken words shaped to the place they go: the case of the first
+/// letter follows the replaced text, and a sign that ended the replaced
+/// text (a comma, a full stop) is kept when the speaker did not say one.
+fn shape_replacement(original: &str, spoken: &str) -> String {
+    let mut text = spoken.trim().to_string();
+    if text.is_empty() {
+        return text;
+    }
+    let orig = original.trim();
+    let first_orig = orig.chars().next();
+    let first_new = text.chars().next();
+    // Capitalised stays capitalised (a sentence start, a noun). The
+    // recogniser capitalises the first word of anything it hears: for a
+    // lowercase word replaced by one word, the capital goes again when
+    // the lowercase form is an ordinary word (names and German nouns keep
+    // theirs). A full stop the recogniser added to a short replacement
+    // goes too when the replaced text had none.
+    if let (Some(o), Some(n)) = (first_orig, first_new) {
+        if o.is_uppercase() && n.is_lowercase() {
+            text = n.to_uppercase().chain(text.chars().skip(1)).collect();
+        } else if o.is_lowercase() && n.is_uppercase() && !orig.contains(' ') && !text.contains(' ') {
+            let lowered: String = n.to_lowercase().chain(text.chars().skip(1)).collect();
+            let word = lowered.trim_end_matches(|c: char| ".,;:!?".contains(c));
+            if ikk_text::dictionary::is_word(word) {
+                text = lowered;
+            }
+        }
+    }
+    if text.ends_with('.') && !orig.ends_with(|c: char| ".,;:!?".contains(c)) && text.split_whitespace().count() <= 3 {
+        text.pop();
+    }
+    let last_orig = orig.chars().next_back();
+    let last_new = text.chars().next_back();
+    if let (Some(o), Some(n)) = (last_orig, last_new) {
+        if ".,;:!?".contains(o) && !".,;:!?".contains(n) {
+            text.push(o);
+        }
+    }
+    text
+}
+
 mod range_keys {
     //! The correction button's keystrokes: select, copy, paste, and the
     //! user's clipboard put back afterwards.
@@ -1793,7 +2170,7 @@ mod range_keys {
         let prior = d::clipboard_text();
         let _ = d::set_clipboard_text(MARKER);
         let select = match range {
-            CorrectionRange::Selection => None,
+            CorrectionRange::Selection | CorrectionRange::Word | CorrectionRange::ClickToClick => None,
             CorrectionRange::WholeText => Some(Chord::shortcut('a')),
             _ => Some({
                 let m = Modifiers {

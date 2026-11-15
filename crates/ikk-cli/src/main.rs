@@ -193,6 +193,31 @@ enum Cmd {
         #[arg(long, value_delimiter = ',', num_args = 4)]
         between: Option<Vec<f64>>,
     },
+    /// Replace by voice in the app in front: the word under `--at x,y`
+    /// (double-clicked first), the current selection, or the range named
+    /// by `--range`; the engine listens (microphone, or `--mic file:…`) and
+    /// pastes what is said over it. `--delay` seconds to focus the text.
+    Replace {
+        #[arg(long, default_value = "elevenlabs")]
+        provider: String,
+        #[arg(long)]
+        key_env: Option<String>,
+        #[arg(long)]
+        key_from_app: bool,
+        #[arg(long, default_value = "deu")]
+        language: String,
+        /// `file:<wav>` replays a recording as the microphone.
+        #[arg(long)]
+        mic: Option<String>,
+        /// selection | cursor_to_end | whole_text
+        #[arg(long, default_value = "selection")]
+        range: String,
+        /// Screen point "x,y": the word under it is selected by a double-click.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        at: Option<Vec<f64>>,
+        #[arg(long, default_value_t = 3)]
+        delay: u64,
+    },
     /// Dictate from the microphone to stdout: live interim line, finals appended.
     /// `--mic file:/path/to.wav` replays a recording as the microphone.
     Dictate {
@@ -740,9 +765,34 @@ async fn main() -> anyhow::Result<()> {
                 corrector: corrector.clone(),
                 model,
                 language,
+                host_text: None,
             };
             {
                 run_correct(corrector, key, req, delay, between).await
+            }
+        }
+        Cmd::Replace {
+            provider,
+            key_env,
+            key_from_app,
+            language,
+            mic,
+            range,
+            at,
+            delay,
+        } => {
+            let key = if key_from_app {
+                credential_from_app(&provider)?
+            } else {
+                credential_from_env(&provider, key_env.as_deref())?
+            };
+            let at = match at {
+                Some(v) if v.len() == 2 => Some((v[0], v[1])),
+                Some(_) => anyhow::bail!("--at needs x,y"),
+                None => None,
+            };
+            {
+                run_replace(provider, key, language, mic, range, at, delay).await
             }
         }
         Cmd::Dictate {
@@ -1130,6 +1180,83 @@ impl TextSink for StdoutSink {
 
 /// The correction button's flow with a fresh engine: key, consent, wait,
 /// correct, report.
+/// Replace by voice (see `Cmd::Replace`).
+async fn run_replace(
+    provider: String,
+    key: String,
+    language: String,
+    mic: Option<String>,
+    range: String,
+    at: Option<(f64, f64)>,
+    delay: u64,
+) -> anyhow::Result<()> {
+    let mut reg = ProviderRegistry::new();
+    ikk_providers::register_all(&mut reg);
+    let pid = ProviderId(provider.clone());
+    if reg.get(&pid).is_none() {
+        anyhow::bail!("unknown provider {provider}");
+    }
+    let mut settings = settings_path()
+        .and_then(|p| Ok(ikk_settings::Settings::load(&p)?))
+        .unwrap_or_default();
+    settings.providers.active = provider.clone();
+    settings.providers.language = language;
+    settings.microphone.device_id = mic;
+    let start = ikk_engine::config::start_config(&settings);
+    let mut engine = Engine::spawn(reg, ikk_output::default_sink());
+    engine
+        .send(EngineCommand::SetCredential(pid.clone(), Secret::new(key)))
+        .await;
+    engine.send(EngineCommand::GrantConsent(provider.clone())).await;
+    eprintln!("focus the text … {delay} s");
+    tokio::time::sleep(Duration::from_secs(delay)).await;
+    if let Some((x, y)) = at {
+        tokio::task::spawn_blocking(move || ikk_output::desktop::double_click_at(x, y))
+            .await?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    let range = if at.is_some() || range == "selection" {
+        ikk_engine::CorrectionRange::Selection
+    } else {
+        ikk_engine::CorrectionRange::parse(&range)
+    };
+    engine
+        .send(EngineCommand::ReplaceByVoice {
+            range,
+            start: Some(Box::new(start)),
+            host_text: None,
+        })
+        .await;
+    let started = Instant::now();
+    loop {
+        let left = Duration::from_secs(90).saturating_sub(started.elapsed());
+        match tokio::time::timeout(left, engine.events.recv()).await {
+            Ok(Some(EngineEvent::ReplaceListening { original })) => {
+                eprintln!("listening for the words that replace {original:?} …");
+            }
+            Ok(Some(EngineEvent::Replaced { from, to, changed })) => {
+                eprintln!(
+                    "replaced after {:.1} s: {from:?} -> {to:?} (changed={changed})",
+                    started.elapsed().as_secs_f32()
+                );
+                break;
+            }
+            Ok(Some(EngineEvent::Error(e))) => {
+                eprintln!("[error] {e}");
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                eprintln!("no answer within 90 s");
+                break;
+            }
+        }
+    }
+    engine.shutdown().await;
+    Ok(())
+}
+
 async fn run_correct(
     corrector: String,
     key: String,

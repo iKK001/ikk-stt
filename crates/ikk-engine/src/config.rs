@@ -17,6 +17,7 @@ pub fn correct_request(settings: &Settings) -> crate::CorrectRequest {
         corrector: settings.text.corrector.clone(),
         model: settings.text.ai_model.clone(),
         language: settings.providers.language.clone(),
+        host_text: None,
     }
 }
 
@@ -92,7 +93,7 @@ pub fn start_config(settings: &Settings) -> StartConfig {
             auto_casing: false,
             vocabulary: Vec::new(),
             learned: settings.text.training.learned_words(),
-            gender_colon: settings.text.gender_colon_words.clone(),
+            gender_colon: Vec::new(),
             gender_colon_auto: settings.text.gender_colon_auto
                 && matches!(settings.providers.language.as_str(), "deu" | "gsw"),
         },
@@ -121,8 +122,9 @@ mod tests {
         let c = start_config(&s);
         assert_eq!(c.session.provider.0, "elevenlabs");
         assert_eq!(c.session.transfer, TransferMode::Batch);
-        assert_eq!(c.pause, Duration::from_millis(4000));
-        assert!(c.session.refine);
+        assert_eq!(c.pause, Duration::from_millis(900));
+        assert!(!c.session.refine);
+        assert!(c.session.agreement.is_none());
         assert_eq!(c.vad_mode, VadMode::Normal);
         assert_eq!(c.command_locale, "de-CH");
         assert!(!c.capture.denoise);

@@ -9,9 +9,9 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CombineRgn, CreateEllipticRgn, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
-    Ellipse, EndPaint, InvalidateRect, LineTo, MoveToEx, Polygon, SelectObject, SetBkMode, SetGraphicsMode,
-    SetTextColor, SetWindowRgn, SetWorldTransform, DT_CENTER, DT_SINGLELINE, DT_VCENTER, GM_ADVANCED, PAINTSTRUCT,
-    PS_SOLID, RGN_OR, TRANSPARENT, XFORM,
+    Ellipse, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx, Polygon, SelectClipRgn, SelectObject, SetBkMode,
+    SetGraphicsMode, SetTextColor, SetWindowRgn, SetWorldTransform, DT_CENTER, DT_SINGLELINE, DT_VCENTER, GM_ADVANCED,
+    PAINTSTRUCT, PS_SOLID, RGN_OR, TRANSPARENT, XFORM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::{OnClicks, OnMoved, OnTap};
+use crate::{Busy, OnClicks, OnMode, OnMoved, OnTap, RangeMode};
 
 const SIZE: i32 = 64;
 const RING: i32 = 3;
@@ -41,15 +41,21 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const HOVER_SCALE: f64 = 1.15;
 const IDLE_SCALE: f64 = 0.72;
 /// How much darker the idle buttons are drawn (multiplied into the colour).
-const DIM: f64 = 0.55;
+const DIM: f64 = 0.8;
 /// Growing and shrinking take this long, eased at both ends; redrawn
 /// every 16 ms by a window timer.
 const ANIM_MS: f64 = 340.0;
 const TIMER_ANIM: usize = 8;
+/// Redraws the rotating arc while the correction button is busy.
+const TIMER_SPIN: usize = 9;
+const MSG_SPIN: u32 = WM_APP + 10;
 // COLORREF is 0x00BBGGRR.
 const BLUE: COLORREF = COLORREF(0x00B3_8600); // #0086B3, brand primary: listening for the start word
 const BRAND: COLORREF = COLORREF(0x00CC_9900); // #0099CC: the correction button
 const ORANGE: COLORREF = COLORREF(0x0000_6CEF); // #EF6C00: waiting for the two clicks
+const YELLOW: COLORREF = COLORREF(0x0000_C7F9); // #F9C700: replace by voice armed
+const INK: COLORREF = COLORREF(0x0000_2E3A); // #3A2E00: glyph on the yellow button
+const WHITE_FACE: COLORREF = COLORREF(0x00FF_FFFF);
 const RED: COLORREF = COLORREF(0x002F_2FD3); // #D32F2F: dictating
 const GRAY: COLORREF = COLORREF(0x0042_4242); // #424242: off
 
@@ -62,7 +68,7 @@ fn dimmed(c: COLORREF, bright: f64) -> COLORREF {
 
 /// The ring and glyph colour: light grey at rest, white at full size.
 fn glyph_colour(bright: f64) -> COLORREF {
-    let v = (0xB8 as f64 + (0xFF - 0xB8) as f64 * bright) as u32;
+    let v = (0xE0 as f64 + (0xFF - 0xE0) as f64 * bright) as u32;
     COLORREF(v | (v << 8) | (v << 16))
 }
 
@@ -76,6 +82,9 @@ const MSG_DISARM: u32 = WM_APP + 5;
 const MSG_MOVE: u32 = WM_APP + 6;
 /// Shrinking switched on or off: window size and shape follow.
 const MSG_SHRINK: u32 = WM_APP + 7;
+/// Show / hide the yellow mark over the text being replaced.
+const MSG_HIGHLIGHT: u32 = WM_APP + 8;
+const MSG_UNHIGHLIGHT: u32 = WM_APP + 9;
 const TIMER_CAPTURE: usize = 7;
 
 /// The running click capture.
@@ -112,6 +121,10 @@ pub fn capture_clicks(count: usize, timeout: Duration, on_done: OnClicks) -> boo
 
 pub fn cancel_capture() -> bool {
     let had = CAPTURE.lock().map(|mut c| c.take().is_some()).unwrap_or(false);
+    if let Ok(mut s) = state().lock() {
+        s.replace_armed = false;
+    }
+    clear_highlight();
     post(MSG_DISARM);
     post(MSG_REDRAW);
     had
@@ -162,7 +175,20 @@ struct State {
     standby: bool,
     on_tap: Option<OnTap>,
     on_correct: Option<OnTap>,
+    on_mode: Option<OnMode>,
     on_moved: Option<OnMoved>,
+    /// The switch: audio correction (true) or AI correction (false).
+    audio_mode: bool,
+    /// 0 idle, 1 listening (yellow arc), 2 processing (red arc).
+    busy: u8,
+    busy_since: Option<Instant>,
+    /// Replace by voice armed: the replace button is yellow.
+    replace_armed: bool,
+    /// The correction button's range: 0 cursor to end, 1 whole text, 2 click to click.
+    range_mode: u8,
+    /// The highlight window (0 = none) and where it should be.
+    highlight_hwnd: isize,
+    highlight_rect: Option<(i32, i32, i32, i32)>,
     /// Last known top-left corner (screen pixels).
     position: Option<(f64, f64)>,
     /// Where MSG_MOVE should put the window.
@@ -186,6 +212,8 @@ struct Layout {
     /// 0 = resting (small, dark), 1 = full size and bright.
     bright: f64,
     with_correct: bool,
+    /// Number of buttons (1–3).
+    count: usize,
     /// An animation is still running.
     animating: bool,
 }
@@ -201,11 +229,11 @@ fn target_scale(shrink: bool, hover: bool) -> f64 {
 }
 
 fn layout() -> Layout {
-    let (with_correct, shrink, hover, anim) = state()
+    let (count, with_correct, shrink, hover, anim) = state()
         .lock()
-        .map(|s| (s.on_correct.is_some(), s.shrink, s.hover, s.anim))
-        .unwrap_or((false, false, false, None));
-    let content = width(with_correct) as f64;
+        .map(|s| (button_count(&s), s.on_correct.is_some(), s.shrink, s.hover, s.anim))
+        .unwrap_or((1, false, false, false, None));
+    let content = width(count) as f64;
     let panel_scale = if shrink { HOVER_SCALE } else { 1.0 };
     let target = target_scale(shrink, hover);
     let mut scale = target;
@@ -235,6 +263,7 @@ fn layout() -> Layout {
         dy: (h - SIZE as f64 * scale) / 2.0,
         bright,
         with_correct,
+        count,
         animating,
     }
 }
@@ -264,10 +293,10 @@ unsafe fn apply_shape(hwnd: HWND, l: Layout) {
         CreateEllipticRgn(left, top, left + d, top + d)
     };
     let region = disc(0.0);
-    if l.with_correct {
-        let second = disc((SIZE + GAP) as f64);
-        let _ = CombineRgn(Some(region), Some(region), Some(second), RGN_OR);
-        let _ = DeleteObject(second.into());
+    for i in 1..l.count {
+        let next = disc(((SIZE + GAP) * i as i32) as f64);
+        let _ = CombineRgn(Some(region), Some(region), Some(next), RGN_OR);
+        let _ = DeleteObject(next.into());
     }
     let _ = SetWindowRgn(hwnd, Some(region), true);
 }
@@ -323,13 +352,80 @@ unsafe fn note_position(hwnd: HWND, dragged: bool) {
     }
 }
 
-/// Window width: one or two buttons.
-fn width(with_correct: bool) -> i32 {
-    if with_correct {
-        SIZE * 2 + GAP
-    } else {
-        SIZE
+/// Window width at scale 1 for `n` buttons.
+fn width(n: usize) -> i32 {
+    SIZE * n as i32 + GAP * (n as i32 - 1)
+}
+
+/// How many buttons the window holds (read under the state lock).
+fn button_count(s: &State) -> usize {
+    1 + usize::from(s.on_correct.is_some()) + usize::from(s.on_mode.is_some())
+}
+
+pub fn set_range_mode(mode: RangeMode) {
+    let v = match mode {
+        RangeMode::CursorToEnd => 0,
+        RangeMode::WholeText => 1,
+        RangeMode::ClickToClick => 2,
+        RangeMode::Word => 3,
+    };
+    if let Ok(mut s) = state().lock() {
+        s.range_mode = v;
     }
+    post(MSG_REDRAW);
+}
+
+pub fn set_busy(busy: Busy) {
+    let v = match busy {
+        Busy::None => 0,
+        Busy::Listening => 1,
+        Busy::Processing => 2,
+    };
+    if let Ok(mut s) = state().lock() {
+        if s.busy == 0 && v != 0 {
+            s.busy_since = Some(Instant::now());
+        }
+        s.busy = v;
+    }
+    post(MSG_SPIN);
+    // The highlight window takes the colour too.
+    post(MSG_HIGHLIGHT_REPAINT);
+}
+
+const MSG_HIGHLIGHT_REPAINT: u32 = WM_APP + 11;
+
+pub fn set_audio_mode(on: bool) {
+    if let Ok(mut s) = state().lock() {
+        s.audio_mode = on;
+    }
+    post(MSG_REDRAW);
+}
+
+pub fn set_replace_armed(on: bool) {
+    if let Ok(mut s) = state().lock() {
+        s.replace_armed = on;
+    }
+    if !on {
+        clear_highlight();
+    }
+    post(MSG_REDRAW);
+}
+
+/// A translucent yellow mark at (`x`, `y`, `w`, `h`) screen pixels.
+pub fn highlight(x: f64, y: f64, w: f64, h: f64) {
+    if let Ok(mut s) = state().lock() {
+        s.highlight_rect = Some((
+            x.round() as i32 - 3,
+            y.round() as i32 - 3,
+            w.round() as i32 + 6,
+            h.round() as i32 + 6,
+        ));
+    }
+    post(MSG_HIGHLIGHT);
+}
+
+pub fn clear_highlight() {
+    post(MSG_UNHIGHLIGHT);
 }
 
 fn state() -> &'static Mutex<State> {
@@ -348,11 +444,12 @@ fn post(msg: u32) {
     }
 }
 
-pub fn show(on_tap: OnTap, on_correct: Option<OnTap>, on_moved: Option<OnMoved>) {
+pub fn show(on_tap: OnTap, on_correct: Option<OnTap>, on_mode: Option<OnMode>, on_moved: Option<OnMoved>) {
     let create = {
         let Ok(mut s) = state().lock() else { return };
         s.on_tap = Some(on_tap);
         s.on_correct = on_correct;
+        s.on_mode = on_mode;
         s.on_moved = on_moved;
         s.hwnd == 0
     };
@@ -519,20 +616,42 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 note_position(hwnd, true);
             }
             if let Some((start, rect, false)) = drag {
-                // Which button: by the x position inside the window.
+                // Which button: by the x position inside the window, in
+                // equal slots.
                 let l = layout();
-                let correct = l.with_correct && start.x - rect.left >= l.width / 2;
+                let slot = (((start.x - rect.left) as f64 / l.width as f64) * l.count as f64)
+                    .floor()
+                    .clamp(0.0, (l.count - 1) as f64) as usize;
+                let which = match (slot, l.with_correct) {
+                    (0, _) => 0,
+                    (1, true) => 1,
+                    _ => 2,
+                };
+                let replace_armed = state().lock().map(|s| s.replace_armed).unwrap_or(false);
                 // The correction button while waiting for clicks: cancel.
-                if correct && is_capturing() {
+                if which == 1 && is_capturing() && !replace_armed {
                     cancel_capture();
                     return LRESULT(0);
                 }
-                let action = state().lock().ok().and_then(|s| {
-                    if correct {
-                        s.on_correct.clone()
-                    } else {
-                        s.on_tap.clone()
+                if which == 2 {
+                    // The switch: any press flips it.
+                    let (audio, on_mode) = state()
+                        .lock()
+                        .ok()
+                        .map(|mut s| {
+                            s.audio_mode = !s.audio_mode;
+                            (s.audio_mode, s.on_mode.clone())
+                        })
+                        .unwrap_or((false, None));
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                    if let Some(on_mode) = on_mode {
+                        std::thread::spawn(move || on_mode(audio));
                     }
+                    return LRESULT(0);
+                }
+                let action = state().lock().ok().and_then(|s| match which {
+                    0 => s.on_tap.clone(),
+                    _ => s.on_correct.clone(),
                 });
                 if let Some(action) = action {
                     // Off the window thread: it talks to the engine.
@@ -602,6 +721,38 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             let _ = InvalidateRect(Some(hwnd), None, true);
             if !l.animating {
                 let _ = KillTimer(Some(hwnd), TIMER_ANIM);
+            }
+            LRESULT(0)
+        }
+        MSG_HIGHLIGHT => {
+            show_highlight();
+            LRESULT(0)
+        }
+        MSG_HIGHLIGHT_REPAINT => {
+            let hl = state().lock().map(|s| s.highlight_hwnd).unwrap_or(0);
+            if hl != 0 {
+                let _ = InvalidateRect(Some(HWND(hl as *mut _)), None, true);
+            }
+            LRESULT(0)
+        }
+        MSG_SPIN => {
+            let busy = state().lock().map(|s| s.busy).unwrap_or(0);
+            if busy != 0 {
+                SetTimer(Some(hwnd), TIMER_SPIN, 50, None);
+            } else {
+                let _ = KillTimer(Some(hwnd), TIMER_SPIN);
+            }
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_SPIN => {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            LRESULT(0)
+        }
+        MSG_UNHIGHLIGHT => {
+            let hl = state().lock().map(|s| s.highlight_hwnd).unwrap_or(0);
+            if hl != 0 {
+                let _ = ShowWindow(HWND(hl as *mut _), SW_HIDE);
             }
             LRESULT(0)
         }
@@ -675,9 +826,18 @@ unsafe fn paint(hwnd: HWND) {
     let old_brush = SelectObject(hdc, brush.into());
     let old_pen = SelectObject(hdc, pen.into());
     let _ = Ellipse(hdc, RING / 2, RING / 2, SIZE - RING / 2, SIZE - RING / 2);
+    let replace_armed = state().lock().map(|s| s.replace_armed).unwrap_or(false);
     if with_correct {
-        // The correction button: brand blue, orange while waiting for clicks.
-        let brush2 = CreateSolidBrush(colour(if is_capturing() { ORANGE } else { BRAND }));
+        // The correction button: brand blue, orange while waiting for
+        // clicks (yellow when the range is for a replacement by voice).
+        let c = if replace_armed {
+            YELLOW
+        } else if is_capturing() {
+            ORANGE
+        } else {
+            BRAND
+        };
+        let brush2 = CreateSolidBrush(colour(c));
         let prev = SelectObject(hdc, brush2.into());
         let x0 = SIZE + GAP;
         let _ = Ellipse(hdc, x0 + RING / 2, RING / 2, x0 + SIZE - RING / 2, SIZE - RING / 2);
@@ -712,40 +872,195 @@ unsafe fn paint(hwnd: HWND) {
     };
     let mut glyph: Vec<u16> = "\u{E720}".encode_utf16().collect();
     DrawTextW(hdc, &mut glyph, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    if with_correct {
-        // A wand with a sparkle: the text gets checked and improved.
-        let (cx, cy) = (SIZE + GAP + SIZE / 2, SIZE / 2);
-        let wand_pen = CreatePen(PS_SOLID, 4, white);
-        let old = SelectObject(hdc, wand_pen.into());
-        let _ = MoveToEx(hdc, cx - 14, cy + 14, None);
-        let _ = LineTo(hdc, cx + 4, cy - 4);
+    let (replace_armed, with_replace, range_mode, audio_mode) = state()
+        .lock()
+        .map(|s| (s.replace_armed, s.on_mode.is_some(), s.range_mode, s.audio_mode))
+        .unwrap_or((false, false, 0, false));
+    let line = |x1: i32, y1: i32, x2: i32, y2: i32, w: i32, c: COLORREF| {
+        let pen = CreatePen(PS_SOLID, w, c);
+        let old = SelectObject(hdc, pen.into());
+        let _ = MoveToEx(hdc, x1, y1, None);
+        let _ = LineTo(hdc, x2, y2);
         SelectObject(hdc, old);
-        let _ = DeleteObject(wand_pen.into());
-        let star = |sx: i32, sy: i32, r: f64| {
-            let inner = r * 0.38;
-            let pts: Vec<POINT> = (0..8)
-                .map(|i| {
-                    let a = std::f64::consts::FRAC_PI_4 * i as f64;
-                    let rr = if i % 2 == 0 { r } else { inner };
-                    POINT {
-                        x: sx + (rr * a.cos()).round() as i32,
-                        y: sy - (rr * a.sin()).round() as i32,
-                    }
-                })
-                .collect();
-            let _ = Polygon(hdc, &pts);
-        };
-        let thin = CreatePen(PS_SOLID, 1, white);
-        let old_pen2 = SelectObject(hdc, thin.into());
-        let white_brush = CreateSolidBrush(white);
-        let old_brush2 = SelectObject(hdc, white_brush.into());
-        star(cx + 11, cy - 11, 9.0);
-        star(cx + 1, cy - 17, 3.5);
-        star(cx + 17, cy - 1, 3.5);
-        SelectObject(hdc, old_brush2);
-        SelectObject(hdc, old_pen2);
-        let _ = DeleteObject(white_brush.into());
+        let _ = DeleteObject(pen.into());
+    };
+    let dot = |x: i32, y: i32, r: i32, c: COLORREF| {
+        let b = CreateSolidBrush(c);
+        let p = CreatePen(PS_SOLID, 1, c);
+        let ob = SelectObject(hdc, b.into());
+        let op = SelectObject(hdc, p.into());
+        let _ = Ellipse(hdc, x - r, y - r, x + r, y + r);
+        SelectObject(hdc, op);
+        SelectObject(hdc, ob);
+        let _ = DeleteObject(p.into());
+        let _ = DeleteObject(b.into());
+    };
+    let star = |sx: i32, sy: i32, r: f64, c: COLORREF| {
+        let inner = r * 0.38;
+        let pts: Vec<POINT> = (0..8)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_4 * i as f64;
+                let rr = if i % 2 == 0 { r } else { inner };
+                POINT {
+                    x: sx + (rr * a.cos()).round() as i32,
+                    y: sy - (rr * a.sin()).round() as i32,
+                }
+            })
+            .collect();
+        let thin = CreatePen(PS_SOLID, 1, c);
+        let brush = CreateSolidBrush(c);
+        let op = SelectObject(hdc, thin.into());
+        let ob = SelectObject(hdc, brush.into());
+        let _ = Polygon(hdc, &pts);
+        SelectObject(hdc, ob);
+        SelectObject(hdc, op);
+        let _ = DeleteObject(brush.into());
         let _ = DeleteObject(thin.into());
+    };
+    if with_correct {
+        // The rotating arc while busy: a quarter turn every 0.9 s.
+        let (busy, since) = state().lock().map(|s| (s.busy, s.busy_since)).unwrap_or((0, None));
+        if busy != 0 {
+            use windows::Win32::Graphics::Gdi::{Arc, SetArcDirection, AD_CLOCKWISE};
+            let t = since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let a0 = (t * 400.0) % 360.0;
+            let a1 = a0 + 110.0;
+            let (cx, cy, r) = (
+                (SIZE + GAP + SIZE / 2) as f64,
+                (SIZE / 2) as f64,
+                (SIZE / 2 - RING / 2) as f64,
+            );
+            let pt = |a: f64| POINT {
+                x: (cx + r * a.to_radians().cos()).round() as i32,
+                y: (cy - r * a.to_radians().sin()).round() as i32,
+            };
+            let colour = if busy == 1 { YELLOW } else { RED };
+            let pen = CreatePen(PS_SOLID, RING + 1, colour);
+            let old = SelectObject(hdc, pen.into());
+            let _ = SetArcDirection(hdc, AD_CLOCKWISE);
+            let (p1, p2) = (pt(a1), pt(a0));
+            let _ = Arc(
+                hdc,
+                SIZE + GAP + RING / 2,
+                RING / 2,
+                SIZE + GAP + SIZE - RING / 2,
+                SIZE - RING / 2,
+                p1.x,
+                p1.y,
+                p2.x,
+                p2.y,
+            );
+            SelectObject(hdc, old);
+            let _ = DeleteObject(pen.into());
+        }
+        // The correction button: the wand, a little smaller and higher, and
+        // the range it corrects as small lines beneath it.
+        let (cx, cy) = (SIZE + GAP + SIZE / 2, SIZE / 2);
+        let ink = if replace_armed { INK } else { white };
+        let (wx, wy) = (cx, cy - 6);
+        line(wx - 10, wy + 9, wx + 3, wy - 4, 4, ink);
+        star(wx + 8, wy - 9, 6.5, ink);
+        star(wx + 1, wy - 13, 2.6, ink);
+        star(wx + 13, wy - 2, 2.6, ink);
+        let gy = cy + 17;
+        match range_mode {
+            2 => {
+                line(cx - 11, gy - 4, cx - 11, gy + 4, 2, ink);
+                line(cx - 11, gy, cx + 11, gy, 2, ink);
+                line(cx + 11, gy - 4, cx + 11, gy + 4, 2, ink);
+            }
+            1 => {
+                line(cx - 11, gy - 5, cx + 11, gy - 5, 2, ink);
+                line(cx - 11, gy, cx + 11, gy, 2, ink);
+                line(cx - 11, gy + 5, cx + 1, gy + 5, 2, ink);
+            }
+            3 => {
+                line(cx - 7, gy + 2, cx + 7, gy + 2, 3, ink);
+                dot(cx, gy - 4, 2, ink);
+            }
+            _ => {
+                line(cx - 12, gy - 4, cx - 12, gy + 4, 2, ink);
+                line(cx - 12, gy, cx + 1, gy, 2, ink);
+                dot(cx + 5, gy, 1, ink);
+                dot(cx + 9, gy, 1, ink);
+                dot(cx + 13, gy, 1, ink);
+            }
+        }
+    }
+    if with_replace {
+        // The switch: a white disc, the lit half brand blue — "AI" above,
+        // "Audio" below.
+        let x0 = (SIZE + GAP) * if with_correct { 2 } else { 1 };
+        let dark_brush = CreateSolidBrush(colour(GRAY));
+        let prev = SelectObject(hdc, dark_brush.into());
+        let _ = Ellipse(hdc, x0 + RING / 2, RING / 2, x0 + SIZE - RING / 2, SIZE - RING / 2);
+        SelectObject(hdc, prev);
+        let _ = DeleteObject(dark_brush.into());
+        // The lit half: clip to the disc, fill a rectangle.
+        let disc = CreateEllipticRgn(x0 + RING / 2, RING / 2, x0 + SIZE - RING / 2, SIZE - RING / 2);
+        let _ = SelectClipRgn(hdc, Some(disc));
+        let lit = CreateSolidBrush(colour(BRAND));
+        let rect = if audio_mode {
+            RECT {
+                left: x0,
+                top: SIZE / 2,
+                right: x0 + SIZE,
+                bottom: SIZE,
+            }
+        } else {
+            RECT {
+                left: x0,
+                top: 0,
+                right: x0 + SIZE,
+                bottom: SIZE / 2,
+            }
+        };
+        let _ = FillRect(hdc, &rect, lit);
+        let _ = DeleteObject(lit.into());
+        let _ = SelectClipRgn(hdc, None);
+        let _ = DeleteObject(disc.into());
+        line(
+            x0 + RING + 2,
+            SIZE / 2,
+            x0 + SIZE - RING - 2,
+            SIZE / 2,
+            1,
+            COLORREF(0x0070_7070),
+        );
+        // Labels.
+        let small = CreateFontW(
+            13,
+            0,
+            0,
+            0,
+            700,
+            0,
+            0,
+            0,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            w!("Segoe UI"),
+        );
+        let old_small = SelectObject(hdc, small.into());
+        let label = |text: &str, top: i32, bottom: i32, c: COLORREF| {
+            SetTextColor(hdc, c);
+            let mut r = RECT {
+                left: x0,
+                top,
+                right: x0 + SIZE,
+                bottom,
+            };
+            let mut t: Vec<u16> = text.encode_utf16().collect();
+            DrawTextW(hdc, &mut t, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        };
+        let off = COLORREF(0x00B8_B8B8);
+        label("AI", 2, SIZE / 2, if audio_mode { off } else { WHITE_FACE });
+        label("Audio", SIZE / 2, SIZE - 2, if audio_mode { WHITE_FACE } else { off });
+        SelectObject(hdc, old_small);
+        let _ = DeleteObject(small.into());
     }
     SelectObject(hdc, old_font);
     SelectObject(hdc, old_pen);
@@ -754,4 +1069,75 @@ unsafe fn paint(hwnd: HWND) {
     let _ = DeleteObject(pen.into());
     let _ = DeleteObject(brush.into());
     let _ = EndPaint(hwnd, &ps);
+}
+
+/// The yellow mark: a layered, click-through, topmost window painted in
+/// one colour and shown half transparent at the remembered rectangle.
+unsafe fn show_highlight() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetLayeredWindowAttributes, LWA_ALPHA, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    let (mut hl, rect) = state()
+        .lock()
+        .map(|s| (s.highlight_hwnd, s.highlight_rect))
+        .unwrap_or((0, None));
+    let Some((x, y, w, h)) = rect else { return };
+    if hl == 0 {
+        let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
+            return;
+        };
+        let class = w!("ikk_highlight");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(highlight_proc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            hbrBackground: CreateSolidBrush(YELLOW),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+            class,
+            w!("Replacing"),
+            WS_POPUP,
+            x,
+            y,
+            w,
+            h,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        ) else {
+            return;
+        };
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 110, LWA_ALPHA);
+        hl = hwnd.0 as isize;
+        if let Ok(mut s) = state().lock() {
+            s.highlight_hwnd = hl;
+        }
+    }
+    let hwnd = HWND(hl as *mut _);
+    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+}
+
+unsafe extern "system" fn highlight_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_PAINT => {
+            // Yellow while listening, red while processing.
+            let busy = state().lock().map(|s| s.busy).unwrap_or(0);
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let brush = CreateSolidBrush(if busy == 2 { RED } else { YELLOW });
+            let mut rect = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+            let _ = FillRect(hdc, &rect, brush);
+            let _ = DeleteObject(brush.into());
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }

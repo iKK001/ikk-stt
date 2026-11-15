@@ -99,11 +99,14 @@ pub fn gender_colon(stems: &[String], text: &str) -> String {
 /// "X" + "in" is a word of the list (a feminine singular of a person) and
 /// "X" itself or "X" + "e" is one too (the masculine). The length guard
 /// keeps "Spinnen", "Zinnen", "beginnen" and the like out: their stems are
-/// no nouns of persons.
+/// no nouns of persons. Split forms a recogniser produces — "Autor innen",
+/// "AutorInnen", "Autor*innen", "Autor_innen", "Autor-innen" — are joined
+/// first, so they fall under the same rule.
 pub fn gender_colon_auto(text: &str) -> String {
     if !text.contains("innen") && !text.contains("Innen") {
         return text.to_string();
     }
+    let text = &join_split_forms(text);
     let mut out = String::with_capacity(text.len() + 8);
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
@@ -122,6 +125,43 @@ pub fn gender_colon_auto(text: &str) -> String {
     }
     flush(&mut word, &mut out);
     out
+}
+
+/// "Autor innen" / "Autor*innen" / "Autor_innen" / "Autor-innen" →
+/// "Autor:innen" when "Autor" names a person; anything else is left.
+fn join_split_forms(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let at_boundary = i == 0 || !chars[i - 1].is_alphanumeric();
+        if at_boundary && chars[i].is_uppercase() {
+            let mut j = i;
+            while j < chars.len() && chars[j].is_alphabetic() {
+                j += 1;
+            }
+            let stem: String = chars[i..j].iter().collect();
+            let joiner = j < chars.len() && matches!(chars[j], ' ' | '*' | '_' | '-' | '·');
+            let suffix_at = j + 1;
+            let suffix_ok = joiner
+                && suffix_at + 5 <= chars.len()
+                && chars[suffix_at..suffix_at + 5]
+                    .iter()
+                    .collect::<String>()
+                    .to_lowercase()
+                    == "innen"
+                && (suffix_at + 5 == chars.len() || !chars[suffix_at + 5].is_alphanumeric());
+            if suffix_ok && stem.chars().count() >= 4 && person_noun(&stem.to_lowercase()) {
+                out.extend(stem.chars());
+                out.extend([':', 'i', 'n', 'n', 'e', 'n']);
+                i = suffix_at + 5;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out.into_iter().collect()
 }
 
 /// "Lehrerinnen" → Some("Lehrer:innen"), else None.
@@ -165,6 +205,19 @@ fn person_noun(stem: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_forms_fall_under_the_automatic_rule() {
+        assert_eq!(
+            gender_colon_auto("Liebe Autor innen und Lektor*innen"),
+            "Liebe Autor:innen und Lektor:innen"
+        );
+        assert_eq!(gender_colon_auto("die LeserInnen"), "die Leser:innen");
+        assert_eq!(gender_colon_auto("Lehrer-innen kamen"), "Lehrer:innen kamen");
+        // Not persons: untouched.
+        assert_eq!(gender_colon_auto("Haus innen und aussen"), "Haus innen und aussen");
+        assert_eq!(gender_colon_auto("Garten innen"), "Garten innen");
+    }
 
     #[test]
     fn vocabulary_and_casing() {

@@ -11,6 +11,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 abstract class IkkEngine implements RustOpaqueInterface {
   void clearSessionText();
 
+  /// Phones: correct text the host selected itself (`HostReplace` answers).
+  void correctHost({required String settingsJson, required String original});
+
   /// The correction button from the app: correct the chosen range in the
   /// focused app with the chosen corrector.
   void correctNow({required String settingsJson});
@@ -36,6 +39,17 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// Settings the Android accessibility service starts with.
   void rememberSettings({required String settingsJson});
 
+  /// Phones: replace by voice on text the host (keyboard, service)
+  /// selected itself; the answer comes as the `HostReplace` event.
+  void replaceByVoiceHost({
+    required String settingsJson,
+    required String original,
+  });
+
+  /// The switch on the floating panel: audio correction (replace by
+  /// voice) or AI correction; the shell keeps the choice.
+  void setCorrectionMode({required bool audio});
+
   /// Also kept in the encrypted store on Android, so the accessibility
   /// service works after a reboot without opening the app.
   void setCredential({required String provider, required String secret});
@@ -57,7 +71,9 @@ abstract class IkkEngine implements RustOpaqueInterface {
 
   /// Floating buttons over all apps (desktop): the microphone toggles
   /// dictation with the remembered settings (red while listening); the
-  /// correction button corrects the text at the cursor.
+  /// correction button corrects the text at the cursor (AI) or replaces
+  /// a clicked word or a range by what is said (audio); the third button
+  /// is the switch between the two.
   void showFloatingButton({required bool show_});
 
   /// The app's dictate button: a click, so the voice listener is on again.

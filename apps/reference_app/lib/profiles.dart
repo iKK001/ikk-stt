@@ -88,7 +88,7 @@ class Profiles {
       'color': 0,
       ...deepCopy(current),
     };
-    applyVoicePreset(def, false);
+    applyOriginal(def);
     list.insert(0, def);
     if (impaired) {
       final own = <String, dynamic>{
@@ -106,13 +106,20 @@ class Profiles {
     }
   }
 
-  /// The top-level sections (the live copy) into the active profile.
+  /// The top-level sections (the live copy) into the active profile. The
+  /// Default profile is always the plain setup: whatever a page wrote,
+  /// the plain values are put back before storing.
   void storeActive() {
     final p = byId(activeId);
     if (p == null) return;
+    if (activeId == kDefaultProfileId) applyOriginal(settings);
     for (final s in kProfileSections) {
       if (settings[s] != null) p[s] = deepCopy(settings[s] as Map<String, dynamic>);
     }
+    // The stored Default entry too, so a file from before this rule is
+    // plain after the first save, whichever profile is active.
+    final def = byId(kDefaultProfileId);
+    if (def != null && def['sound'] != null && def['providers'] != null) applyOriginal(def);
   }
 
   /// Make [id] the active profile: the current one is stored first, then
@@ -164,9 +171,45 @@ class Profiles {
           if (m[s] != null) s: m[s],
       };
 
-  /// The two presets. Each side writes its whole setup, so later
-  /// experiments change only the impaired side. [m] holds `providers`,
-  /// `sound` and `text` (a profile or the top-level settings).
+  /// The Default profile's plain setup — the pipeline as it was before any
+  /// tuning for particular voices: automatic gain and nothing else on the
+  /// sound, live stream where the service offers one, otherwise 1.5 s
+  /// pieces, a 0.9 s pause, no re-check, no agreed-words voting, no
+  /// trained words. Everything else is personal and lives in the other
+  /// profiles. [m] holds `providers`, `sound` and `text`.
+  static void applyOriginal(Map<String, dynamic> m) {
+    final sound = m['sound'] as Map<String, dynamic>;
+    final vad = (sound['vad'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+    final providers = m['providers'] as Map<String, dynamic>;
+    final options = (providers['options'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+    final provider = providers['active'] as String? ?? 'elevenlabs';
+    final o = Map<String, dynamic>.from(options[provider] as Map<String, dynamic>? ?? {});
+    sound['impaired_voice'] = false;
+    sound['preamp_gain_db'] = 0.0;
+    sound['agc'] = true;
+    sound['denoise'] = 'Off';
+    sound['gate'] = false;
+    sound['highpass_hz'] = 0.0;
+    sound['presence_db'] = 0.0;
+    sound['compressor'] = false;
+    sound['trill_filler'] = false;
+    sound['noise_profile'] = false;
+    sound['path_eq_db'] = <double>[];
+    vad['silence_duration_ms'] = 900;
+    vad['chunk_interval_ms'] = 1500;
+    vad['refine'] = false;
+    vad['type_quick_text'] = false;
+    vad['agreement'] = false;
+    o['transfer'] = 'Streaming';
+    options[provider] = o;
+    final text = m['text'] as Map<String, dynamic>?;
+    final training = text?['training'] as Map<String, dynamic>?;
+    if (training != null) training['enabled'] = false;
+  }
+
+  /// The two presets for personal profiles. Each side writes its whole
+  /// setup, so later experiments change only the impaired side. [m] holds
+  /// `providers`, `sound` and `text` (a profile or the top-level settings).
   static void applyVoicePreset(Map<String, dynamic> m, bool impaired) {
     final sound = m['sound'] as Map<String, dynamic>;
     final vad = sound['vad'] as Map<String, dynamic>;

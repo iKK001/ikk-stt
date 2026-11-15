@@ -98,7 +98,9 @@ impl IkkEngine {
     }
     /// Floating buttons over all apps (desktop): the microphone toggles
     /// dictation with the remembered settings (red while listening); the
-    /// correction button corrects the text at the cursor.
+    /// correction button corrects the text at the cursor (AI) or replaces
+    /// a clicked word or a range by what is said (audio); the third button
+    /// is the switch between the two.
     #[frb(sync)]
     pub fn show_floating_button(&self, show: bool) {
         if show {
@@ -115,6 +117,13 @@ impl IkkEngine {
                         if let Err(e) = s.correct_now() {
                             log::warn!("correction button: {e}");
                         }
+                    }
+                })),
+                Some(std::sync::Arc::new(|audio| {
+                    // The switch: remembered here, saved by the shell.
+                    if let Some(s) = crate::shared::get() {
+                        s.set_audio_mode(audio);
+                        let _ = s.events.send(format!("{{\"CorrectionMode\":{{\"audio\":{audio}}}}}"));
                     }
                 })),
                 Some(std::sync::Arc::new(|x, y| {
@@ -163,11 +172,30 @@ impl IkkEngine {
     pub fn set_floating_position(&self, x: f64, y: f64) {
         ikk_overlay::set_position(x, y);
     }
+    /// The switch on the floating panel: audio correction (replace by
+    /// voice) or AI correction; the shell keeps the choice.
+    #[frb(sync)]
+    pub fn set_correction_mode(&self, audio: bool) {
+        self.inner.set_audio_mode(audio);
+    }
     /// Shrinking buttons: small and darker while the mouse is elsewhere,
     /// a little larger than plain under it. Off: always the plain size.
     #[frb(sync)]
     pub fn set_floating_shrink(&self, on: bool) {
         ikk_overlay::set_shrink(on);
+    }
+    /// Phones: replace by voice on text the host (keyboard, service)
+    /// selected itself; the answer comes as the `HostReplace` event.
+    #[frb(sync)]
+    pub fn replace_by_voice_host(&self, settings_json: String, original: String) -> Result<(), String> {
+        self.inner.remember_settings(&settings_json);
+        self.inner.engine.replace_by_voice_host(&settings_json, &original)
+    }
+    /// Phones: correct text the host selected itself (`HostReplace` answers).
+    #[frb(sync)]
+    pub fn correct_host(&self, settings_json: String, original: String) -> Result<(), String> {
+        self.inner.remember_settings(&settings_json);
+        self.inner.engine.correct_host(&settings_json, &original)
     }
     /// The correction button from the app: correct the chosen range in the
     /// focused app with the chosen corrector.

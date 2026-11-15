@@ -117,6 +117,15 @@ impl FfiEngine {
         let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
         Ok(settings.text.correction_range.trim().to_string())
     }
+    /// Single word: the word under the clicked point is selected by a
+    /// double-click, then corrected.
+    pub fn correct_word_at(&self, settings_json: &str, at: (f64, f64)) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        ikk_output::desktop::double_click_at(at.0, at.1).map_err(|e| e.to_string())?;
+        let mut req = ikk_engine::config::correct_request(&settings);
+        req.range = ikk_engine::CorrectionRange::Selection;
+        self.send(EngineCommand::CorrectRange(req))
+    }
     /// Click to click: the two screen points the user clicked become a
     /// selection (click, Shift-click), then the selection is corrected.
     pub fn correct_between(&self, settings_json: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
@@ -124,6 +133,63 @@ impl FfiEngine {
         ikk_output::desktop::select_between(from, to).map_err(|e| e.to_string())?;
         let mut req = ikk_engine::config::correct_request(&settings);
         req.range = ikk_engine::CorrectionRange::Selection;
+        self.send(EngineCommand::CorrectRange(req))
+    }
+    /// Replace by voice on the selection the app in front already has, or
+    /// on the range named in the settings (cursor to end, whole text).
+    /// `word_at`: a screen point; the word under it is selected by a
+    /// double-click first. The engine listens in the running session or
+    /// opens one from the settings.
+    pub fn replace_by_voice(
+        &self,
+        settings_json: &str,
+        word_at: Option<(f64, f64)>,
+        use_range: bool,
+    ) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        if let Some((x, y)) = word_at {
+            ikk_output::desktop::double_click_at(x, y).map_err(|e| e.to_string())?;
+        }
+        let range = if word_at.is_some() || !use_range {
+            ikk_engine::CorrectionRange::Selection
+        } else {
+            ikk_engine::CorrectionRange::parse(&settings.text.correction_range)
+        };
+        let start = Box::new(ikk_engine::config::start_config(&settings));
+        self.send(EngineCommand::ReplaceByVoice {
+            range,
+            start: Some(start),
+            host_text: None,
+        })
+    }
+    /// Replace by voice between two clicked points (click, Shift-click).
+    pub fn replace_between(&self, settings_json: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        ikk_output::desktop::select_between(from, to).map_err(|e| e.to_string())?;
+        let start = Box::new(ikk_engine::config::start_config(&settings));
+        self.send(EngineCommand::ReplaceByVoice {
+            range: ikk_engine::CorrectionRange::Selection,
+            start: Some(start),
+            host_text: None,
+        })
+    }
+    /// Replace by voice for a host that selected the text itself (phones):
+    /// the engine listens and answers with `HostReplace`.
+    pub fn replace_by_voice_host(&self, settings_json: &str, original: &str) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        let start = Box::new(ikk_engine::config::start_config(&settings));
+        self.send(EngineCommand::ReplaceByVoice {
+            range: ikk_engine::CorrectionRange::Selection,
+            start: Some(start),
+            host_text: Some(original.to_string()),
+        })
+    }
+    /// Correct text a host selected itself; the answer comes as `HostReplace`.
+    pub fn correct_host(&self, settings_json: &str, original: &str) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        let mut req = ikk_engine::config::correct_request(&settings);
+        req.range = ikk_engine::CorrectionRange::Selection;
+        req.host_text = Some(original.to_string());
         self.send(EngineCommand::CorrectRange(req))
     }
     pub fn clear_session_text(&self) -> Result<(), String> {

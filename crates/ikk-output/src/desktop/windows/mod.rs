@@ -338,3 +338,38 @@ fn unify_newlines(s: &str) -> String {
 fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+/// The focused element's selection rectangle through UI Automation's text
+/// pattern (the first rectangle of the first selected range), in screen
+/// pixels. `None` when the control has no text pattern or no selection.
+pub fn selection_bounds() -> Option<(f64, f64, f64, f64)> {
+    use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayGetUBound, SafeArrayUnaccessData};
+    uia::with_focused(|el| {
+        let pattern = uia::text_pattern(el).ok_or(uia::UiaError::NoText)?;
+        unsafe {
+            let ranges = pattern.GetSelection().map_err(|_| uia::UiaError::NoText)?;
+            if ranges.Length().unwrap_or(0) < 1 {
+                return Err(uia::UiaError::NoText);
+            }
+            let range = ranges.GetElement(0).map_err(|_| uia::UiaError::NoText)?;
+            let arr = range.GetBoundingRectangles().map_err(|_| uia::UiaError::NoText)?;
+            if arr.is_null() {
+                return Err(uia::UiaError::NoText);
+            }
+            let upper = SafeArrayGetUBound(arr, 1).map_err(|_| uia::UiaError::NoText)?;
+            if upper < 3 {
+                return Err(uia::UiaError::NoText);
+            }
+            let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+            SafeArrayAccessData(arr, &mut data).map_err(|_| uia::UiaError::NoText)?;
+            let v = std::slice::from_raw_parts(data as *const f64, (upper + 1) as usize);
+            let rect = (v[0], v[1], v[2], v[3]);
+            let _ = SafeArrayUnaccessData(arr);
+            if rect.2 <= 0.0 || rect.3 <= 0.0 {
+                return Err(uia::UiaError::NoText);
+            }
+            Ok(rect)
+        }
+    })
+    .ok()
+}

@@ -17,6 +17,7 @@ ikk-engine = { path = "../../../crates/ikk-engine" }
 ikk-wake = { path = "../../../crates/ikk-wake" }
 # Floating microphone button on the desktop (no-op elsewhere).
 ikk-overlay = { path = "../../../crates/ikk-overlay" }
+ikk-output = { path = "../../../crates/ikk-output" }
 log = "0.4"
 serde_json = { workspace = true }
 # Wipes secrets from memory once they are handed over.

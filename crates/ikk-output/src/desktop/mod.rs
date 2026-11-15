@@ -51,6 +51,26 @@ pub fn select_between(from: (f64, f64), to: (f64, f64)) -> Result<(), OutputErro
     Ok(())
 }
 
+/// A double-click at a screen point: selects the word under it in every
+/// text field (two clicks inside the system's double-click time).
+pub fn double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
+    {
+        // Windows and X11 count two clicks inside the double-click time as one.
+        platform::click_at(x, y, false)?;
+        std::thread::sleep(Duration::from_millis(70));
+        platform::click_at(x, y, false)?;
+        std::thread::sleep(Duration::from_millis(120));
+        Ok(())
+    }
+}
+
+/// Screen rectangle (x, y, width, height in points, origin top-left of the
+/// main display) of the focused app's text selection, when its
+/// accessibility tree tells; `None` otherwise.
+pub fn selection_bounds() -> Option<(f64, f64, f64, f64)> {
+    platform::selection_bounds()
+}
+
 pub fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }

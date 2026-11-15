@@ -21,12 +21,82 @@ pub type OnClicks = Arc<dyn Fn(Vec<(f64, f64)>) + Send + Sync>;
 /// Called (on a background thread) with the buttons' new top-left corner
 /// after the user dragged them (screen points, origin top-left).
 pub type OnMoved = Arc<dyn Fn(f64, f64) + Send + Sync>;
+/// Called (on a background thread) when the user flips the switch:
+/// `true` = audio correction (replace by voice), `false` = AI correction.
+pub type OnMode = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// Show the buttons (created on first use): `on_tap` for the microphone,
-/// `on_correct` for the correction button (none: microphone only),
-/// `on_moved` after every drag.
-pub fn show(on_tap: OnTap, on_correct: Option<OnTap>, on_moved: Option<OnMoved>) {
-    platform::show(on_tap, on_correct, on_moved);
+/// `on_correct` for the correction button, `on_mode` for the switch
+/// between AI and audio correction (none: fewer buttons), `on_moved`
+/// after every drag.
+pub fn show(on_tap: OnTap, on_correct: Option<OnTap>, on_mode: Option<OnMode>, on_moved: Option<OnMoved>) {
+    platform::show(on_tap, on_correct, on_mode, on_moved);
+}
+
+/// What the correction button is doing: a rotating arc on its rim shows
+/// it — yellow while the engine listens for the words of a replacement,
+/// red while a recogniser or corrector works on the text. The text mark
+/// follows the colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Busy {
+    None,
+    Listening,
+    Processing,
+}
+
+pub fn set_busy(busy: Busy) {
+    platform::set_busy(busy);
+}
+
+/// Which half of the switch is lit: audio correction (true) or AI (false).
+pub fn set_audio_mode(on: bool) {
+    platform::set_audio_mode(on);
+}
+
+/// What the correction button corrects; its glyph shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeMode {
+    /// From the cursor to the end of the text: a start mark, a track, dots.
+    CursorToEnd,
+    /// The whole text: lines of text.
+    WholeText,
+    /// Between two clicks: a start mark, a track, an end mark.
+    ClickToClick,
+    /// The word under one click: a short word bar with a click dot above.
+    Word,
+}
+
+impl RangeMode {
+    /// From the settings value ("cursor_to_end", "whole_text", "click_to_click").
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "whole_text" => Self::WholeText,
+            "click_to_click" => Self::ClickToClick,
+            "single_word" => Self::Word,
+            _ => Self::CursorToEnd,
+        }
+    }
+}
+
+/// Tell the correction button which range it corrects (its glyph changes).
+pub fn set_range_mode(mode: RangeMode) {
+    platform::set_range_mode(mode);
+}
+
+/// Replace by voice is armed (the correction button is yellow): the next
+/// click names the word, or a second press names the range.
+pub fn set_replace_armed(on: bool) {
+    platform::set_replace_armed(on);
+}
+
+/// A translucent yellow mark over the text that is being replaced
+/// (screen points, origin top-left of the main display).
+pub fn highlight(x: f64, y: f64, w: f64, h: f64) {
+    platform::highlight(x, y, w, h);
+}
+
+pub fn clear_highlight() {
+    platform::clear_highlight();
 }
 
 /// The buttons' top-left corner on the screen (points, origin top-left of

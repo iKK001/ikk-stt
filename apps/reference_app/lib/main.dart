@@ -22,6 +22,7 @@ import 'app_name.dart';
 import 'platform_extras.dart';
 import 'profiles.dart';
 import 'history.dart';
+import 'keyboard_bridge.dart';
 import 'background.dart';
 
 Future<void> main() async {
@@ -192,7 +193,39 @@ class _HomeScreenState extends State<HomeScreen> {
     await _loadFloating();
     await _loadBackground();
     await _applyButtonPosition();
+    _listenKeyboard();
     if (mounted) setState(() {});
+  }
+
+  /// iOS: the iKK keyboard asks for dictation, replacement and correction;
+  /// text and answers go back to it.
+  void _listenKeyboard() {
+    if (!KeyboardBridge.supported) return;
+    KeyboardBridge.setCorrectionRange(_text['correction_range'] as String? ?? 'cursor_to_end');
+    KeyboardBridge.listen((cmd, original) {
+      switch (cmd) {
+        case 'start':
+          if (!_listening) _start();
+        case 'stop':
+          if (_listening) _stop();
+        case 'replace':
+          try {
+            _engine.replaceByVoiceHost(settingsJson: jsonEncode(_settings), original: original);
+          } catch (e) {
+            KeyboardBridge.done(false);
+            _snack('$e');
+          }
+        case 'correct':
+          try {
+            _engine.correctHost(settingsJson: jsonEncode(_settings), original: original);
+          } catch (e) {
+            KeyboardBridge.done(false);
+            _snack('$e');
+          }
+        default:
+          break;
+      }
+    });
   }
 
   String get _provider => (_settings['providers']?['active'] as String?) ?? 'deepgram';
@@ -321,6 +354,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _recordedMs = 0;
           }
           final wasRunning = _state != 'Idle';
+          KeyboardBridge.setListening(v == 'Listening' || v == 'Finishing');
           _state = v as String;
           if (_state == 'Idle') {
             _interim = '';
@@ -380,6 +414,21 @@ class _HomeScreenState extends State<HomeScreen> {
         case 'Corrected':
           final c = v as Map<String, dynamic>;
           _snack(_t[c['changed'] == true ? 'corrected' : 'nothingToCorrect']);
+          KeyboardBridge.done(c['changed'] == true);
+        case 'CorrectionMode':
+          // The switch on the floating panel: remembered for the next start.
+          _ui['correction_mode'] = (v as Map<String, dynamic>)['audio'] == true ? 'audio' : 'ai';
+          _saveUi();
+        case 'ReplaceListening':
+          _snack(_t.fmt('replaceListening', {'s': (v as Map<String, dynamic>)['original']}));
+        case 'Replaced':
+          final r = v as Map<String, dynamic>;
+          _snack(r['changed'] == true ? _t.fmt('replaced', {'f': r['from'], 't': r['to']}) : _t['replacedNone']);
+          KeyboardBridge.done(r['changed'] == true);
+        case 'HostReplace':
+          KeyboardBridge.replace((v as Map<String, dynamic>)['text'] as String? ?? '');
+        case 'HostText':
+          KeyboardBridge.text((v as Map<String, dynamic>)['text'] as String? ?? '');
         case 'CommandRefused':
           _snack(_t.commandRefused(v as String));
         case 'CommandHeard':
@@ -465,6 +514,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await _loadUi();
     _engine.showFloatingButton(show_: true);
     if (_shrinkSupported) _engine.setFloatingShrink(on_: _shrinkButtons);
+    if (_shrinkSupported) _engine.setCorrectionMode(audio: _ui['correction_mode'] == 'audio');
   }
 
   /// Desktop buttons can shrink away from the mouse (ui.json
@@ -668,6 +718,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Text(_t['floatingTitle'], style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
             Text(_t['floatingBody']),
+            const SizedBox(height: 4),
+            Text(_t['replaceButtonBody']),
             const SizedBox(height: 4),
             Text(_t['floatingNote'], style: Theme.of(context).textTheme.bodySmall),
             if (_shrinkSupported)
@@ -2252,11 +2304,13 @@ class _HomeScreenState extends State<HomeScreen> {
               segments: [
                 ButtonSegment(value: 'click_to_click', label: Text(_t['rangeClickToClick'])),
                 ButtonSegment(value: 'cursor_to_end', label: Text(_t['rangeCursorToEnd'])),
+                ButtonSegment(value: 'single_word', label: Text(_t['rangeWord'])),
                 ButtonSegment(value: 'whole_text', label: Text(_t['rangeWholeText'])),
               ],
               selected: {range},
               onSelectionChanged: (sel) {
                 _text['correction_range'] = sel.first;
+                KeyboardBridge.setCorrectionRange(sel.first);
                 _saveSettings();
               },
             ),
@@ -2342,7 +2396,6 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
             _genderColonSwitch(),
-            _genderColonField(),
           ],
         ),
       ),
@@ -2364,26 +2417,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Word stems that get the gender colon in their feminine plural.
-  Widget _genderColonField() {
-    final words = ((_text['gender_colon_words'] as List?) ?? const ['Autor', 'Lektor', 'Leser']).join(', ');
-    final ctl = TextEditingController(text: words);
-    ctl.selection = TextSelection.collapsed(offset: words.length);
-    void save(String v) {
-      _text['gender_colon_words'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
-      _saveSettings();
-    }
-
-    return TextField(
-      controller: ctl,
-      decoration: InputDecoration(labelText: _t['genderColonLabel'], helperText: _t['genderColonHelper']),
-      onSubmitted: save,
-      onTapOutside: (_) {
-        if (ctl.text != words) save(ctl.text);
-      },
-    );
-  }
-
   /// Voice and rhythm: the clear-speech or impaired preset, batch upload,
   /// and how the recording is cut (chunks and pause, or readings of the
   /// thought so far with agreed words only).
@@ -2393,6 +2426,50 @@ class _HomeScreenState extends State<HomeScreen> {
     final impaired = sound['impaired_voice'] != false;
     final opts = _providerOpts;
     final batch = (opts['transfer'] ?? 'Batch') == 'Batch';
+    final plain = _profiles.activeIsDefault;
+    final batchSwitch = SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(_t['batchUpload']),
+      subtitle: Text(_t['batchBody']),
+      value: batch,
+      onChanged: (b) {
+        final o = Map<String, dynamic>.from(opts);
+        o['transfer'] = b ? 'Batch' : 'Streaming';
+        (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+        _saveSettings();
+      },
+    );
+    final pauseStepper = _stepper(
+      label: _t[impaired && !plain ? 'pauseThought' : 'pause'],
+      value: vad['silence_duration_ms'] as num,
+      min: 300,
+      max: 6000,
+      step: 100,
+      unit: 'ms',
+      onChanged: (v) => vad['silence_duration_ms'] = v.round(),
+    );
+    // The Default profile: the plain setup, nothing to tune but the
+    // transfer and the pause (both were settings before any tuning).
+    if (plain) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(_t['voiceKind'], style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(_t['defaultPlainNote'], style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(height: 4),
+              batchSwitch,
+              pauseStepper,
+            ],
+          ),
+        ),
+      );
+    }
+    // Personal profiles: a preset as the starting point, then every
+    // rhythm trick on its own switch.
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -2414,126 +2491,126 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 8),
             Text(_t[impaired ? 'impairedOn' : 'impairedOff'], style: Theme.of(context).textTheme.bodySmall),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(_t['batchUpload']),
-              subtitle: Text(_t['batchBody']),
-              value: batch,
-              onChanged: (b) {
-                final o = Map<String, dynamic>.from(opts);
-                o['transfer'] = b ? 'Batch' : 'Streaming';
-                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
-                _saveSettings();
-              },
+            const SizedBox(height: 4),
+            Text(_t['presetNote'], style: Theme.of(context).textTheme.bodySmall),
+            batchSwitch,
+            pauseStepper,
+            _stepper(
+              label: _t['chunkLength'],
+              value: (vad['chunk_interval_ms'] as num) / 1000,
+              min: 1,
+              max: 60,
+              step: 1,
+              unit: 's',
+              onChanged: (v) => vad['chunk_interval_ms'] = (v * 1000).round(),
             ),
-            if (impaired) ...[
-              _stepper(
-                label: _t['pauseThought'],
-                value: vad['silence_duration_ms'] as num,
-                min: 1500,
-                max: 6000,
-                step: 100,
-                unit: 'ms',
-                onChanged: (v) => vad['silence_duration_ms'] = v.round(),
-              ),
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(_t['advanced']),
-                subtitle: Text(_t['impairedAdvBody']),
-                initiallyExpanded: _advanced,
-                onExpansionChanged: (open) => setState(() => _advanced = open),
-                children: [
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(_t['agreedOnly']),
-                    subtitle: Text(_t['agreedOnlyBody']),
-                    value: vad['agreement'] == true,
-                    onChanged: (b) {
-                      vad['agreement'] = b;
-                      _saveSettings();
-                    },
-                  ),
-                  if (vad['agreement'] == true) ...[
-                    _stepper(
-                      label: _t['agreementStep'],
-                      value: (vad['agreement_step_ms'] as num? ?? 1000),
-                      min: 500,
-                      max: 3000,
-                      step: 250,
-                      unit: 'ms',
-                      onChanged: (v) => vad['agreement_step_ms'] = v.round(),
-                    ),
-                    _stepper(
-                      label: _t['agreementSpan'],
-                      value: (vad['agreement_span_ms'] as num? ?? 8000) / 1000,
-                      min: 4,
-                      max: 20,
-                      step: 1,
-                      unit: 's',
-                      onChanged: (v) => vad['agreement_span_ms'] = (v * 1000).round(),
-                    ),
-                  ],
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(_t['recheck']),
-                    value: vad['refine'] == true,
-                    onChanged: (b) {
-                      vad['refine'] = b;
-                      _saveSettings();
-                    },
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(_t['quickText']),
-                    value: vad['type_quick_text'] == true,
-                    onChanged: vad['refine'] == true
-                        ? (b) {
-                            vad['type_quick_text'] = b;
-                            _saveSettings();
-                          }
-                        : null,
-                  ),
-                ],
-              ),
-            ] else
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(_t['advanced']),
-                subtitle: Text(_t['advGainChunk']),
-                initiallyExpanded: _advanced,
-                onExpansionChanged: (open) => setState(() => _advanced = open),
-                children: [
+            Text(_t['chunkNote'], style: Theme.of(context).textTheme.bodySmall),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: Text(_t['tricksTitle']),
+              subtitle: Text(_t['tricksBody']),
+              initiallyExpanded: _advanced || impaired,
+              onExpansionChanged: (open) => setState(() => _advanced = open),
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(_t['agreedOnly']),
+                  subtitle: Text(_t['agreedOnlyBody']),
+                  value: vad['agreement'] == true,
+                  onChanged: (b) {
+                    vad['agreement'] = b;
+                    _saveSettings();
+                  },
+                ),
+                if (vad['agreement'] == true) ...[
                   _stepper(
-                    label: _t['chunkLength'],
-                    value: (vad['chunk_interval_ms'] as num) / 1000,
-                    min: 1,
-                    max: 60,
+                    label: _t['agreementStep'],
+                    value: (vad['agreement_step_ms'] as num? ?? 1000),
+                    min: 500,
+                    max: 3000,
+                    step: 250,
+                    unit: 'ms',
+                    onChanged: (v) => vad['agreement_step_ms'] = v.round(),
+                  ),
+                  _stepper(
+                    label: _t['agreementWindows'],
+                    value: (vad['agreement_windows'] as num? ?? 4),
+                    min: 2,
+                    max: 6,
+                    step: 1,
+                    unit: '',
+                    onChanged: (v) => vad['agreement_windows'] = v.round(),
+                  ),
+                  _stepper(
+                    label: _t['agreementSpan'],
+                    value: (vad['agreement_span_ms'] as num? ?? 8000) / 1000,
+                    min: 4,
+                    max: 20,
                     step: 1,
                     unit: 's',
-                    onChanged: (v) => vad['chunk_interval_ms'] = (v * 1000).round(),
+                    onChanged: (v) => vad['agreement_span_ms'] = (v * 1000).round(),
                   ),
-                  _stepper(
-                    label: _t['pause'],
-                    value: vad['silence_duration_ms'] as num,
-                    min: 300,
-                    max: 6000,
-                    step: 100,
-                    unit: 'ms',
-                    onChanged: (v) => vad['silence_duration_ms'] = v.round(),
-                  ),
-                  Text(_t['chunkNote'], style: Theme.of(context).textTheme.bodySmall),
                 ],
-              ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(_t['recheck']),
+                  value: vad['refine'] == true,
+                  onChanged: (b) {
+                    vad['refine'] = b;
+                    _saveSettings();
+                  },
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(_t['quickText']),
+                  value: vad['type_quick_text'] == true,
+                  onChanged: vad['refine'] == true
+                      ? (b) {
+                          vad['type_quick_text'] = b;
+                          _saveSettings();
+                        }
+                      : null,
+                ),
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 
-  /// What is done to the sound before it leaves the device.
+  /// What is done to the sound before it leaves the device. The Default
+  /// profile has nothing here (automatic gain only); personal profiles
+  /// choose every filter.
   Widget _filtersSection() {
     final sound = _settings['sound'] as Map<String, dynamic>;
     final impaired = sound['impaired_voice'] != false;
+    if (_profiles.activeIsDefault) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(_t['stepFilters'], style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(_t['filtersDefaultNote'], style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ),
+        ),
+      );
+    }
+    final pathEq = (sound['path_eq_db'] as List?) ?? const [];
+    Widget onOff(String title, String body, String key) => SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(_t[title]),
+          subtitle: Text(_t[body]),
+          value: sound[key] == true,
+          onChanged: (b) {
+            sound[key] = b;
+            _saveSettings();
+          },
+        );
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -2541,26 +2618,7 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(_t['stepFilters'], style: Theme.of(context).textTheme.titleMedium),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(_t['noiseFilter']),
-              subtitle: Text(_t['noiseFilterBody']),
-              value: sound['noise_profile'] != false,
-              onChanged: (b) {
-                sound['noise_profile'] = b;
-                _saveSettings();
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(_t['rnnoise']),
-              subtitle: impaired ? Text(_t['rnnoiseImpairedBody']) : null,
-              value: sound['denoise'] != 'Off',
-              onChanged: (b) {
-                sound['denoise'] = b ? 'RnNoise' : 'Off';
-                _saveSettings();
-              },
-            ),
+            Text(_t['filtersBody'], style: Theme.of(context).textTheme.bodySmall),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['agc']),
@@ -2580,18 +2638,77 @@ class _HomeScreenState extends State<HomeScreen> {
               unit: 'dB',
               onChanged: (v) => sound['preamp_gain_db'] = v.toDouble(),
             ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['noiseFilter']),
+              subtitle: Text(_t['noiseFilterBody']),
+              value: sound['noise_profile'] != false,
+              onChanged: (b) {
+                sound['noise_profile'] = b;
+                _saveSettings();
+              },
+            ),
+            onOff('gate', 'gateBody', 'gate'),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['rnnoise']),
+              subtitle: Text(_t[impaired ? 'rnnoiseImpairedBody' : 'rnnoiseBody']),
+              value: sound['denoise'] != 'Off',
+              onChanged: (b) {
+                sound['denoise'] = b ? 'RnNoise' : 'Off';
+                _saveSettings();
+              },
+            ),
+            _stepper(
+              label: _t['highpass'],
+              value: (sound['highpass_hz'] as num? ?? 0),
+              min: 0,
+              max: 300,
+              step: 20,
+              unit: 'Hz',
+              onChanged: (v) => sound['highpass_hz'] = v.toDouble(),
+            ),
+            Text(_t['highpassBody'], style: Theme.of(context).textTheme.bodySmall),
+            _stepper(
+              label: _t['presence'],
+              value: (sound['presence_db'] as num? ?? 0),
+              min: 0,
+              max: 9,
+              step: 1,
+              unit: 'dB',
+              onChanged: (v) => sound['presence_db'] = v.toDouble(),
+            ),
+            Text(_t['presenceBody'], style: Theme.of(context).textTheme.bodySmall),
+            onOff('compressor', 'compressorBody', 'compressor'),
+            onOff('trillFiller', 'trillFillerBody', 'trill_filler'),
+            if (pathEq.isNotEmpty)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(_t['pathEq']),
+                subtitle: Text(_t.fmt('pathEqBody', {'n': pathEq.length})),
+                trailing: TextButton(
+                  onPressed: () {
+                    sound['path_eq_db'] = <double>[];
+                    _saveSettings();
+                  },
+                  child: Text(_t['remove']),
+                ),
+              ),
           ],
         ),
       ),
     );
   }
 
-  /// Start and stop by voice, and the trained words.
+  /// Start and stop by voice, and the trained words (personal profiles
+  /// only: the Default profile does not swap heard forms).
   Widget _commandsSection() {
     return Column(children: [
       _voiceSection(),
-      const SizedBox(height: 16),
-      _trainingSection(),
+      if (!_profiles.activeIsDefault) ...[
+        const SizedBox(height: 16),
+        _trainingSection(),
+      ],
     ]);
   }
 
@@ -2611,7 +2728,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final pause = ((vad['silence_duration_ms'] as num) / 1000).toStringAsFixed(1);
     final vocab = ((opts['keywords'] as List?) ?? const []).length;
     return [
-      _t[sound['impaired_voice'] != false ? 'summaryImpaired' : 'summaryNormal'],
+      _t[_profiles.activeIsDefault ? 'summaryDefault' : (sound['impaired_voice'] != false ? 'summaryImpaired' : 'summaryNormal')],
       // No saved options yet means the engine's default: batch.
       '$_provider · ${_t[(opts['transfer'] ?? 'Batch') == 'Batch' ? 'batch' : 'stream']} · ${kLanguages[_settings['providers']['language']] ?? _settings['providers']['language']} · ${_t['vocabulary']}: $vocab',
       vad['agreement'] == true
