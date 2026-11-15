@@ -152,6 +152,10 @@ enum Cmd {
         agreement_ms: Option<u32>,
         #[arg(long, default_value_t = 3)]
         agree: usize,
+        /// How far back each agreement reading reaches, ms (default 8000;
+        /// the provider cost is about span / step uploads per second).
+        #[arg(long)]
+        span_ms: Option<u32>,
         /// Earliest cut at a gap between words, ms (default: the settings file).
         #[arg(long)]
         chunk_ms: Option<u32>,
@@ -212,6 +216,9 @@ enum Cmd {
         /// settings file's agreement mode off.
         #[arg(long)]
         agreement_ms: Option<u32>,
+        /// How far back each agreement reading reaches, ms (see `transcribe`).
+        #[arg(long)]
+        span_ms: Option<u32>,
         /// Words and phrases to bias the recogniser towards (comma-separated).
         #[arg(long, value_delimiter = ',')]
         keywords: Vec<String>,
@@ -555,6 +562,7 @@ async fn main() -> anyhow::Result<()> {
             refine,
             agreement_ms,
             agree,
+            span_ms,
             chunk_ms,
             pause_ms,
             keywords,
@@ -586,6 +594,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.agreement = agreement_ms.map(|ms| ikk_stt::Agreement {
                 step: Duration::from_millis(ms as u64),
                 windows: agree,
+                span: span_ms.map_or(ikk_stt::Agreement::DEFAULT_SPAN, |s| Duration::from_millis(s as u64)),
             });
             cfg.keywords = keywords.into_iter().filter(|k| !k.is_empty()).map(|k| (k, 5)).collect();
             cfg.learned = settings.text.training.learned_words();
@@ -632,12 +641,17 @@ async fn main() -> anyhow::Result<()> {
             let mut session = ikk_stt::open_session(prov, &cfg).await?;
             let mut vad = VoiceActivityDetector::new(VadMode::Normal, PIPELINE_SAMPLE_RATE_HZ);
             vad.set_pause_duration_ms(pause.max(100));
+            let usage = std::cell::Cell::new((0u64, 0u64));
             let print = |ev: TranscriptEvent, at: Duration| match ev {
                 TranscriptEvent::Final(t) => println!("[{:5.1}s] {t}", at.as_secs_f32()),
                 TranscriptEvent::Refined { segments, text } => {
                     println!("[{:5.1}s] ⟲ replaces last {segments}: {text}", at.as_secs_f32())
                 }
                 TranscriptEvent::Error(e) => eprintln!("[provider error] {e:?}"),
+                TranscriptEvent::Usage {
+                    uploaded_ms,
+                    recorded_ms,
+                } => usage.set((uploaded_ms, recorded_ms)),
                 TranscriptEvent::Interim(_) | TranscriptEvent::SegmentRefine(_) => {}
                 other => eprintln!("[{other:?}]"),
             };
@@ -664,7 +678,11 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
             }
-            eprintln!("done in {:.1} s", started.elapsed().as_secs_f32());
+            eprintln!(
+                "done in {:.1} s · {}",
+                started.elapsed().as_secs_f32(),
+                usage_line(usage.get())
+            );
             Ok(())
         }
         Cmd::Dictate {
@@ -684,6 +702,7 @@ async fn main() -> anyhow::Result<()> {
             path_eq,
             refine,
             agreement_ms,
+            span_ms,
             keywords,
             batch,
             seconds,
@@ -730,6 +749,9 @@ async fn main() -> anyhow::Result<()> {
                 if ms > 0 {
                     settings.sound.vad.agreement_step_ms = ms;
                 }
+            }
+            if let Some(ms) = span_ms {
+                settings.sound.vad.agreement_span_ms = ms;
             }
             settings.sound.denoise = if denoise {
                 ikk_settings::Denoise::RnNoise
@@ -798,6 +820,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let mut out = std::io::stdout();
             let mut interim_len = 0usize;
+            let mut usage = (0u64, 0u64);
             let mut stopping = false;
             loop {
                 tokio::select! {
@@ -826,6 +849,9 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         Some(EngineEvent::Transcript(TranscriptEvent::Error(e))) => eprintln!("\n[provider error] {e:?}"),
+                        Some(EngineEvent::Transcript(TranscriptEvent::Usage { uploaded_ms, recorded_ms })) => {
+                            usage = (uploaded_ms, recorded_ms);
+                        }
                         Some(EngineEvent::Error(e)) => eprintln!("\n[error] {e}"),
                         Some(EngineEvent::SetupRequired { message, settings_url, .. }) => {
                             eprintln!("\n[setup needed] {message}");
@@ -850,9 +876,26 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             engine.shutdown().await;
+            if usage.1 > 0 {
+                eprintln!("{}", usage_line(usage));
+            }
             Ok(())
         }
     }
+}
+
+/// "uploaded 83.2 s for 9.6 s recorded (8.7×)": what the session cost.
+fn usage_line((uploaded_ms, recorded_ms): (u64, u64)) -> String {
+    let ratio = if recorded_ms > 0 {
+        uploaded_ms as f32 / recorded_ms as f32
+    } else {
+        0.0
+    };
+    format!(
+        "uploaded {:.1} s for {:.1} s recorded ({ratio:.1}×)",
+        uploaded_ms as f32 / 1000.0,
+        recorded_ms as f32 / 1000.0
+    )
 }
 
 /// Runs the capture for `seconds`, prints a level bar and VAD events.

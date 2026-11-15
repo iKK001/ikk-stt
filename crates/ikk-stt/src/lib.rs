@@ -132,6 +132,20 @@ pub struct SessionConfig {
 pub struct Agreement {
     pub step: Duration,
     pub windows: usize,
+    /// How far back a window reaches. The provider's response time grows
+    /// with the clip (whisper-1: 5 s clip 1.3 s, 28 s clip 5.3 s), and the
+    /// words still open only need the last several seconds of context;
+    /// new words are aligned to the typed ones by their last words. The
+    /// span also sets the cost: every second of speech is uploaded about
+    /// `span / step` times. Measured on the two reference samples with
+    /// ElevenLabs (live replay, two passes each): 12 s and 8 s read the
+    /// same words (10× against 7× the recording uploaded); 6 s dropped
+    /// words and left a 7 s gap.
+    pub span: Duration,
+}
+
+impl Agreement {
+    pub const DEFAULT_SPAN: Duration = Duration::from_secs(8);
 }
 
 impl SessionConfig {
@@ -241,6 +255,10 @@ pub enum TranscriptEvent {
     Refined { segments: usize, text: String },
     /// Full-audio batch pass; replaces everything emitted so far.
     Replace(String),
+    /// Audio sent to the provider so far in this session, against audio
+    /// recorded: what the session costs. Sent after every upload; the
+    /// chunked and agreement modes upload the same speech several times.
+    Usage { uploaded_ms: u64, recorded_ms: u64 },
     /// Provider or transport failure.
     Error(ErrorClass),
     /// Provider closed the session.

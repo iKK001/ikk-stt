@@ -286,6 +286,17 @@ pub struct VadSettings {
     pub agreement_step_ms: u32,
     #[serde(default = "default_agreement_windows")]
     pub agreement_windows: u32,
+    /// How far back each reading reaches, ms. Every second of speech is
+    /// uploaded about `agreement_span_ms / agreement_step_ms` times, so
+    /// this sets the provider cost; shorter spans give the recogniser
+    /// less context for the words still open (8 s read like 12 s on the
+    /// reference samples at ~70 % of the upload; 6 s dropped words).
+    #[serde(default = "default_agreement_span")]
+    pub agreement_span_ms: u32,
+}
+
+fn default_agreement_span() -> u32 {
+    8_000
 }
 
 fn default_agreement_step() -> u32 {
@@ -363,6 +374,7 @@ impl Default for VadSettings {
             agreement: true,
             agreement_step_ms: 1000,
             agreement_windows: 4,
+            agreement_span_ms: 8_000,
         }
     }
 }

@@ -30,6 +30,7 @@ pub fn start_config(settings: &Settings) -> StartConfig {
     session.agreement = settings.sound.vad.agreement.then(|| ikk_stt::Agreement {
         step: Duration::from_millis(settings.sound.vad.agreement_step_ms.max(500) as u64),
         windows: settings.sound.vad.agreement_windows.max(1) as usize,
+        span: Duration::from_millis(settings.sound.vad.agreement_span_ms.max(3000) as u64),
     });
     if settings.providers.active == "voiceitt" {
         // Voiceitt's three switches ride in the model string (see provider docs).

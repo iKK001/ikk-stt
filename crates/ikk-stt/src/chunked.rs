@@ -34,7 +34,7 @@
 //! could clear.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,11 +71,6 @@ const SILENT_DBFS: f32 = -70.0;
 const CHUNK_SPEECH_PROB: f32 = 0.5;
 /// Longest thought transcribed again in one piece.
 const REFINE_MAX: Duration = Duration::from_secs(90);
-/// Agreement windows reach back at most this far: the provider's response
-/// time grows with the clip (whisper-1: 5 s clip 1.3 s, 28 s clip 5.3 s),
-/// and the words still open only need the last several seconds of context;
-/// new words are aligned to the typed ones by their last words.
-const WINDOW_SPAN: Duration = Duration::from_secs(12);
 /// Agreement windows end at most this long after the last speech: a clip
 /// that trails off into seconds of ventilator makes the recogniser repeat
 /// an earlier sentence at the end.
@@ -165,6 +160,8 @@ pub struct ChunkedBatchSession {
     window_due: Duration,
     /// Highest speech probability heard in the thought.
     thought_speech: Option<f32>,
+    /// Audio pushed so far, ms; the worker reports it with every upload.
+    recorded: Arc<AtomicU64>,
     uploads: mpsc::Sender<Upload>,
     events: mpsc::Receiver<TranscriptEvent>,
     worker: tokio::task::JoinHandle<()>,
@@ -180,7 +177,15 @@ impl ChunkedBatchSession {
         let agreement = cfg.agreement;
         let pause = cfg.endpointing.max(Duration::from_millis(1500));
         let stale = Arc::new(AtomicBool::new(false));
-        let worker = tokio::spawn(run_ordered(provider, cfg, upload_rx, event_tx, stale.clone()));
+        let recorded = Arc::new(AtomicU64::new(0));
+        let worker = tokio::spawn(run_ordered(
+            provider,
+            cfg,
+            upload_rx,
+            event_tx,
+            stale.clone(),
+            recorded.clone(),
+        ));
         Self {
             buffer: Vec::new(),
             buffered: Duration::ZERO,
@@ -203,6 +208,7 @@ impl ChunkedBatchSession {
             agreement,
             window_due: agreement.map_or(Duration::ZERO, |a| a.step),
             thought_speech: None,
+            recorded,
             uploads: upload_tx,
             events: event_rx,
             worker,
@@ -308,13 +314,13 @@ impl ChunkedBatchSession {
             return;
         }
         trim_tail(&mut frames, WINDOW_TAIL);
-        // Only the last WINDOW_SPAN of the thought.
+        // Only the last `a.span` of the thought.
         let mut span = Duration::ZERO;
         let keep_from = frames
             .iter()
             .rposition(|f| {
                 span += f.duration();
-                span >= WINDOW_SPAN
+                span >= a.span
             })
             .unwrap_or(0);
         let from_start = keep_from == 0;
@@ -1029,7 +1035,10 @@ async fn run_ordered(
     mut uploads: mpsc::Receiver<Upload>,
     events: mpsc::Sender<TranscriptEvent>,
     stale: Arc<AtomicBool>,
+    recorded: Arc<AtomicU64>,
 ) {
+    // Audio handed to the provider so far (a retry counts again).
+    let mut uploaded = Duration::ZERO;
     // Texts of the last readings of the current thought, to notice when
     // nothing new is being said (see `STALE_READINGS`).
     let mut recent_texts: VecDeque<String> = VecDeque::new();
@@ -1116,6 +1125,7 @@ async fn run_ordered(
                     cfg_req.keywords.push((h, 5));
                 }
             }
+            uploaded += clip.frames.iter().map(|f| f.duration()).sum::<Duration>();
             tokio::spawn(transcribe_chunk(
                 provider.clone(),
                 cfg_req,
@@ -1126,6 +1136,12 @@ async fn run_ordered(
                 single_try,
                 done_tx.clone(),
             ));
+            let _ = events
+                .send(TranscriptEvent::Usage {
+                    uploaded_ms: uploaded.as_millis() as u64,
+                    recorded_ms: recorded.load(Ordering::Relaxed),
+                })
+                .await;
         }
         tokio::select! {
             up = uploads.recv(), if open && !fatal => match up {
@@ -1376,6 +1392,8 @@ async fn transcribe_chunk(
 #[async_trait::async_trait]
 impl StreamingSession for ChunkedBatchSession {
     async fn push(&mut self, frame: AudioFrame) -> Result<(), SttError> {
+        self.recorded
+            .fetch_add(frame.duration().as_millis() as u64, Ordering::Relaxed);
         if let Some(a) = self.agreement {
             self.push_window_frame(frame, a).await;
             return Ok(());
@@ -1600,15 +1618,66 @@ mod tests {
         cfg
     }
 
+    /// All events up to `Closed`, without the usage reports (they come
+    /// with every upload and say nothing about the text).
     async fn drain(s: &mut Box<dyn StreamingSession>) -> Vec<TranscriptEvent> {
+        drain_with_usage(s).await.0
+    }
+
+    /// The events and the last usage report (uploaded ms, recorded ms).
+    async fn drain_with_usage(s: &mut Box<dyn StreamingSession>) -> (Vec<TranscriptEvent>, (u64, u64)) {
         let mut events = Vec::new();
+        let mut usage = (0, 0);
         while let Some(ev) = s.events().recv().await {
-            if ev == TranscriptEvent::Closed {
-                break;
+            match ev {
+                TranscriptEvent::Closed => break,
+                TranscriptEvent::Usage {
+                    uploaded_ms,
+                    recorded_ms,
+                } => usage = (uploaded_ms, recorded_ms),
+                ev => events.push(ev),
             }
-            events.push(ev);
         }
-        events
+        (events, usage)
+    }
+
+    /// Agreement mode over a 6 s thought with a window every second and
+    /// `span` back: uploaded ms against recorded ms.
+    async fn agreement_usage(span: Duration) -> (u64, u64) {
+        let mut fake = Fake::new(|_| 1);
+        fake.sentence = true;
+        let fake = Arc::new(fake);
+        let mut cfg = config();
+        cfg.agreement = Some(Agreement {
+            step: Duration::from_millis(1000),
+            windows: 3,
+            span,
+        });
+        let mut s = open_session(fake, &cfg).await.unwrap();
+        for _ in 0..300 {
+            s.push(heard(20, 0.9)).await.unwrap();
+        }
+        s.cut_segment().await.unwrap();
+        s.finish().await.unwrap();
+        drain_with_usage(&mut s).await.1
+    }
+
+    #[tokio::test]
+    async fn usage_counts_uploads_against_recording_and_follows_the_span() {
+        // Plain chunks: one upload, as long as the recording.
+        let fake = Arc::new(Fake::new(|_| 1));
+        let mut s = open_session(fake, &config()).await.unwrap();
+        s.push(frame(300, 0.1)).await.unwrap();
+        s.cut_segment().await.unwrap();
+        s.finish().await.unwrap();
+        assert_eq!(drain_with_usage(&mut s).await.1, (300, 300));
+        // Agreement windows upload the same speech several times; a shorter
+        // span uploads less.
+        let (long, rec) = agreement_usage(Agreement::DEFAULT_SPAN).await;
+        assert_eq!(rec, 6000);
+        assert!(long > rec, "{long} ≤ {rec}");
+        let (short, _) = agreement_usage(Duration::from_secs(4)).await;
+        assert!(short < long, "{short} ≥ {long}");
     }
 
     #[tokio::test]
@@ -2279,6 +2348,7 @@ mod tests {
         cfg.agreement = Some(Agreement {
             step: Duration::from_millis(1000),
             windows: 3,
+            span: Agreement::DEFAULT_SPAN,
         });
         let mut s = open_session(fake.clone(), &cfg).await.unwrap();
         for _ in 0..300 {

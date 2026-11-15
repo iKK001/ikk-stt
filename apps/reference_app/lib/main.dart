@@ -112,6 +112,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _fallbackReason;
   String _fallbackText = '';
   String? _error;
+  // Audio sent to the provider against audio recorded (this session).
+  int _uploadedMs = 0;
+  int _recordedMs = 0;
   String _suggestion = '';
 
   @override
@@ -266,6 +269,11 @@ class _HomeScreenState extends State<HomeScreen> {
         case 'Level':
           _level = (v as num).toDouble();
         case 'State':
+          if (_state == 'Idle' && v != 'Idle') {
+            // A new session: its usage starts at zero.
+            _uploadedMs = 0;
+            _recordedMs = 0;
+          }
           _state = v as String;
           if (_state == 'Idle') {
             _interim = '';
@@ -290,6 +298,11 @@ class _HomeScreenState extends State<HomeScreen> {
               ..add(t['Replace'] as String);
           }
           if (t.containsKey('Error')) _error = 'Provider: ${t['Error']}';
+          if (t.containsKey('Usage')) {
+            final u = t['Usage'] as Map<String, dynamic>;
+            _uploadedMs = (u['uploaded_ms'] as num).toInt();
+            _recordedMs = (u['recorded_ms'] as num).toInt();
+          }
         case 'ConsentRequired':
           _askConsent(v as Map<String, dynamic>);
         case 'VoiceStandby':
@@ -780,6 +793,20 @@ class _HomeScreenState extends State<HomeScreen> {
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
+          // What the session costs: agreement mode uploads every second of
+          // speech several times, so the ratio is what the provider bills.
+          if (_recordedMs > 0)
+            Center(
+              child: Text(
+                _t.fmt('usageLine', {
+                  'u': _clock(_uploadedMs),
+                  'r': _clock(_recordedMs),
+                  'x': (_uploadedMs / _recordedMs).toStringAsFixed(1),
+                }),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
           const SizedBox(height: 8),
           // What changes during dictation (status, level, interim text, the
           // growing list of sentences) sits behind one fixed accessibility
@@ -1585,6 +1612,7 @@ class _HomeScreenState extends State<HomeScreen> {
       vad['agreement'] = true;
       vad['agreement_step_ms'] = 1000;
       vad['agreement_windows'] = 4;
+      vad['agreement_span_ms'] = 8000;
       o['transfer'] = 'Batch';
     } else {
       // v0.0.1(51), the release for clear speech.
@@ -1596,6 +1624,12 @@ class _HomeScreenState extends State<HomeScreen> {
       o['transfer'] = 'Streaming';
     }
     options[_provider] = o;
+  }
+
+  /// Milliseconds as m:ss.
+  static String _clock(int ms) {
+    final s = ms ~/ 1000;
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
   }
 
   /// One line with the settings the next session runs with.
