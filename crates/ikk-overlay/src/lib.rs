@@ -25,14 +25,12 @@ pub type OnMoved = Arc<dyn Fn(f64, f64) + Send + Sync>;
 /// `true` = audio correction (replace by voice), `false` = AI correction.
 pub type OnMode = Arc<dyn Fn(bool) + Send + Sync>;
 
-/// Called (on a background thread) with the range the user chose by key.
-pub type OnRange = Arc<dyn Fn(RangeMode) + Send + Sync>;
-
 /// Show the buttons (created on first use): `on_tap` for the microphone,
 /// `on_correct` for the correction button, `on_mode` for the switch
 /// between AI and audio correction (none: fewer buttons), `on_moved`
-/// after every drag, `on_next_range` when F1 is pressed anywhere while
-/// the buttons are shown (the correction button's range moves on).
+/// after every drag, `on_next_range` when F8 is pressed anywhere while
+/// the buttons are shown (the correction button's range moves on). F9
+/// flips the switch like a click on it (`on_mode`).
 pub fn show(
     on_tap: OnTap,
     on_correct: Option<OnTap>,
@@ -96,12 +94,6 @@ impl RangeMode {
             Self::Word => "single_word",
         }
     }
-}
-
-/// A key steps through the ranges while the buttons show (Windows: F2);
-/// `on_range` hears the new one and saves it. Call before [`show`].
-pub fn on_range_key(on_range: Option<OnRange>) {
-    platform::on_range_key(on_range);
 }
 
 /// Tell the correction button which range it corrects (its glyph changes).

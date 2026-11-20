@@ -2233,7 +2233,7 @@ class IkkEngineImpl extends RustOpaque implements IkkEngine {
   void loadConsent({required String consentJson}) => RustLib.instance.api
       .crateApiEngineIkkEngineLoadConsent(that: this, consentJson: consentJson);
 
-  /// F1 in the shell's own window: the
+  /// F8 in the shell's own window: the
   /// correction button's range moves on. The new range comes back as
   /// the `CorrectionRange` event, which the shell saves; "" when no
   /// settings are known yet.

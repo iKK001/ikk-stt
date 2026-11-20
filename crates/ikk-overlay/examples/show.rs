@@ -8,7 +8,7 @@ fn main() {
             Some(std::sync::Arc::new(|| eprintln!("correction clicked"))),
             Some(std::sync::Arc::new(|audio| eprintln!("switch audio={audio}"))),
             None,
-            Some(std::sync::Arc::new(|| eprintln!("F1: next range"))),
+            Some(std::sync::Arc::new(|| eprintln!("F8: next range"))),
         );
         std::thread::sleep(std::time::Duration::from_secs(5));
     }

@@ -350,7 +350,7 @@ impl Shared {
         }
     }
 
-    /// F1: the correction button's range moves on — click to click, click
+    /// F8: the correction button's range moves on — click to click, click
     /// to end, single word, whole text, and round again. The settings copy
     /// here changes at once (the button shows it, every reader of the settings
     /// sees it); the `CorrectionRange` event tells the shell, which saves it.
