@@ -25,6 +25,9 @@ pub type OnMoved = Arc<dyn Fn(f64, f64) + Send + Sync>;
 /// `true` = audio correction (replace by voice), `false` = AI correction.
 pub type OnMode = Arc<dyn Fn(bool) + Send + Sync>;
 
+/// Called (on a background thread) with the range the user chose by key.
+pub type OnRange = Arc<dyn Fn(RangeMode) + Send + Sync>;
+
 /// Show the buttons (created on first use): `on_tap` for the microphone,
 /// `on_correct` for the correction button, `on_mode` for the switch
 /// between AI and audio correction (none: fewer buttons), `on_moved`
@@ -83,6 +86,22 @@ impl RangeMode {
             _ => Self::CursorToEnd,
         }
     }
+
+    /// The settings value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CursorToEnd => "cursor_to_end",
+            Self::WholeText => "whole_text",
+            Self::ClickToClick => "click_to_click",
+            Self::Word => "single_word",
+        }
+    }
+}
+
+/// A key steps through the ranges while the buttons show (Windows: F2);
+/// `on_range` hears the new one and saves it. Call before [`show`].
+pub fn on_range_key(on_range: Option<OnRange>) {
+    platform::on_range_key(on_range);
 }
 
 /// Tell the correction button which range it corrects (its glyph changes).
@@ -140,7 +159,8 @@ pub fn set_shrink(on: bool) {
 
 /// Click to click: the correction button turns orange and the next `count`
 /// clicks anywhere on the screen (not on the buttons) are collected; then
-/// `on_done` gets their positions. Gives up after `timeout`. Returns false
+/// `on_done` gets their positions. Gives up after `timeout`: `on_done` then
+/// gets the clicks that did come, fewer than `count`. Returns false
 /// when the platform cannot capture clicks.
 pub fn capture_clicks(count: usize, timeout: std::time::Duration, on_done: OnClicks) -> bool {
     platform::capture_clicks(count, timeout, on_done)

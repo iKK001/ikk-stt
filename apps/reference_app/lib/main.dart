@@ -106,8 +106,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _rememberKeyTail(String credential) {
-    final key = _provider == 'azure' ? credential.substring(credential.indexOf(':') + 1) : credential;
-    _keyTail = key.isEmpty ? null : key.substring(key.length > 4 ? key.length - 4 : 0);
+    final key = _provider == 'azure'
+        ? credential.substring(credential.indexOf(':') + 1)
+        : credential;
+    _keyTail = key.isEmpty
+        ? null
+        : key.substring(key.length > 4 ? key.length - 4 : 0);
   }
 
   String _state = 'Idle';
@@ -131,9 +135,11 @@ class _HomeScreenState extends State<HomeScreen> {
   // ------------------------------------------------ shell
   Profiles get _profiles => Profiles(_settings);
   late HistoryStore _history;
+
   /// 0 profiles, 1 general, 2 history.
   int _tab = 0;
   static const _wizardSteps = 7;
+
   /// Open wizard: step index, the profile it edits, whether it was just
   /// created (cancel deletes it) and which profile was active before.
   int? _wizardStep;
@@ -157,7 +163,8 @@ class _HomeScreenState extends State<HomeScreen> {
   /// F1 while this window is in front: the correction range moves on, as
   /// it does from the floating buttons (any app).
   bool _onKey(KeyEvent event) {
-    if (event is! KeyDownEvent || event.logicalKey != LogicalKeyboardKey.f1) return false;
+    if (event is! KeyDownEvent || event.logicalKey != LogicalKeyboardKey.f1)
+      return false;
     _nextRange();
     return true;
   }
@@ -175,11 +182,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// The string key of a correction range's name.
   static String _rangeKey(String range) => switch (range) {
-        'click_to_click' => 'rangeClickToClick',
-        'single_word' => 'rangeWord',
-        'whole_text' => 'rangeWholeText',
-        _ => 'rangeCursorToEnd',
-      };
+    'click_to_click' => 'rangeClickToClick',
+    'single_word' => 'rangeWord',
+    'whole_text' => 'rangeWholeText',
+    _ => 'rangeCursorToEnd',
+  };
 
   Future<void> _init() async {
     final dir = configDir() ?? (await getApplicationSupportDirectory()).path;
@@ -190,7 +197,9 @@ class _HomeScreenState extends State<HomeScreen> {
     _voiceDir = localDataDir() ?? dir;
     _uiPath = '$dir${Platform.pathSeparator}ui.json';
     _history = HistoryStore(dir);
-    _settings = jsonDecode(await settingsLoad(path: _settingsPath)) as Map<String, dynamic>;
+    _settings = jsonDecode(
+      await settingsLoad(path: _settingsPath),
+    ) as Map<String, dynamic>;
     // First start after the update: the profile list is built from the
     // settings as they are (see Profiles.ensure).
     final hadProfiles = _profiles.byId(kDefaultProfileId) != null;
@@ -229,7 +238,9 @@ class _HomeScreenState extends State<HomeScreen> {
   /// text and answers go back to it.
   void _listenKeyboard() {
     if (!KeyboardBridge.supported) return;
-    KeyboardBridge.setCorrectionRange(_text['correction_range'] as String? ?? 'cursor_to_end');
+    KeyboardBridge.setCorrectionRange(
+      _text['correction_range'] as String? ?? 'cursor_to_end',
+    );
     KeyboardBridge.listen((cmd, original) {
       switch (cmd) {
         case 'start':
@@ -238,14 +249,20 @@ class _HomeScreenState extends State<HomeScreen> {
           if (_listening) _stop();
         case 'replace':
           try {
-            _engine.replaceByVoiceHost(settingsJson: jsonEncode(_settings), original: original);
+            _engine.replaceByVoiceHost(
+              settingsJson: jsonEncode(_settings),
+              original: original,
+            );
           } catch (e) {
             KeyboardBridge.done(false);
             _snack('$e');
           }
         case 'correct':
           try {
-            _engine.correctHost(settingsJson: jsonEncode(_settings), original: original);
+            _engine.correctHost(
+              settingsJson: jsonEncode(_settings),
+              original: original,
+            );
           } catch (e) {
             KeyboardBridge.done(false);
             _snack('$e');
@@ -259,10 +276,13 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  String get _provider => (_settings['providers']?['active'] as String?) ?? 'deepgram';
+  String get _provider =>
+      (_settings['providers']?['active'] as String?) ?? 'deepgram';
 
   /// The app's own language (settings `app.language`, ISO 639-3; '' = English).
-  String get _appLanguage => ((_settings['app'] as Map<String, dynamic>?)?['language'] as String?) ?? '';
+  String get _appLanguage =>
+      ((_settings['app'] as Map<String, dynamic>?)?['language'] as String?) ??
+      '';
   UiStrings get _t => UiStrings.of(_appLanguage);
 
   Future<void> _loadKey() async {
@@ -348,7 +368,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _rememberKeyTail(k);
       _keyCtl.text = '';
     });
-    if (_correctorKeyCtls.containsKey(_provider)) await _loadCorrectorKey(_provider);
+    if (_correctorKeyCtls.containsKey(_provider))
+      await _loadCorrectorKey(_provider);
   }
 
   Future<void> _saveSettings() async {
@@ -390,7 +411,8 @@ class _HomeScreenState extends State<HomeScreen> {
           if (_state == 'Idle') {
             _interim = '';
             _speech = false;
-            if (wasRunning && _finals.isNotEmpty) _history.add(_finals.join('\n'));
+            if (wasRunning && _finals.isNotEmpty)
+              _history.add(_finals.join('\n'));
           }
         case 'Speech':
           _speech = v as bool;
@@ -401,8 +423,13 @@ class _HomeScreenState extends State<HomeScreen> {
             _interim = '';
             _finals.add(t['Final'] as String);
             // Test builds: the typed text in the device log (adb logcat, tag flutter).
-            if (kDebugMode) debugPrint('ikk final [${DateTime.now().toIso8601String()}]: ${t['Final']}');
-            if (_fallbackReason != null) _fallbackText = '${_fallbackText.trimRight()} ${t['Final']}'.trim();
+            if (kDebugMode)
+              debugPrint(
+                'ikk final [${DateTime.now().toIso8601String()}]: ${t['Final']}',
+              );
+            if (_fallbackReason != null)
+              _fallbackText = '${_fallbackText.trimRight()} ${t['Final']}'
+                  .trim();
           }
           if (t.containsKey('Replace')) {
             // Live correction or batch pass: the text so far, corrected.
@@ -448,26 +475,38 @@ class _HomeScreenState extends State<HomeScreen> {
           KeyboardBridge.done(c['changed'] == true);
         case 'CorrectionMode':
           // The switch on the floating panel: remembered for the next start.
-          _ui['correction_mode'] = (v as Map<String, dynamic>)['audio'] == true ? 'audio' : 'ai';
+          _ui['correction_mode'] = (v as Map<String, dynamic>)['audio'] == true
+              ? 'audio'
+              : 'ai';
           _saveUi();
         case 'CorrectionRange':
-          // F1: the correction button's range moved on; saved like a choice
-          // on the profile page.
-          final range = (v as Map<String, dynamic>)['range'] as String? ?? 'cursor_to_end';
+          // The range key on the floating panel: kept like a choice in the settings.
+          final range = (v as Map<String, dynamic>)['range'] as String;
           _text['correction_range'] = range;
           KeyboardBridge.setCorrectionRange(range);
           _saveSettings();
-          _snack(_t.fmt('rangeNow', {'r': _t[_rangeKey(range)]}));
         case 'ReplaceListening':
-          _snack(_t.fmt('replaceListening', {'s': (v as Map<String, dynamic>)['original']}));
+          _snack(
+            _t.fmt('replaceListening', {
+              's': (v as Map<String, dynamic>)['original'],
+            }),
+          );
         case 'Replaced':
           final r = v as Map<String, dynamic>;
-          _snack(r['changed'] == true ? _t.fmt('replaced', {'f': r['from'], 't': r['to']}) : _t['replacedNone']);
+          _snack(
+            r['changed'] == true
+                ? _t.fmt('replaced', {'f': r['from'], 't': r['to']})
+                : _t['replacedNone'],
+          );
           KeyboardBridge.done(r['changed'] == true);
         case 'HostReplace':
-          KeyboardBridge.replace((v as Map<String, dynamic>)['text'] as String? ?? '');
+          KeyboardBridge.replace(
+            (v as Map<String, dynamic>)['text'] as String? ?? '',
+          );
         case 'HostText':
-          KeyboardBridge.text((v as Map<String, dynamic>)['text'] as String? ?? '');
+          KeyboardBridge.text(
+            (v as Map<String, dynamic>)['text'] as String? ?? '',
+          );
         case 'CommandRefused':
           _snack(_t.commandRefused(v as String));
         case 'CommandHeard':
@@ -476,7 +515,10 @@ class _HomeScreenState extends State<HomeScreen> {
           // Dragged by hand: that is where they open next time, and no
           // saved position is "the chosen one" any more.
           final m = v as Map<String, dynamic>;
-          _ui['button_position'] = {'x': (m['x'] as num).toDouble(), 'y': (m['y'] as num).toDouble()};
+          _ui['button_position'] = {
+            'x': (m['x'] as num).toDouble(),
+            'y': (m['y'] as num).toDouble(),
+          };
           _ui.remove('position_selected');
           _saveUi();
         case 'Command':
@@ -495,12 +537,21 @@ class _HomeScreenState extends State<HomeScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(_t.fmt(textOnly ? 'consentTitleText' : 'consentTitleAudio', {'p': r['name']})),
+        title: Text(
+          _t.fmt(textOnly ? 'consentTitleText' : 'consentTitleAudio', {
+            'p': r['name'],
+          }),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t.fmt(textOnly ? 'consentBodyText' : 'consentBodyAudio', {'p': r['name'], 'u': uses})),
+            Text(
+              _t.fmt(textOnly ? 'consentBodyText' : 'consentBodyAudio', {
+                'p': r['name'],
+                'u': uses,
+              }),
+            ),
             const SizedBox(height: 12),
             TextButton(
               onPressed: () => launchUrl(Uri.parse(r['privacy_url'] as String)),
@@ -509,8 +560,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_t['deny'])),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(_t['allow'])),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(_t['deny']),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(_t['allow']),
+          ),
         ],
       ),
     );
@@ -534,7 +591,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_ui.isNotEmpty) return;
     try {
       final f = File(_uiPath);
-      if (await f.exists()) _ui = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      if (await f.exists())
+        _ui = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
     } catch (_) {}
   }
 
@@ -553,7 +611,8 @@ class _HomeScreenState extends State<HomeScreen> {
     await _loadUi();
     _engine.showFloatingButton(show_: true);
     if (_shrinkSupported) _engine.setFloatingShrink(on_: _shrinkButtons);
-    if (_shrinkSupported) _engine.setCorrectionMode(audio: _ui['correction_mode'] == 'audio');
+    if (_shrinkSupported)
+      _engine.setCorrectionMode(audio: _ui['correction_mode'] == 'audio');
   }
 
   /// Desktop buttons can shrink away from the mouse (ui.json
@@ -622,8 +681,14 @@ class _HomeScreenState extends State<HomeScreen> {
           onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(_t['cancel'])),
-          FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim()), child: Text(_t['save'])),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(_t['cancel']),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+            child: Text(_t['save']),
+          ),
         ],
       ),
     );
@@ -657,17 +722,30 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['positionsTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['positionsTitle'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 4),
             Text(_t['positionsBody']),
             const SizedBox(height: 8),
-            if (list.isEmpty) Text(_t['noPositions'], style: Theme.of(context).textTheme.bodySmall),
+            if (list.isEmpty)
+              Text(
+                _t['noPositions'],
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             for (final p in list)
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: Icon(p['name'] == chosen ? Icons.radio_button_checked : Icons.radio_button_off),
+                leading: Icon(
+                  p['name'] == chosen
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                ),
                 title: Text(p['name'] as String),
-                subtitle: Text('${(p['x'] as num).round()} · ${(p['y'] as num).round()}'),
+                subtitle: Text(
+                  '${(p['x'] as num).round()} · ${(p['y'] as num).round()}',
+                ),
                 onTap: () => _choosePosition(p),
                 trailing: IconButton(
                   tooltip: _t['remove'],
@@ -695,6 +773,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // ------------------------------------------------ background mode
 
   bool _keepRunning = true;
+
   /// Registered to start with the session; null while unknown.
   bool? _loginItem;
 
@@ -713,7 +792,10 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['backgroundTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['backgroundTitle'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['keepRunning']),
@@ -735,8 +817,10 @@ class _HomeScreenState extends State<HomeScreen> {
               onChanged: _loginItem == null
                   ? null
                   : (on) async {
-                      final (state, error) = await BackgroundControl.setLoginItem(on);
-                      if (error != null) _snack(_t.fmt('loginItemFailed', {'e': error}));
+                      final (state, error) =
+                          await BackgroundControl.setLoginItem(on);
+                      if (error != null)
+                        _snack(_t.fmt('loginItemFailed', {'e': error}));
                       if (state != null) _loginItem = state;
                       if (mounted) setState(() {});
                     },
@@ -754,13 +838,19 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['floatingTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['floatingTitle'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 4),
             Text(_t['floatingBody']),
             const SizedBox(height: 4),
             Text(_t['replaceButtonBody']),
             const SizedBox(height: 4),
-            Text(_t['floatingNote'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t['floatingNote'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             if (_shrinkSupported)
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -791,8 +881,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _describeHeard(Map<String, dynamic> e) {
     final j = e['judgement'] as Map<String, dynamic>;
-    String d(Object? v) => v == null ? 'length off' : (v as num).toStringAsFixed(1);
-    final result = switch (j['command']) { 'Start' => 'START', 'Stop' => 'STOP', _ => 'nothing' };
+    String d(Object? v) =>
+        v == null ? 'length off' : (v as num).toStringAsFixed(1);
+    final result = switch (j['command']) {
+      'Start' => 'START',
+      'Stop' => 'STOP',
+      _ => 'nothing',
+    };
     return '${e['standby'] == true ? 'While waiting' : 'While dictating'}: '
         '${(j['secs'] as num).toStringAsFixed(2)} s, ${(j['level_dbfs'] as num).toStringAsFixed(0)} dBFS, '
         'start ${d(j['start'])} (limit ${(j['start_threshold'] as num).toStringAsFixed(1)}), '
@@ -869,7 +964,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // running dictation would transcribe them (and type them somewhere).
     _engine.setVoiceTraining(active: true);
     try {
-      final step = ValueNotifier<_VoiceStep>(_VoiceStep(_t['getReady'], _StepKind.info));
+      final step = ValueNotifier<_VoiceStep>(
+        _VoiceStep(_t['getReady'], _StepKind.info),
+      );
       var cancelled = false;
       var detail = '';
       if (!mounted) return;
@@ -880,13 +977,25 @@ class _HomeScreenState extends State<HomeScreen> {
           title: Text(_t['voiceDialogTitle']),
           content: ValueListenableBuilder<_VoiceStep>(
             valueListenable: step,
-            builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(st.icon, size: 48, color: st.color(Theme.of(ctx).colorScheme)),
-              const SizedBox(height: 12),
-              Text(st.text, style: Theme.of(ctx).textTheme.titleMedium, textAlign: TextAlign.center),
-              const SizedBox(height: 16),
-              if (st.kind == _StepKind.listening) const LinearProgressIndicator(),
-            ]),
+            builder: (_, st, _) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  st.icon,
+                  size: 48,
+                  color: st.color(Theme.of(ctx).colorScheme),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  st.text,
+                  style: Theme.of(ctx).textTheme.titleMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                if (st.kind == _StepKind.listening)
+                  const LinearProgressIndicator(),
+              ],
+            ),
           ),
           actions: [
             TextButton(
@@ -918,8 +1027,8 @@ class _HomeScreenState extends State<HomeScreen> {
               retry
                   ? 'sayWordRetry'
                   : n == 1
-                      ? 'sayWordNow'
-                      : 'sayWordMore',
+                  ? 'sayWordNow'
+                  : 'sayWordMore',
               {'d': detail, 'l': label, 'n': n},
             ),
             retry ? _StepKind.retry : _StepKind.listening,
@@ -927,7 +1036,10 @@ class _HomeScreenState extends State<HomeScreen> {
           try {
             // A slow speaker's two-word command needs time; the room is
             // measured first as well.
-            final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 12);
+            final take = await voiceRecordTake(
+              settingsJson: jsonEncode(_settings),
+              timeoutSecs: 12,
+            );
             if (cancelled) break;
             takes[word]!.add(take);
             retry = false;
@@ -935,8 +1047,15 @@ class _HomeScreenState extends State<HomeScreen> {
           } catch (e) {
             if (cancelled) break;
             retry = true;
-            detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
-            await show(_t.fmt('notClear', {'d': detail}), _StepKind.retry, 2000);
+            detail = '$e'.replaceFirst(
+              RegExp(r'^.*?(nothing heard|heard something)'),
+              r'$1',
+            );
+            await show(
+              _t.fmt('notClear', {'d': detail}),
+              _StepKind.retry,
+              2000,
+            );
           }
           if (!cancelled && takes[word]!.length == 3) {
             try {
@@ -944,7 +1063,11 @@ class _HomeScreenState extends State<HomeScreen> {
             } catch (_) {
               takes[word]!.clear();
               retry = false;
-              await show(_t.fmt('tooDifferent', {'l': label}), _StepKind.retry, 2500);
+              await show(
+                _t.fmt('tooDifferent', {'l': label}),
+                _StepKind.retry,
+                2500,
+              );
             }
           }
         }
@@ -956,7 +1079,10 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       await show(_t['learningWords'], _StepKind.listening);
       try {
-        _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
+        _voiceModel = await voiceTrain(
+          startTakes: takes['start']!,
+          stopTakes: takes['stop']!,
+        );
         _voiceOn = true;
         await _saveVoice();
         await show(_t['voiceDone'], _StepKind.ok, 2500);
@@ -980,17 +1106,22 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['voiceTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['voiceTitle'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 4),
             Text(_t['voiceBody']),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['voiceSwitch']),
-              subtitle: Text(_t[_voiceModel == null
-                  ? 'voiceRecordFirst'
-                  : _voiceStandby
-                      ? 'voiceListening'
-                      : 'voiceReady']),
+              subtitle: Text(
+                _t[_voiceModel == null
+                    ? 'voiceRecordFirst'
+                    : _voiceStandby
+                    ? 'voiceListening'
+                    : 'voiceReady'],
+              ),
               value: _voiceOn,
               onChanged: _voiceModel == null
                   ? null
@@ -1008,17 +1139,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: const EdgeInsets.only(bottom: 8),
                 child: ExcludeSemantics(
                   child: Text(
-                  [
-                    if (_standbyLevel != null) 'Waiting listener level: ${_standbyLevel!.toStringAsFixed(0)} dBFS',
-                    if (_voiceHeard != null) 'Last heard. $_voiceHeard',
-                  ].join('\n'),
-                  style: Theme.of(context).textTheme.bodySmall,
+                    [
+                      if (_standbyLevel != null)
+                        'Waiting listener level: ${_standbyLevel!.toStringAsFixed(0)} dBFS',
+                      if (_voiceHeard != null) 'Last heard. $_voiceHeard',
+                    ].join('\n'),
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
               ),
             OutlinedButton(
               onPressed: _trainVoice,
-              child: Text(_t[_voiceModel == null ? 'voiceRecord' : 'voiceRecordAgain']),
+              child: Text(
+                _t[_voiceModel == null ? 'voiceRecord' : 'voiceRecordAgain'],
+              ),
             ),
           ],
         ),
@@ -1035,13 +1169,19 @@ class _HomeScreenState extends State<HomeScreen> {
         title: Text(_t['setupTitle']),
         content: Text(s['message'] as String? ?? ''),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_t['cancel'])),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(_t['cancel']),
+          ),
           if (url.isNotEmpty)
             TextButton(
               onPressed: () => launchUrl(Uri.parse(url)),
               child: Text(_t['openSettings']),
             ),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(_t['doneStart'])),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(_t['doneStart']),
+          ),
         ],
       ),
     );
@@ -1092,7 +1232,8 @@ class _HomeScreenState extends State<HomeScreen> {
     // The widgets without settings at hand (licences page, platform cards,
     // history) read the language from here.
     UiStrings.current = _t;
-    if (_settings.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_settings.isEmpty)
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     if (_wizardStep != null) return _wizardScaffold();
     return _mobile ? _mobileShell() : _desktopShell();
   }
@@ -1107,7 +1248,13 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(titles[_tab]),
-        actions: [IconButton(icon: const Icon(Icons.info_outline), tooltip: _t['about'], onPressed: () => _showAbout(context))],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            tooltip: _t['about'],
+            onPressed: () => _showAbout(context),
+          ),
+        ],
       ),
       body: switch (_tab) {
         0 => _profilePage(showChips: true),
@@ -1119,9 +1266,19 @@ class _HomeScreenState extends State<HomeScreen> {
         selectedIndex: _tab,
         onDestinationSelected: (i) => setState(() => _tab = i),
         destinations: [
-          NavigationDestination(icon: const Icon(Icons.people_outline), selectedIcon: const Icon(Icons.people), label: _t['profiles']),
-          NavigationDestination(icon: const Icon(Icons.tune), label: _t['general']),
-          NavigationDestination(icon: const Icon(Icons.history), label: _t['history']),
+          NavigationDestination(
+            icon: const Icon(Icons.people_outline),
+            selectedIcon: const Icon(Icons.people),
+            label: _t['profiles'],
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.tune),
+            label: _t['general'],
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.history),
+            label: _t['history'],
+          ),
         ],
       ),
     );
@@ -1151,12 +1308,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-                    child: Text(appName, style: Theme.of(context).textTheme.titleLarge),
+                    child: Text(
+                      appName,
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
                   ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
-                    child: Text(_t['profiles'].toUpperCase(),
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant, letterSpacing: 1)),
+                    child: Text(
+                      _t['profiles'].toUpperCase(),
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                        letterSpacing: 1,
+                      ),
+                    ),
                   ),
                   Expanded(
                     child: ListView(
@@ -1171,7 +1336,10 @@ class _HomeScreenState extends State<HomeScreen> {
                               onTap: () => _activateProfile(p['id'] as String),
                             ),
                           ),
-                        AddProfileChip(label: _t['newProfile'], onTap: () => _startWizard()),
+                        AddProfileChip(
+                          label: _t['newProfile'],
+                          onTap: () => _startWizard(),
+                        ),
                       ],
                     ),
                   ),
@@ -1205,13 +1373,20 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-                  child: Text(title, style: Theme.of(context).textTheme.headlineSmall),
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
                 ),
                 Expanded(
                   child: switch (_tab) {
                     0 => _profilePage(showChips: false),
                     1 => _generalPage(),
-                    _ => HistoryPane(key: ValueKey(_history), store: _history, embedded: true),
+                    _ => HistoryPane(
+                      key: ValueKey(_history),
+                      store: _history,
+                      embedded: true,
+                    ),
                   },
                 ),
               ],
@@ -1224,10 +1399,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _micFab() => FloatingActionButton.extended(
-        onPressed: _listening ? _stop : _start,
-        icon: Icon(_listening ? Icons.stop : Icons.mic),
-        label: Text(_t[_listening ? 'stop' : 'dictate']),
-      );
+    onPressed: _listening ? _stop : _start,
+    icon: Icon(_listening ? Icons.stop : Icons.mic),
+    label: Text(_t[_listening ? 'stop' : 'dictate']),
+  );
 
   // ------------------------------------------------ profiles
 
@@ -1253,8 +1428,14 @@ class _HomeScreenState extends State<HomeScreen> {
         title: Text(_t['deleteProfile']),
         content: Text(_t.fmt('deleteProfileBody', {'n': p['title']})),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_t['cancel'])),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(_t['remove'])),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(_t['cancel']),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(_t['remove']),
+          ),
         ],
       ),
     );
@@ -1263,7 +1444,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final wasActive = id == _profiles.activeId;
     if (wasActive && _listening) _stop();
     try {
-      final f = File('$_voiceDir${Platform.pathSeparator}voice_commands_$id.bin');
+      final f = File(
+        '$_voiceDir${Platform.pathSeparator}voice_commands_$id.bin',
+      );
       if (await f.exists()) await f.delete();
     } catch (_) {}
     _profiles.delete(id);
@@ -1300,7 +1483,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       onTap: () => _activateProfile(q['id'] as String),
                     ),
                   ),
-                AddProfileChip(label: _t['newProfile'], compact: true, onTap: () => _startWizard()),
+                AddProfileChip(
+                  label: _t['newProfile'],
+                  compact: true,
+                  onTap: () => _startWizard(),
+                ),
               ],
             ),
           ),
@@ -1331,35 +1518,48 @@ class _HomeScreenState extends State<HomeScreen> {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Row(children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(14)),
-            child: Icon(profileIcon(p), color: Colors.white, size: 26),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(p['title'] as String? ?? '', style: Theme.of(context).textTheme.titleMedium),
-              Text(
-                ((p['subtitle'] as String?)?.isNotEmpty ?? false) ? p['subtitle'] as String : _t['profileSettings'],
-                style: Theme.of(context).textTheme.bodySmall,
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(14),
               ),
-            ]),
-          ),
-          IconButton(
-            tooltip: _t['editProfile'],
-            icon: const Icon(Icons.edit_outlined),
-            onPressed: () => _startWizard(id: p['id'] as String),
-          ),
-          if (!isDefault)
-            IconButton(
-              tooltip: _t['deleteProfile'],
-              icon: const Icon(Icons.delete_outline),
-              onPressed: () => _deleteProfile(p),
+              child: Icon(profileIcon(p), color: Colors.white, size: 26),
             ),
-        ]),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    p['title'] as String? ?? '',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  Text(
+                    ((p['subtitle'] as String?)?.isNotEmpty ?? false)
+                        ? p['subtitle'] as String
+                        : _t['profileSettings'],
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: _t['editProfile'],
+              icon: const Icon(Icons.edit_outlined),
+              onPressed: () => _startWizard(id: p['id'] as String),
+            ),
+            if (!isDefault)
+              IconButton(
+                tooltip: _t['deleteProfile'],
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () => _deleteProfile(p),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1373,7 +1573,10 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(_activeSummary(), style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _activeSummary(),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             if (_recordedMs > 0)
               Text(
                 _t.fmt('usageLine', {
@@ -1391,26 +1594,53 @@ class _HomeScreenState extends State<HomeScreen> {
             Semantics(
               container: true,
               label: _t.fmt('status', {'s': _state}),
-              child: ExcludeSemantics(child: Text('$_state${_speech ? ' · ${_t['speech']}' : ''}')),
+              child: ExcludeSemantics(
+                child: Text('$_state${_speech ? ' · ${_t['speech']}' : ''}'),
+              ),
             ),
             const SizedBox(height: 6),
-            ExcludeSemantics(child: LinearProgressIndicator(value: ((_level + 60) / 60).clamp(0.0, 1.0))),
+            ExcludeSemantics(
+              child: LinearProgressIndicator(
+                value: ((_level + 60) / 60).clamp(0.0, 1.0),
+              ),
+            ),
             if (_error != null) ...[
               const SizedBox(height: 8),
-              Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
             ],
-            if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t.fmt('suggested', {'s': _suggestion}))),
-            if (_fallbackReason != null) ...[const SizedBox(height: 8), _fallbackCard()],
+            if (_suggestion.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(_t.fmt('suggested', {'s': _suggestion})),
+              ),
+            if (_fallbackReason != null) ...[
+              const SizedBox(height: 8),
+              _fallbackCard(),
+            ],
             if (_interim.isNotEmpty) ...[
               const SizedBox(height: 8),
-              ExcludeSemantics(child: Text(_interim, style: const TextStyle(fontStyle: FontStyle.italic))),
+              ExcludeSemantics(
+                child: Text(
+                  _interim,
+                  style: const TextStyle(fontStyle: FontStyle.italic),
+                ),
+              ),
             ],
             if (_finals.isNotEmpty) ...[
               const SizedBox(height: 8),
               Semantics(
                 container: true,
                 label: _t.fmt('lastRecognised', {'s': _finals.last}),
-                child: ExcludeSemantics(child: Text(_finals.last, maxLines: 3, overflow: TextOverflow.ellipsis)),
+                child: ExcludeSemantics(
+                  child: Text(
+                    _finals.last,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ),
             ],
           ],
@@ -1428,10 +1658,22 @@ class _HomeScreenState extends State<HomeScreen> {
         _appLanguageSection(),
         const SizedBox(height: 16),
         _micSection(),
-        if (_floatingSupported) ...[const SizedBox(height: 16), _floatingSection()],
-        if (_buttonsMovable) ...[const SizedBox(height: 16), _positionsSection()],
-        if (BackgroundControl.supported) ...[const SizedBox(height: 16), _backgroundSection()],
-        if (otherAppsCard() case final card?) ...[const SizedBox(height: 16), card],
+        if (_floatingSupported) ...[
+          const SizedBox(height: 16),
+          _floatingSection(),
+        ],
+        if (_buttonsMovable) ...[
+          const SizedBox(height: 16),
+          _positionsSection(),
+        ],
+        if (BackgroundControl.supported) ...[
+          const SizedBox(height: 16),
+          _backgroundSection(),
+        ],
+        if (otherAppsCard() case final card?) ...[
+          const SizedBox(height: 16),
+          card,
+        ],
       ],
     );
   }
@@ -1443,14 +1685,24 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t.appLanguage, style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t.appLanguage,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             DropdownButton<String>(
               value: _appLanguage.isEmpty ? 'eng' : _appLanguage,
               isExpanded: true,
-              items: [for (final code in UiStrings.codes) DropdownMenuItem(value: code, child: Text(UiStrings.of(code).name))],
+              items: [
+                for (final code in UiStrings.codes)
+                  DropdownMenuItem(
+                    value: code,
+                    child: Text(UiStrings.of(code).name),
+                  ),
+              ],
               onChanged: (code) {
                 if (code == null) return;
-                (_settings['app'] ??= <String, dynamic>{})['language'] = code == 'eng' ? '' : code;
+                (_settings['app'] ??= <String, dynamic>{})['language'] =
+                    code == 'eng' ? '' : code;
                 _saveSettings();
               },
             ),
@@ -1462,7 +1714,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ------------------------------------------------ wizard
 
-  Map<String, dynamic>? get _wizardProfile => _wizardId == null ? null : _profiles.byId(_wizardId!);
+  Map<String, dynamic>? get _wizardProfile =>
+      _wizardId == null ? null : _profiles.byId(_wizardId!);
 
   /// New profile (no [id]): created from the active one with the
   /// impaired preset and made active, so the steps edit it live. An
@@ -1472,7 +1725,11 @@ class _HomeScreenState extends State<HomeScreen> {
     _wizardPrevActive = _profiles.activeId;
     if (id == null) {
       final n = _profiles.list.length;
-      final p = _profiles.create(title: '${_t['newProfile']} $n', impaired: true, color: n % kProfileColors.length);
+      final p = _profiles.create(
+        title: '${_t['newProfile']} $n',
+        impaired: true,
+        color: n % kProfileColors.length,
+      );
       _wizardNew = true;
       id = p['id'] as String;
     } else {
@@ -1501,7 +1758,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _finishWizard() async {
     final p = _wizardProfile;
-    if (p != null && (p['title'] as String? ?? '').trim().isEmpty) p['title'] = _t['newProfile'];
+    if (p != null && (p['title'] as String? ?? '').trim().isEmpty)
+      p['title'] = _t['newProfile'];
     await _saveSettings();
     if (mounted) setState(() => _wizardStep = null);
   }
@@ -1511,7 +1769,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final id = _wizardId!;
       _profiles.delete(id);
       await _saveSettings();
-      if (_wizardPrevActive != null && _profiles.byId(_wizardPrevActive!) != null && _wizardPrevActive != _profiles.activeId) {
+      if (_wizardPrevActive != null &&
+          _profiles.byId(_wizardPrevActive!) != null &&
+          _wizardPrevActive != _profiles.activeId) {
         _profiles.activate(_wizardPrevActive!);
         await _saveSettings();
       }
@@ -1531,10 +1791,20 @@ class _HomeScreenState extends State<HomeScreen> {
     final step = _wizardStep!;
     final p = _wizardProfile;
     if (p == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => setState(() => _wizardStep = null));
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => setState(() => _wizardStep = null),
+      );
       return const Scaffold(body: SizedBox.shrink());
     }
-    final titles = ['stepProfile', 'stepProvider', 'stepLanguage', 'stepCorrection', 'stepImpaired', 'stepFilters', 'stepCommands'];
+    final titles = [
+      'stepProfile',
+      'stepProvider',
+      'stepLanguage',
+      'stepCorrection',
+      'stepImpaired',
+      'stepFilters',
+      'stepCommands',
+    ];
     final body = switch (step) {
       0 => _identityStep(p),
       1 => _providerSection(),
@@ -1558,7 +1828,11 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       child: Scaffold(
         appBar: AppBar(
-          leading: IconButton(icon: const Icon(Icons.close), tooltip: _t['cancel'], onPressed: _cancelWizard),
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            tooltip: _t['cancel'],
+            onPressed: _cancelWizard,
+          ),
           title: Text(_t.fmt('stepOf', {'n': step + 1, 't': _wizardSteps})),
         ),
         body: Center(
@@ -1569,7 +1843,10 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 LinearProgressIndicator(value: (step + 1) / _wizardSteps),
                 const SizedBox(height: 16),
-                Text(_t[titles[step]], style: Theme.of(context).textTheme.headlineSmall),
+                Text(
+                  _t[titles[step]],
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
                 const SizedBox(height: 4),
                 Text(_t['${titles[step]}Body']),
                 const SizedBox(height: 16),
@@ -1581,20 +1858,24 @@ class _HomeScreenState extends State<HomeScreen> {
         bottomNavigationBar: SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Row(children: [
-              if (step > 0)
-                OutlinedButton.icon(
-                  onPressed: () => setState(() => _wizardStep = step - 1),
-                  icon: const Icon(Icons.chevron_left),
-                  label: Text(_t['back']),
+            child: Row(
+              children: [
+                if (step > 0)
+                  OutlinedButton.icon(
+                    onPressed: () => setState(() => _wizardStep = step - 1),
+                    icon: const Icon(Icons.chevron_left),
+                    label: Text(_t['back']),
+                  ),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: last
+                      ? _finishWizard
+                      : () => setState(() => _wizardStep = step + 1),
+                  icon: Icon(last ? Icons.check : Icons.chevron_right),
+                  label: Text(_t[last ? 'finish' : 'next']),
                 ),
-              const Spacer(),
-              FilledButton.icon(
-                onPressed: last ? _finishWizard : () => setState(() => _wizardStep = step + 1),
-                icon: Icon(last ? Icons.check : Icons.chevron_right),
-                label: Text(_t[last ? 'finish' : 'next']),
-              ),
-            ]),
+              ],
+            ),
           ),
         ),
       ),
@@ -1611,26 +1892,41 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Container(
-                width: 56,
-                height: 56,
-                decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(16)),
-                child: Icon(profileIcon(p), color: Colors.white, size: 30),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(p['title'] as String? ?? '', style: Theme.of(context).textTheme.titleMedium),
-                  if ((p['subtitle'] as String? ?? '').isNotEmpty) Text(p['subtitle'] as String),
-                ]),
-              ),
-            ]),
+            Row(
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Icon(profileIcon(p), color: Colors.white, size: 30),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        p['title'] as String? ?? '',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      if ((p['subtitle'] as String? ?? '').isNotEmpty)
+                        Text(p['subtitle'] as String),
+                    ],
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 12),
             TextField(
               controller: _nameCtl,
               enabled: !isDefault,
-              decoration: InputDecoration(labelText: _t['profileName'], helperText: isDefault ? _t['defaultFixedName'] : null),
+              decoration: InputDecoration(
+                labelText: _t['profileName'],
+                helperText: isDefault ? _t['defaultFixedName'] : null,
+              ),
               onChanged: (v) => setState(() => p['title'] = v),
             ),
             TextField(
@@ -1639,7 +1935,10 @@ class _HomeScreenState extends State<HomeScreen> {
               onChanged: (v) => setState(() => p['subtitle'] = v),
             ),
             const SizedBox(height: 16),
-            Text(_t['profileIcon'], style: Theme.of(context).textTheme.titleSmall),
+            Text(
+              _t['profileIcon'],
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
             const SizedBox(height: 4),
             Wrap(
               spacing: 8,
@@ -1651,7 +1950,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     selected: p['icon'] == e.key,
                     label: e.key,
                     child: Material(
-                      color: p['icon'] == e.key ? color : Theme.of(context).colorScheme.surfaceContainerHighest,
+                      color: p['icon'] == e.key
+                          ? color
+                          : Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
                       borderRadius: BorderRadius.circular(12),
                       child: InkWell(
                         borderRadius: BorderRadius.circular(12),
@@ -1659,7 +1962,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: SizedBox(
                           width: 48,
                           height: 48,
-                          child: Icon(e.value, color: p['icon'] == e.key ? Colors.white : null),
+                          child: Icon(
+                            e.value,
+                            color: p['icon'] == e.key ? Colors.white : null,
+                          ),
                         ),
                       ),
                     ),
@@ -1667,7 +1973,10 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 16),
-            Text(_t['profileColor'], style: Theme.of(context).textTheme.titleSmall),
+            Text(
+              _t['profileColor'],
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
             const SizedBox(height: 4),
             Wrap(
               spacing: 8,
@@ -1688,11 +1997,15 @@ class _HomeScreenState extends State<HomeScreen> {
                           color: kProfileColors[i],
                           shape: BoxShape.circle,
                           border: Border.all(
-                            color: (p['color'] as num?)?.toInt() == i ? Theme.of(context).colorScheme.onSurface : Colors.transparent,
+                            color: (p['color'] as num?)?.toInt() == i
+                                ? Theme.of(context).colorScheme.onSurface
+                                : Colors.transparent,
                             width: 3,
                           ),
                         ),
-                        child: (p['color'] as num?)?.toInt() == i ? const Icon(Icons.check, color: Colors.white) : null,
+                        child: (p['color'] as num?)?.toInt() == i
+                            ? const Icon(Icons.check, color: Colors.white)
+                            : null,
                       ),
                     ),
                   ),
@@ -1706,28 +2019,45 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// The training-mode settings (`text.training`), created when missing.
   Map<String, dynamic> _training() {
-    final text = (_settings['text'] ??= <String, dynamic>{}) as Map<String, dynamic>;
-    final t = (text['training'] ??= <String, dynamic>{'enabled': true, 'words': <dynamic>[]}) as Map<String, dynamic>;
+    final text =
+        (_settings['text'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+    final t =
+        (text['training'] ??= <String, dynamic>{
+              'enabled': true,
+              'words': <dynamic>[],
+            })
+            as Map<String, dynamic>;
     t['words'] ??= <dynamic>[];
     t['enabled'] ??= true;
     return t;
   }
 
-  static String _normWord(String s) => s.toLowerCase().replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
+  static String _normWord(String s) =>
+      s.toLowerCase().replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
 
   /// Store what the recogniser heard for [word] (nothing when it heard
   /// the word itself).
   void _learn(String word, String heard) {
     final words = _training()['words'] as List;
-    var entry = words.cast<Map<String, dynamic>>().where((e) => _normWord(e['word'] as String) == _normWord(word)).firstOrNull;
+    var entry = words
+        .cast<Map<String, dynamic>>()
+        .where((e) => _normWord(e['word'] as String) == _normWord(word))
+        .firstOrNull;
     if (entry == null) {
-      entry = <String, dynamic>{'word': word, 'heard': <dynamic>[], 'always': false};
+      entry = <String, dynamic>{
+        'word': word,
+        'heard': <dynamic>[],
+        'always': false,
+      };
       words.add(entry);
     }
     final h = heard.trim().replaceAll(RegExp(r'[.,!?;:]+$'), '');
     if (h.isEmpty || _normWord(h) == _normWord(word)) return;
     final forms = (entry['heard'] ??= <dynamic>[]) as List;
-    final same = forms.cast<Map<String, dynamic>>().where((f) => _normWord(f['text'] as String) == _normWord(h)).firstOrNull;
+    final same = forms
+        .cast<Map<String, dynamic>>()
+        .where((f) => _normWord(f['text'] as String) == _normWord(h))
+        .firstOrNull;
     if (same != null) {
       same['count'] = ((same['count'] as num?) ?? 0) + 1;
     } else {
@@ -1754,7 +2084,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     // Nothing may dictate while the takes are recorded.
     _engine.setVoiceTraining(active: true);
-    final step = ValueNotifier<_VoiceStep>(_VoiceStep(_t.fmt('getReadyWord', {'w': word}), _StepKind.info));
+    final step = ValueNotifier<_VoiceStep>(
+      _VoiceStep(_t.fmt('getReadyWord', {'w': word}), _StepKind.info),
+    );
     var cancelled = false;
     final heardAll = <String>[];
     if (!mounted) return;
@@ -1765,13 +2097,25 @@ class _HomeScreenState extends State<HomeScreen> {
         title: Text(_t.fmt('trainWordTitle', {'w': word})),
         content: ValueListenableBuilder<_VoiceStep>(
           valueListenable: step,
-          builder: (_, st, _) => Column(mainAxisSize: MainAxisSize.min, children: [
-            Icon(st.icon, size: 48, color: st.color(Theme.of(ctx).colorScheme)),
-            const SizedBox(height: 12),
-            Text(st.text, style: Theme.of(ctx).textTheme.titleMedium, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            if (st.kind == _StepKind.listening) const LinearProgressIndicator(),
-          ]),
+          builder: (_, st, _) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                st.icon,
+                size: 48,
+                color: st.color(Theme.of(ctx).colorScheme),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                st.text,
+                style: Theme.of(ctx).textTheme.titleMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              if (st.kind == _StepKind.listening)
+                const LinearProgressIndicator(),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1794,13 +2138,26 @@ class _HomeScreenState extends State<HomeScreen> {
       var n = 1;
       var failures = 0;
       while (!cancelled && n <= takes) {
-        await show(_t.fmt('sayWordTake', {'w': word, 'n': n, 't': takes}), _StepKind.listening);
+        await show(
+          _t.fmt('sayWordTake', {'w': word, 'n': n, 't': takes}),
+          _StepKind.listening,
+        );
         try {
-          final heard = await trainingTake(settingsJson: jsonEncode(_settings), credential: key, timeoutSecs: 10);
+          final heard = await trainingTake(
+            settingsJson: jsonEncode(_settings),
+            credential: key,
+            timeoutSecs: 10,
+          );
           if (cancelled) break;
           heardAll.add(heard);
           _learn(word, heard);
-          await show(heard.isEmpty ? _t['heardNothing'] : _t.fmt('heardTake', {'s': heard, 'n': n, 't': takes}), _StepKind.ok, 1400);
+          await show(
+            heard.isEmpty
+                ? _t['heardNothing']
+                : _t.fmt('heardTake', {'s': heard, 'n': n, 't': takes}),
+            _StepKind.ok,
+            1400,
+          );
           n++;
         } catch (e) {
           if (cancelled) break;
@@ -1811,11 +2168,19 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       if (heardAll.isNotEmpty) {
         await _saveSettings();
-        final forms = heardAll.where((h) => h.isNotEmpty && _normWord(h) != _normWord(word)).toSet();
-        final hits = heardAll.where((h) => _normWord(h) == _normWord(word)).length;
+        final forms = heardAll
+            .where((h) => h.isNotEmpty && _normWord(h) != _normWord(word))
+            .toSet();
+        final hits = heardAll
+            .where((h) => _normWord(h) == _normWord(word))
+            .length;
         await show(
           forms.isEmpty
-              ? _t.fmt('trainedAsIs', {'w': word, 'n': hits, 't': heardAll.length})
+              ? _t.fmt('trainedAsIs', {
+                  'w': word,
+                  'n': hits,
+                  't': heardAll.length,
+                })
               : _t.fmt('trainedLearned', {'w': word, 's': forms.join(', ')}),
           _StepKind.ok,
           3500,
@@ -1823,7 +2188,8 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } finally {
       _engine.setVoiceTraining(active: false);
-      if (!cancelled && mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!cancelled && mounted)
+        Navigator.of(context, rootNavigator: true).pop();
       _applyVoice();
       if (mounted) setState(() {});
     }
@@ -1839,10 +2205,16 @@ class _HomeScreenState extends State<HomeScreen> {
       _teachFinals = _finals.length;
       _teachFrom = _teachTo = null;
     }
-    final all = _finals.join(' ').split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final all = _finals
+        .join(' ')
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .toList();
     final words = all.length > 40 ? all.sublist(all.length - 40) : all;
     final from = _teachFrom, to = _teachTo;
-    final selected = from == null || to == null ? '' : words.sublist(from, to + 1).join(' ');
+    final selected = from == null || to == null
+        ? ''
+        : words.sublist(from, to + 1).join(' ');
     return [
       const SizedBox(height: 8),
       Text(_t['teachTitle'], style: Theme.of(context).textTheme.titleSmall),
@@ -1866,21 +2238,27 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       if (selected.isNotEmpty)
-        Row(children: [
-          Expanded(child: Text('„$selected“ → «${_trainCtl.text.trim().isEmpty ? '…' : _trainCtl.text.trim()}»')),
-          FilledButton.tonal(
-            onPressed: _trainCtl.text.trim().isEmpty
-                ? null
-                : () {
-                    final word = _trainCtl.text.trim();
-                    _learn(word, selected);
-                    _saveSettings();
-                    _snack(_t.learned(word, selected));
-                    setState(() => _teachFrom = _teachTo = null);
-                  },
-            child: Text(_t['teach']),
-          ),
-        ]),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '„$selected“ → «${_trainCtl.text.trim().isEmpty ? '…' : _trainCtl.text.trim()}»',
+              ),
+            ),
+            FilledButton.tonal(
+              onPressed: _trainCtl.text.trim().isEmpty
+                  ? null
+                  : () {
+                      final word = _trainCtl.text.trim();
+                      _learn(word, selected);
+                      _saveSettings();
+                      _snack(_t.learned(word, selected));
+                      setState(() => _teachFrom = _teachTo = null);
+                    },
+              child: Text(_t['teach']),
+            ),
+          ],
+        ),
       if (selected.isNotEmpty && learned.isNotEmpty)
         Wrap(
           spacing: 4,
@@ -1888,7 +2266,8 @@ class _HomeScreenState extends State<HomeScreen> {
             for (final e in learned)
               ActionChip(
                 label: Text(e['word'] as String),
-                onPressed: () => setState(() => _trainCtl.text = e['word'] as String),
+                onPressed: () =>
+                    setState(() => _trainCtl.text = e['word'] as String),
               ),
           ],
         ),
@@ -1905,7 +2284,10 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['trainingTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['trainingTitle'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             Text(_t['trainingBody']),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -1917,23 +2299,35 @@ class _HomeScreenState extends State<HomeScreen> {
                 setState(() {});
               },
             ),
-            Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _trainCtl,
-                  decoration: InputDecoration(labelText: _t['wordToTrain'], hintText: _t['wordHint']),
-                  onChanged: (_) => setState(() {}),
-                  onSubmitted: (_) => hasKey ? _trainWord(_trainCtl.text.trim()) : null,
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _trainCtl,
+                    decoration: InputDecoration(
+                      labelText: _t['wordToTrain'],
+                      hintText: _t['wordHint'],
+                    ),
+                    onChanged: (_) => setState(() {}),
+                    onSubmitted: (_) =>
+                        hasKey ? _trainWord(_trainCtl.text.trim()) : null,
+                  ),
                 ),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: hasKey && _state != 'Listening'
+                      ? () => _trainWord(_trainCtl.text.trim())
+                      : null,
+                  icon: const Icon(Icons.mic),
+                  label: Text(_t['sayIt5']),
+                ),
+              ],
+            ),
+            if (!hasKey)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(_t['enterKeyFirst']),
               ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: hasKey && _state != 'Listening' ? () => _trainWord(_trainCtl.text.trim()) : null,
-                icon: const Icon(Icons.mic),
-                label: Text(_t['sayIt5']),
-              ),
-            ]),
-            if (!hasKey) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t['enterKeyFirst'])),
             ..._teachFromText(words),
             for (final e in words)
               ExpansionTile(
@@ -1943,7 +2337,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   ((e['heard'] as List?) ?? const []).isEmpty
                       ? _t['recognisedAsIs']
                       : _t.fmt('heardAs', {
-                          's': ((e['heard'] as List).cast<Map<String, dynamic>>()).map((f) => '${f['text']} ×${f['count'] ?? 1}').join(', '),
+                          's':
+                              ((e['heard'] as List)
+                                      .cast<Map<String, dynamic>>())
+                                  .map(
+                                    (f) => '${f['text']} ×${f['count'] ?? 1}',
+                                  )
+                                  .join(', '),
                         }),
                 ),
                 children: [
@@ -1958,22 +2358,26 @@ class _HomeScreenState extends State<HomeScreen> {
                       setState(() {});
                     },
                   ),
-                  Row(children: [
-                    TextButton.icon(
-                      onPressed: hasKey && _state != 'Listening' ? () => _trainWord(e['word'] as String) : null,
-                      icon: const Icon(Icons.mic),
-                      label: Text(_t['sayAgain']),
-                    ),
-                    TextButton.icon(
-                      onPressed: () {
-                        (t['words'] as List).remove(e);
-                        _saveSettings();
-                        setState(() {});
-                      },
-                      icon: const Icon(Icons.delete_outline),
-                      label: Text(_t['remove']),
-                    ),
-                  ]),
+                  Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: hasKey && _state != 'Listening'
+                            ? () => _trainWord(e['word'] as String)
+                            : null,
+                        icon: const Icon(Icons.mic),
+                        label: Text(_t['sayAgain']),
+                      ),
+                      TextButton.icon(
+                        onPressed: () {
+                          (t['words'] as List).remove(e);
+                          _saveSettings();
+                          setState(() {});
+                        },
+                        icon: const Icon(Icons.delete_outline),
+                        label: Text(_t['remove']),
+                      ),
+                    ],
+                  ),
                 ],
               ),
           ],
@@ -1984,13 +2388,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// The floating buttons' look in the cards: a grey disc, a black glyph.
   static Widget _badge(IconData icon) => CircleAvatar(
-        radius: 16,
-        backgroundColor: const Color(0xFFDDDDDD),
-        child: Icon(icon, size: 18, color: Colors.black),
-      );
+    radius: 16,
+    backgroundColor: const Color(0xFFDDDDDD),
+    child: Icon(icon, size: 18, color: Colors.black),
+  );
 
   Map<String, dynamic> get _providerOpts =>
-      (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
+      (_settings['providers']['options'] as Map<String, dynamic>)[_provider]
+          as Map<String, dynamic>? ??
+      {};
 
   Widget _providerSection() {
     return Card(
@@ -1999,15 +2405,22 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              _badge(Icons.mic),
-              const SizedBox(width: 10),
-              Text(_t['providerTitle'], style: Theme.of(context).textTheme.titleMedium),
-            ]),
+            Row(
+              children: [
+                _badge(Icons.mic),
+                const SizedBox(width: 10),
+                Text(
+                  _t['providerTitle'],
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ],
+            ),
             DropdownButton<String>(
               value: _providers.contains(_provider) ? _provider : null,
               isExpanded: true,
-              items: _providers.map((p) => DropdownMenuItem(value: p, child: Text(p))).toList(),
+              items: _providers
+                  .map((p) => DropdownMenuItem(value: p, child: Text(p)))
+                  .toList(),
               onChanged: (p) async {
                 if (p == null) return;
                 _settings['providers']['active'] = p;
@@ -2020,7 +2433,10 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_provider == 'azure')
               TextField(
                 controller: _regionCtl,
-                decoration: InputDecoration(labelText: _t['azureRegion'], helperText: _t['azureRegionHelper']),
+                decoration: InputDecoration(
+                  labelText: _t['azureRegion'],
+                  helperText: _t['azureRegionHelper'],
+                ),
               ),
             Row(
               children: [
@@ -2029,7 +2445,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     controller: _keyCtl,
                     obscureText: true,
                     decoration: InputDecoration(
-                      labelText: _keyStored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': _provider}),
+                      labelText: _keyStored
+                          ? _t['newKey']
+                          : _t.fmt('apiKeyFor', {'p': _provider}),
                       helperText: switch (_provider) {
                         'voiceitt' => 'Format: APP_ID:API_KEY',
                         'azure' => _t['azureKeyHelper'],
@@ -2051,15 +2469,32 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Whether a key for the chosen provider is stored, and where.
   Widget _keyStatus() {
     final scheme = Theme.of(context).colorScheme;
-    final (IconData icon, Color color, String text) = switch ((_keyReadError, _keyStored)) {
-      (final String e, _) => (Icons.error_outline, scheme.error, _t.fmt('keyReadError', {'e': e})),
+    final (IconData icon, Color color, String text) = switch ((
+      _keyReadError,
+      _keyStored,
+    )) {
+      (final String e, _) => (
+        Icons.error_outline,
+        scheme.error,
+        _t.fmt('keyReadError', {'e': e}),
+      ),
       (null, true) => (
-          Icons.check_circle,
-          Colors.green.shade700,
-          _t.fmt('keyFound', {'p': _provider, 's': _keyStoreName, 'k': _keyTail ?? ''}) +
-              (_provider == 'azure' ? ' · ${_t['region']} ${_regionCtl.text.trim()}' : ''),
-        ),
-      (null, false) => (Icons.key_off, Colors.orange.shade800, _t.fmt('keyNone', {'p': _provider})),
+        Icons.check_circle,
+        Colors.green.shade700,
+        _t.fmt('keyFound', {
+              'p': _provider,
+              's': _keyStoreName,
+              'k': _keyTail ?? '',
+            }) +
+            (_provider == 'azure'
+                ? ' · ${_t['region']} ${_regionCtl.text.trim()}'
+                : ''),
+      ),
+      (null, false) => (
+        Icons.key_off,
+        Colors.orange.shade800,
+        _t.fmt('keyNone', {'p': _provider}),
+      ),
     };
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -2067,8 +2502,11 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Icon(icon, color: color, size: 20),
           const SizedBox(width: 8),
-          Expanded(child: Text(text, style: TextStyle(color: color))),
-          if (_keyStored) TextButton(onPressed: _removeKey, child: Text(_t['remove'])),
+          Expanded(
+            child: Text(text, style: TextStyle(color: color)),
+          ),
+          if (_keyStored)
+            TextButton(onPressed: _removeKey, child: Text(_t['remove'])),
         ],
       ),
     );
@@ -2093,32 +2531,37 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final text = '${value.round()} $unit';
-    return Row(children: [
-      SizedBox(width: 120, child: Text(label)),
-      Semantics(
-        button: true,
-        label: _t.fmt('lower', {'l': label}),
-        child: IconButton(
-          icon: const Icon(Icons.remove),
-          onPressed: value > min ? () => set(value - step) : null,
+    return Row(
+      children: [
+        SizedBox(width: 120, child: Text(label)),
+        Semantics(
+          button: true,
+          label: _t.fmt('lower', {'l': label}),
+          child: IconButton(
+            icon: const Icon(Icons.remove),
+            onPressed: value > min ? () => set(value - step) : null,
+          ),
         ),
-      ),
-      Semantics(
-        label: label,
-        value: text,
-        child: ExcludeSemantics(
-          child: SizedBox(width: 80, child: Text(text, textAlign: TextAlign.center)),
+        Semantics(
+          label: label,
+          value: text,
+          child: ExcludeSemantics(
+            child: SizedBox(
+              width: 80,
+              child: Text(text, textAlign: TextAlign.center),
+            ),
+          ),
         ),
-      ),
-      Semantics(
-        button: true,
-        label: _t.fmt('higher', {'l': label}),
-        child: IconButton(
-          icon: const Icon(Icons.add),
-          onPressed: value < max ? () => set(value + step) : null,
+        Semantics(
+          button: true,
+          label: _t.fmt('higher', {'l': label}),
+          child: IconButton(
+            icon: const Icon(Icons.add),
+            onPressed: value < max ? () => set(value + step) : null,
+          ),
         ),
-      ),
-    ]);
+      ],
+    );
   }
 
   // ------------------------------------------------ live correction
@@ -2131,13 +2574,19 @@ class _HomeScreenState extends State<HomeScreen> {
   // Keys of the text-model correctors, stored like provider keys
   // (`api_key:<id>`). The OpenAI key is the speech provider's key as well:
   // entered in either place, it serves both.
-  final _correctorKeyCtls = {'openai': TextEditingController(), 'anthropic': TextEditingController()};
+  final _correctorKeyCtls = {
+    'openai': TextEditingController(),
+    'anthropic': TextEditingController(),
+  };
   final Map<String, (bool, String?)> _correctorKeys = {};
 
   Future<void> _loadCorrectorKey(String id) async {
     try {
       final k = await _secure.read(key: 'api_key:$id') ?? '';
-      _correctorKeys[id] = (k.isNotEmpty, k.isEmpty ? null : k.substring(k.length > 4 ? k.length - 4 : 0));
+      _correctorKeys[id] = (
+        k.isNotEmpty,
+        k.isEmpty ? null : k.substring(k.length > 4 ? k.length - 4 : 0),
+      );
       if (k.isNotEmpty) _engine.setCredential(provider: id, secret: k);
     } catch (_) {
       _correctorKeys[id] = (false, null);
@@ -2176,35 +2625,59 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Widget> _correctorKeyRows(String id, String name) {
     final (stored, tail) = _correctorKeys[id] ?? (false, null);
     return [
-      Row(children: [
-        Icon(stored ? Icons.check_circle : Icons.key_off, size: 18, color: stored ? Colors.green.shade700 : Colors.orange.shade800),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(stored
-              ? _t.fmt('keyFound', {'p': name, 's': _keyStoreName, 'k': tail ?? ''})
-              : _t.fmt('keyNone', {'p': name})),
-        ),
-        if (stored) TextButton(onPressed: () => _removeCorrectorKey(id), child: Text(_t['remove'])),
-      ]),
-      Row(children: [
-        Expanded(
-          child: TextField(
-            controller: _correctorKeyCtls[id],
-            obscureText: true,
-            decoration: InputDecoration(
-              labelText: stored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': name}),
-              helperText: id == 'openai' ? _t['openAiKeyShared'] : null,
-            ),
-            onSubmitted: (_) => _saveCorrectorKey(id),
+      Row(
+        children: [
+          Icon(
+            stored ? Icons.check_circle : Icons.key_off,
+            size: 18,
+            color: stored ? Colors.green.shade700 : Colors.orange.shade800,
           ),
-        ),
-        const SizedBox(width: 8),
-        FilledButton(onPressed: () => _saveCorrectorKey(id), child: Text(_t['save'])),
-      ]),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              stored
+                  ? _t.fmt('keyFound', {
+                      'p': name,
+                      's': _keyStoreName,
+                      'k': tail ?? '',
+                    })
+                  : _t.fmt('keyNone', {'p': name}),
+            ),
+          ),
+          if (stored)
+            TextButton(
+              onPressed: () => _removeCorrectorKey(id),
+              child: Text(_t['remove']),
+            ),
+        ],
+      ),
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _correctorKeyCtls[id],
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: stored
+                    ? _t['newKey']
+                    : _t.fmt('apiKeyFor', {'p': name}),
+                helperText: id == 'openai' ? _t['openAiKeyShared'] : null,
+              ),
+              onSubmitted: (_) => _saveCorrectorKey(id),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: () => _saveCorrectorKey(id),
+            child: Text(_t['save']),
+          ),
+        ],
+      ),
     ];
   }
 
-  Map<String, dynamic> get _text => (_settings['text'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+  Map<String, dynamic> get _text =>
+      (_settings['text'] ??= <String, dynamic>{}) as Map<String, dynamic>;
 
   Future<void> _loadLtKey() async {
     try {
@@ -2213,7 +2686,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _ltTail = k.isEmpty ? null : k.substring(k.length > 4 ? k.length - 4 : 0);
       final i = k.lastIndexOf(':');
       if (i > 0) _ltUserCtl.text = k.substring(0, i);
-      if (k.isNotEmpty) _engine.setCredential(provider: 'languagetool', secret: k);
+      if (k.isNotEmpty)
+        _engine.setCredential(provider: 'languagetool', secret: k);
     } catch (_) {}
     if (mounted) setState(() {});
   }
@@ -2246,34 +2720,61 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _correctionSection() {
-    final on = (_settings['text'] as Map<String, dynamic>?)?['live_correction'] as bool? ?? false;
+    final on =
+        (_settings['text'] as Map<String, dynamic>?)?['live_correction']
+            as bool? ??
+        false;
     final corrector = _text['corrector'] as String? ?? 'languagetool';
     final range = _text['correction_range'] as String? ?? 'cursor_to_end';
-    final aiModelCtl = TextEditingController(text: _text['ai_model'] as String? ?? '');
-    aiModelCtl.selection = TextSelection.collapsed(offset: aiModelCtl.text.length);
+    final aiModelCtl = TextEditingController(
+      text: _text['ai_model'] as String? ?? '',
+    );
+    aiModelCtl.selection = TextSelection.collapsed(
+      offset: aiModelCtl.text.length,
+    );
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              _badge(Icons.auto_fix_high),
-              const SizedBox(width: 10),
-              Text(_t['correctionTitle'], style: Theme.of(context).textTheme.titleMedium),
-            ]),
+            Row(
+              children: [
+                _badge(Icons.auto_fix_high),
+                const SizedBox(width: 10),
+                Text(
+                  _t['correctionTitle'],
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ],
+            ),
             // Who corrects: rules (LanguageTool) or a text model, for the
             // live correction and the correction button alike — and right
             // under it the account or key that corrector needs.
-            Text(_t['correctorTitle'], style: Theme.of(context).textTheme.titleSmall),
+            Text(
+              _t['correctorTitle'],
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
             DropdownButton<String>(
               value: corrector,
               isExpanded: true,
               items: [
-                DropdownMenuItem(value: 'ondevice', child: Text(_t['correctorOnDevice'])),
-                DropdownMenuItem(value: 'languagetool', child: Text(_t['correctorLanguageTool'])),
-                DropdownMenuItem(value: 'openai', child: Text(_t['correctorOpenAi'])),
-                DropdownMenuItem(value: 'anthropic', child: Text(_t['correctorAnthropic'])),
+                DropdownMenuItem(
+                  value: 'ondevice',
+                  child: Text(_t['correctorOnDevice']),
+                ),
+                DropdownMenuItem(
+                  value: 'languagetool',
+                  child: Text(_t['correctorLanguageTool']),
+                ),
+                DropdownMenuItem(
+                  value: 'openai',
+                  child: Text(_t['correctorOpenAi']),
+                ),
+                DropdownMenuItem(
+                  value: 'anthropic',
+                  child: Text(_t['correctorAnthropic']),
+                ),
               ],
               onChanged: (c) {
                 if (c == null) return;
@@ -2284,52 +2785,86 @@ class _HomeScreenState extends State<HomeScreen> {
             if (corrector == 'ondevice')
               Padding(
                 padding: const EdgeInsets.only(top: 4, bottom: 8),
-                child: Text(_t['onDeviceBody'], style: Theme.of(context).textTheme.bodySmall),
+                child: Text(
+                  _t['onDeviceBody'],
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ),
             if (corrector == 'languagetool') ...[
-              Row(children: [
-                Icon(_ltStored ? Icons.check_circle : Icons.key_off,
-                    size: 18, color: _ltStored ? Colors.green.shade700 : Colors.orange.shade800),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(_ltStored ? _t.fmt('ltFound', {'s': _keyStoreName, 'k': _ltTail}) : _t['ltNone']),
-                ),
-                if (_ltStored) TextButton(onPressed: _removeLtKey, child: Text(_t['remove'])),
-              ]),
+              Row(
+                children: [
+                  Icon(
+                    _ltStored ? Icons.check_circle : Icons.key_off,
+                    size: 18,
+                    color: _ltStored
+                        ? Colors.green.shade700
+                        : Colors.orange.shade800,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _ltStored
+                          ? _t.fmt('ltFound', {
+                              's': _keyStoreName,
+                              'k': _ltTail,
+                            })
+                          : _t['ltNone'],
+                    ),
+                  ),
+                  if (_ltStored)
+                    TextButton(
+                      onPressed: _removeLtKey,
+                      child: Text(_t['remove']),
+                    ),
+                ],
+              ),
               TextField(
                 controller: _ltUserCtl,
                 decoration: InputDecoration(labelText: _t['ltEmail']),
               ),
-              Row(children: [
-                Expanded(
-                  child: TextField(
-                    controller: _ltKeyCtl,
-                    obscureText: true,
-                    decoration: InputDecoration(labelText: _t['apiKey'], hintText: _t['ltKeyHint']),
-                    onSubmitted: (_) => _saveLtKey(),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _ltKeyCtl,
+                      obscureText: true,
+                      decoration: InputDecoration(
+                        labelText: _t['apiKey'],
+                        hintText: _t['ltKeyHint'],
+                      ),
+                      onSubmitted: (_) => _saveLtKey(),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(onPressed: _saveLtKey, child: Text(_t['save'])),
-              ]),
+                  const SizedBox(width: 8),
+                  FilledButton(onPressed: _saveLtKey, child: Text(_t['save'])),
+                ],
+              ),
             ],
             if (corrector == 'openai') ..._correctorKeyRows('openai', 'OpenAI'),
-            if (corrector == 'anthropic') ..._correctorKeyRows('anthropic', 'Anthropic'),
+            if (corrector == 'anthropic')
+              ..._correctorKeyRows('anthropic', 'Anthropic'),
             if (corrector != 'ondevice')
               Padding(
                 padding: const EdgeInsets.only(top: 4),
-                child: Text(_t['fallbackOnDevice'], style: Theme.of(context).textTheme.bodySmall),
+                child: Text(
+                  _t['fallbackOnDevice'],
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ),
             if (corrector == 'openai' || corrector == 'anthropic')
               TextField(
                 controller: aiModelCtl,
-                decoration: InputDecoration(labelText: _t['aiModel'], helperText: _t['aiModelHelper']),
+                decoration: InputDecoration(
+                  labelText: _t['aiModel'],
+                  helperText: _t['aiModelHelper'],
+                ),
                 onSubmitted: (v) {
                   _text['ai_model'] = v.trim();
                   _saveSettings();
                 },
                 onTapOutside: (_) {
-                  if ((_text['ai_model'] as String? ?? '') != aiModelCtl.text.trim()) {
+                  if ((_text['ai_model'] as String? ?? '') !=
+                      aiModelCtl.text.trim()) {
                     _text['ai_model'] = aiModelCtl.text.trim();
                     _saveSettings();
                   }
@@ -2337,15 +2872,30 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             const SizedBox(height: 12),
             // What the correction button next to the microphone corrects.
-            Text(_t['rangeTitle'], style: Theme.of(context).textTheme.titleSmall),
+            Text(
+              _t['rangeTitle'],
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
             const SizedBox(height: 6),
             SegmentedButton<String>(
               showSelectedIcon: false,
               segments: [
-                ButtonSegment(value: 'click_to_click', label: Text(_t['rangeClickToClick'])),
-                ButtonSegment(value: 'cursor_to_end', label: Text(_t['rangeCursorToEnd'])),
-                ButtonSegment(value: 'single_word', label: Text(_t['rangeWord'])),
-                ButtonSegment(value: 'whole_text', label: Text(_t['rangeWholeText'])),
+                ButtonSegment(
+                  value: 'click_to_click',
+                  label: Text(_t['rangeClickToClick']),
+                ),
+                ButtonSegment(
+                  value: 'cursor_to_end',
+                  label: Text(_t['rangeCursorToEnd']),
+                ),
+                ButtonSegment(
+                  value: 'single_word',
+                  label: Text(_t['rangeWord']),
+                ),
+                ButtonSegment(
+                  value: 'whole_text',
+                  label: Text(_t['rangeWholeText']),
+                ),
               ],
               selected: {range},
               onSelectionChanged: (sel) {
@@ -2355,9 +2905,15 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
             const SizedBox(height: 4),
-            Text(_t[range == 'click_to_click' ? 'rangeClickNote' : 'rangeNote'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t[range == 'click_to_click' ? 'rangeClickNote' : 'rangeNote'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const SizedBox(height: 4),
-            Text(_t['rangeHotkeyNote'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t['rangeHotkeyNote'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const Divider(height: 24),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -2368,7 +2924,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               value: on,
               onChanged: (b) {
-                (_settings['text'] ??= <String, dynamic>{})['live_correction'] = b;
+                (_settings['text'] ??= <String, dynamic>{})['live_correction'] =
+                    b;
                 _saveSettings();
               },
             ),
@@ -2376,16 +2933,26 @@ class _HomeScreenState extends State<HomeScreen> {
               contentPadding: EdgeInsets.zero,
               title: Text(_t['rewriteSwitch']),
               subtitle: Text(_t['rewriteBody']),
-              value: (_settings['text'] as Map<String, dynamic>?)?['correction_rewrites'] as bool? ?? false,
+              value:
+                  (_settings['text']
+                          as Map<String, dynamic>?)?['correction_rewrites']
+                      as bool? ??
+                  false,
               onChanged: on
                   ? (b) {
-                      (_settings['text'] ??= <String, dynamic>{})['correction_rewrites'] = b;
+                      (_settings['text'] ??=
+                              <String, dynamic>{})['correction_rewrites'] =
+                          b;
                       _saveSettings();
                       setState(() {});
                     }
                   : null,
             ),
-            if (_suggestion.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t.fmt('suggested', {'s': _suggestion}))),
+            if (_suggestion.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(_t.fmt('suggested', {'s': _suggestion})),
+              ),
           ],
         ),
       ),
@@ -2407,11 +2974,18 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['stepLanguage'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['stepLanguage'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             DropdownButton<String>(
               value: _settings['providers']['language'] as String,
               isExpanded: true,
-              items: kLanguages.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
+              items: kLanguages.entries
+                  .map(
+                    (e) => DropdownMenuItem(value: e.key, child: Text(e.value)),
+                  )
+                  .toList(),
               onChanged: (l) {
                 _settings['providers']['language'] = l;
                 _saveSettings();
@@ -2420,15 +2994,27 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               controller: _vocabCtl,
               focusNode: _vocabFocus,
-              decoration: InputDecoration(labelText: _t['vocabLabel'], helperText: _t['vocabHelper']),
+              decoration: InputDecoration(
+                labelText: _t['vocabLabel'],
+                helperText: _t['vocabHelper'],
+              ),
               onChanged: (v) {
                 final o = Map<String, dynamic>.from(opts);
-                o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
-                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+                o['keywords'] = v
+                    .split(',')
+                    .map((w) => w.trim())
+                    .where((w) => w.isNotEmpty)
+                    .toList();
+                (_settings['providers']['options']
+                        as Map<String, dynamic>)[_provider] =
+                    o;
                 _vocabDirty = true;
                 // Saved while typing, so no Enter or click elsewhere is needed.
                 _vocabTimer?.cancel();
-                _vocabTimer = Timer(const Duration(milliseconds: 600), _saveVocab);
+                _vocabTimer = Timer(
+                  const Duration(milliseconds: 600),
+                  _saveVocab,
+                );
               },
               onSubmitted: (_) => _saveVocab(),
               onEditingComplete: _saveVocab,
@@ -2477,7 +3063,8 @@ class _HomeScreenState extends State<HomeScreen> {
       onChanged: (b) {
         final o = Map<String, dynamic>.from(opts);
         o['transfer'] = b ? 'Batch' : 'Streaming';
-        (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+        (_settings['providers']['options'] as Map<String, dynamic>)[_provider] =
+            o;
         _saveSettings();
       },
     );
@@ -2499,9 +3086,15 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(_t['voiceKind'], style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                _t['voiceKind'],
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 4),
-              Text(_t['defaultPlainNote'], style: Theme.of(context).textTheme.bodySmall),
+              Text(
+                _t['defaultPlainNote'],
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
               const SizedBox(height: 4),
               batchSwitch,
               pauseStepper,
@@ -2518,12 +3111,23 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['voiceKind'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['voiceKind'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
             SegmentedButton<bool>(
               segments: [
-                ButtonSegment(value: false, label: Text(_t['clearSpeech']), icon: const Icon(Icons.record_voice_over_outlined)),
-                ButtonSegment(value: true, label: Text(_t['impairedSpeech']), icon: const Icon(Icons.accessibility_new)),
+                ButtonSegment(
+                  value: false,
+                  label: Text(_t['clearSpeech']),
+                  icon: const Icon(Icons.record_voice_over_outlined),
+                ),
+                ButtonSegment(
+                  value: true,
+                  label: Text(_t['impairedSpeech']),
+                  icon: const Icon(Icons.accessibility_new),
+                ),
               ],
               selected: {impaired},
               onSelectionChanged: (sel) {
@@ -2532,9 +3136,15 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
             const SizedBox(height: 8),
-            Text(_t[impaired ? 'impairedOn' : 'impairedOff'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t[impaired ? 'impairedOn' : 'impairedOff'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const SizedBox(height: 4),
-            Text(_t['presetNote'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t['presetNote'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             batchSwitch,
             pauseStepper,
             _stepper(
@@ -2590,7 +3200,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     max: 20,
                     step: 1,
                     unit: 's',
-                    onChanged: (v) => vad['agreement_span_ms'] = (v * 1000).round(),
+                    onChanged: (v) =>
+                        vad['agreement_span_ms'] = (v * 1000).round(),
                   ),
                 ],
                 SwitchListTile(
@@ -2634,9 +3245,15 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(_t['stepFilters'], style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                _t['stepFilters'],
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 4),
-              Text(_t['filtersDefaultNote'], style: Theme.of(context).textTheme.bodySmall),
+              Text(
+                _t['filtersDefaultNote'],
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ],
           ),
         ),
@@ -2644,23 +3261,29 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     final pathEq = (sound['path_eq_db'] as List?) ?? const [];
     Widget onOff(String title, String body, String key) => SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(_t[title]),
-          subtitle: Text(_t[body]),
-          value: sound[key] == true,
-          onChanged: (b) {
-            sound[key] = b;
-            _saveSettings();
-          },
-        );
+      contentPadding: EdgeInsets.zero,
+      title: Text(_t[title]),
+      subtitle: Text(_t[body]),
+      value: sound[key] == true,
+      onChanged: (b) {
+        sound[key] = b;
+        _saveSettings();
+      },
+    );
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['stepFilters'], style: Theme.of(context).textTheme.titleMedium),
-            Text(_t['filtersBody'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t['stepFilters'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            Text(
+              _t['filtersBody'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['agc']),
@@ -2694,7 +3317,9 @@ class _HomeScreenState extends State<HomeScreen> {
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(_t['rnnoise']),
-              subtitle: Text(_t[impaired ? 'rnnoiseImpairedBody' : 'rnnoiseBody']),
+              subtitle: Text(
+                _t[impaired ? 'rnnoiseImpairedBody' : 'rnnoiseBody'],
+              ),
               value: sound['denoise'] != 'Off',
               onChanged: (b) {
                 sound['denoise'] = b ? 'RnNoise' : 'Off';
@@ -2710,7 +3335,10 @@ class _HomeScreenState extends State<HomeScreen> {
               unit: 'Hz',
               onChanged: (v) => sound['highpass_hz'] = v.toDouble(),
             ),
-            Text(_t['highpassBody'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t['highpassBody'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             _stepper(
               label: _t['presence'],
               value: (sound['presence_db'] as num? ?? 0),
@@ -2720,7 +3348,10 @@ class _HomeScreenState extends State<HomeScreen> {
               unit: 'dB',
               onChanged: (v) => sound['presence_db'] = v.toDouble(),
             ),
-            Text(_t['presenceBody'], style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _t['presenceBody'],
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             onOff('compressor', 'compressorBody', 'compressor'),
             onOff('trillFiller', 'trillFillerBody', 'trill_filler'),
             if (pathEq.isNotEmpty)
@@ -2745,13 +3376,15 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Start and stop by voice, and the trained words (personal profiles
   /// only: the Default profile does not swap heard forms).
   Widget _commandsSection() {
-    return Column(children: [
-      _voiceSection(),
-      if (!_profiles.activeIsDefault) ...[
-        const SizedBox(height: 16),
-        _trainingSection(),
+    return Column(
+      children: [
+        _voiceSection(),
+        if (!_profiles.activeIsDefault) ...[
+          const SizedBox(height: 16),
+          _trainingSection(),
+        ],
       ],
-    ]);
+    );
   }
 
   /// Milliseconds as m:ss.
@@ -2762,20 +3395,40 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// One line with the settings the next session runs with.
   String _activeSummary() {
-    final opts = (_settings['providers']['options'] as Map<String, dynamic>)[_provider] as Map<String, dynamic>? ?? {};
+    final opts =
+        (_settings['providers']['options'] as Map<String, dynamic>)[_provider]
+            as Map<String, dynamic>? ??
+        {};
     final sound = _settings['sound'] as Map<String, dynamic>;
     final vad = sound['vad'] as Map<String, dynamic>;
-    final mic = (_settings['microphone'] as Map<String, dynamic>)['device_label'] as String? ?? _t['defaultMic'];
+    final mic =
+        (_settings['microphone'] as Map<String, dynamic>)['device_label']
+            as String? ??
+        _t['defaultMic'];
     final chunk = ((vad['chunk_interval_ms'] as num) / 1000).toStringAsFixed(0);
-    final pause = ((vad['silence_duration_ms'] as num) / 1000).toStringAsFixed(1);
+    final pause = ((vad['silence_duration_ms'] as num) / 1000).toStringAsFixed(
+      1,
+    );
     final vocab = ((opts['keywords'] as List?) ?? const []).length;
     return [
-      _t[_profiles.activeIsDefault ? 'summaryDefault' : (sound['impaired_voice'] != false ? 'summaryImpaired' : 'summaryNormal')],
+      _t[_profiles.activeIsDefault
+          ? 'summaryDefault'
+          : (sound['impaired_voice'] != false
+                ? 'summaryImpaired'
+                : 'summaryNormal')],
       // No saved options yet means the engine's default: batch.
       '$_provider · ${_t[(opts['transfer'] ?? 'Batch') == 'Batch' ? 'batch' : 'stream']} · ${kLanguages[_settings['providers']['language']] ?? _settings['providers']['language']} · ${_t['vocabulary']}: $vocab',
       vad['agreement'] == true
-          ? _t.fmt('summaryAgreed', {'s': ((vad['agreement_step_ms'] as num? ?? 1000) / 1000).toStringAsFixed(1), 'p': pause})
-          : _t.fmt('summaryChunks', {'c': chunk, 'p': pause, 'r': _t[vad['refine'] == true ? 'on' : 'off']}),
+          ? _t.fmt('summaryAgreed', {
+              's': ((vad['agreement_step_ms'] as num? ?? 1000) / 1000)
+                  .toStringAsFixed(1),
+              'p': pause,
+            })
+          : _t.fmt('summaryChunks', {
+              'c': chunk,
+              'p': pause,
+              'r': _t[vad['refine'] == true ? 'on' : 'off'],
+            }),
       _t.fmt('summaryFilters', {
         'a': _t[sound['noise_profile'] != false ? 'on' : 'off'],
         'b': _t[sound['denoise'] != 'Off' ? 'on' : 'off'],
@@ -2812,26 +3465,44 @@ class _HomeScreenState extends State<HomeScreen> {
     final current = mic['device_id'] as String?;
     final ids = _mics.map((m) => m.id).toList();
     final replaying = current != null && current.startsWith(_replayPrefix);
-    if (replaying && _replayCtl.text.isEmpty) _replayCtl.text = current.substring(_replayPrefix.length);
+    if (replaying && _replayCtl.text.isEmpty)
+      _replayCtl.text = current.substring(_replayPrefix.length);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['micTitle'], style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              _t['micTitle'],
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             DropdownButton<String?>(
               value: replaying
                   ? _replayPrefix
                   : ids.contains(current)
-                      ? current
-                      : null,
+                  ? current
+                  : null,
               isExpanded: true,
               hint: Text(_t['systemDefault']),
               items: [
-                DropdownMenuItem<String?>(value: null, child: Text(_t['systemDefault'])),
-                ..._mics.map((m) => DropdownMenuItem<String?>(value: m.id, child: Text(m.isDefault ? '${m.name} ${_t['defaultSuffix']}' : m.name))),
-                if (_advanced || replaying) DropdownMenuItem<String?>(value: _replayPrefix, child: Text(_t['replayEntry'])),
+                DropdownMenuItem<String?>(
+                  value: null,
+                  child: Text(_t['systemDefault']),
+                ),
+                ..._mics.map(
+                  (m) => DropdownMenuItem<String?>(
+                    value: m.id,
+                    child: Text(
+                      m.isDefault ? '${m.name} ${_t['defaultSuffix']}' : m.name,
+                    ),
+                  ),
+                ),
+                if (_advanced || replaying)
+                  DropdownMenuItem<String?>(
+                    value: _replayPrefix,
+                    child: Text(_t['replayEntry']),
+                  ),
               ],
               onChanged: (id) {
                 if (id == _replayPrefix) {
@@ -2840,7 +3511,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   mic['device_label'] = _t['recording'];
                 } else {
                   mic['device_id'] = id;
-                  mic['device_label'] = _mics.where((m) => m.id == id).map((m) => m.name).firstOrNull;
+                  mic['device_label'] = _mics
+                      .where((m) => m.id == id)
+                      .map((m) => m.name)
+                      .firstOrNull;
                 }
                 _saveSettings();
               },
@@ -2848,12 +3522,18 @@ class _HomeScreenState extends State<HomeScreen> {
             if (replaying) ...[
               TextField(
                 controller: _replayCtl,
-                decoration: InputDecoration(labelText: _t['wavLabel'], helperText: _t['wavHelper']),
+                decoration: InputDecoration(
+                  labelText: _t['wavLabel'],
+                  helperText: _t['wavHelper'],
+                ),
                 onSubmitted: (_) => _saveReplayPath(),
               ),
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton(onPressed: _saveReplayPath, child: Text(_t['useFile'])),
+                child: FilledButton(
+                  onPressed: _saveReplayPath,
+                  child: Text(_t['useFile']),
+                ),
               ),
             ],
           ],
@@ -2874,30 +3554,32 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 8),
             SelectableText(_fallbackText),
             const SizedBox(height: 8),
-            Row(children: [
-              FilledButton(
-                onPressed: () {
-                  try {
-                    _engine.transferToTarget();
-                  } catch (e) {
-                    _snack('$e');
-                  }
-                },
-                child: Text(_t['insertFocused']),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton(
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: _fallbackText));
-                  _engine.clearSessionText();
-                  setState(() {
-                    _fallbackReason = null;
-                    _fallbackText = '';
-                  });
-                },
-                child: Text(_t['copy']),
-              ),
-            ]),
+            Row(
+              children: [
+                FilledButton(
+                  onPressed: () {
+                    try {
+                      _engine.transferToTarget();
+                    } catch (e) {
+                      _snack('$e');
+                    }
+                  },
+                  child: Text(_t['insertFocused']),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: _fallbackText));
+                    _engine.clearSessionText();
+                    setState(() {
+                      _fallbackReason = null;
+                      _fallbackText = '';
+                    });
+                  },
+                  child: Text(_t['copy']),
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -2910,17 +3592,25 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(_t.fmt('aboutTitle', {'a': appName})),
-        content: Text('${_t.fmt('aboutVersion', {'v': a.coreVersion, 'b': a.buildNumber, 'd': a.buildDate})}\n'
-            '${_t['providers']}: ${a.providers.join(', ')}'),
+        content: Text(
+          '${_t.fmt('aboutVersion', {'v': a.coreVersion, 'b': a.buildNumber, 'd': a.buildDate})}\n'
+          '${_t['providers']}: ${a.providers.join(', ')}',
+        ),
         actions: [
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
-              Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const LicensesScreen()));
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(builder: (_) => const LicensesScreen()),
+              );
             },
             child: Text(_t['licenses']),
           ),
-          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(_t['close'])),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(_t['close']),
+          ),
         ],
       ),
     );
@@ -2938,11 +3628,21 @@ class LicensesScreen extends StatelessWidget {
       child: Scaffold(
         appBar: AppBar(
           title: Text(t['licenses']),
-          bottom: TabBar(tabs: [Tab(text: t['license']), Tab(text: t['notice'])]),
+          bottom: TabBar(
+            tabs: [
+              Tab(text: t['license']),
+              Tab(text: t['notice']),
+            ],
+          ),
         ),
         body: TabBarView(
           children: [licenseText(), noticeText()]
-              .map((t) => SingleChildScrollView(padding: const EdgeInsets.all(16), child: SelectableText(t)))
+              .map(
+                (t) => SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: SelectableText(t),
+                ),
+              )
               .toList(),
         ),
       ),
@@ -2959,16 +3659,16 @@ class _VoiceStep {
   final _StepKind kind;
 
   IconData get icon => switch (kind) {
-        _StepKind.listening => Icons.mic,
-        _StepKind.ok => Icons.check_circle,
-        _StepKind.retry => Icons.replay,
-        _StepKind.info => Icons.info_outline,
-      };
+    _StepKind.listening => Icons.mic,
+    _StepKind.ok => Icons.check_circle,
+    _StepKind.retry => Icons.replay,
+    _StepKind.info => Icons.info_outline,
+  };
 
   Color color(ColorScheme c) => switch (kind) {
-        _StepKind.listening => c.primary,
-        _StepKind.ok => Colors.green.shade700,
-        _StepKind.retry => Colors.orange.shade800,
-        _StepKind.info => c.onSurfaceVariant,
-      };
+    _StepKind.listening => c.primary,
+    _StepKind.ok => Colors.green.shade700,
+    _StepKind.retry => Colors.orange.shade800,
+    _StepKind.info => c.onSurfaceVariant,
+  };
 }

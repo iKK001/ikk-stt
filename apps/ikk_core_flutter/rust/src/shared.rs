@@ -125,6 +125,9 @@ fn on_event(s: &Shared, ev: &EngineEvent) {
         EngineEvent::Error(message) if message.starts_with("correction:") => {
             ikk_overlay::set_busy(ikk_overlay::Busy::None)
         }
+        // The engine asks for consent instead of correcting or replacing:
+        // nothing is being worked on until the user has answered.
+        EngineEvent::ConsentRequired(_) => s.end_replace(),
         EngineEvent::Replaced { .. } => s.end_replace(),
         EngineEvent::Error(message) if message.starts_with("replace:") => s.end_replace(),
         // Button colour: brand blue while waiting for the start word.
@@ -248,12 +251,14 @@ impl Shared {
                     2,
                     std::time::Duration::from_secs(20),
                     std::sync::Arc::new(move |points| {
+                        let Some(s) = get() else { return };
                         if points.len() < 2 {
+                            // The capture timed out: nothing is armed any more.
+                            s.end_replace();
                             return;
                         }
                         let (a, b) = (points[0], points[1]);
                         let same_spot = (a.0 - b.0).abs() < 8.0 && (a.1 - b.1).abs() < 8.0;
-                        let Some(s) = get() else { return };
                         s.busy_start(audio);
                         // Two clicks on one spot were a double-click: the app
                         // selected the word itself; take the selection as it is.
@@ -282,8 +287,12 @@ impl Shared {
                     1,
                     std::time::Duration::from_secs(15),
                     std::sync::Arc::new(move |points| {
-                        let Some(&point) = points.first() else { return };
                         let Some(s) = get() else { return };
+                        let Some(&point) = points.first() else {
+                            // The capture timed out: nothing is armed any more.
+                            s.end_replace();
+                            return;
+                        };
                         s.busy_start(audio);
                         let r = if audio {
                             s.engine.replace_by_voice(&json, Some(point), false)
