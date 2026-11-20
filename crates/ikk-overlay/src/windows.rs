@@ -13,25 +13,30 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey, MOD_NOREPEAT, TME_LEAVE,
+    TRACKMOUSEEVENT, VK_F2, VK_F3,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
     GetWindowRect, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, IDC_HAND, MA_NOACTIVATE, MSG,
     MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
 
-use crate::{Busy, OnClicks, OnMode, OnMoved, OnTap, RangeMode};
+use crate::{Busy, OnClicks, OnMode, OnMoved, OnRange, OnTap, RangeMode};
 
 const SIZE: i32 = 64;
 const RING: i32 = 3;
 /// Space between the microphone and the correction button.
 const GAP: i32 = 10;
 const DRAG_THRESHOLD: i32 = 4;
+/// While the panel shows, in any application: F2 steps through the four
+/// correction ranges, F3 flips the AI/Audio switch.
+const HOTKEY_RANGE: i32 = 1;
+const HOTKEY_MODE: i32 = 2;
 /// Sent once after `TrackMouseEvent(TME_LEAVE)` when the mouse has left
 /// (the `windows` crate files it under the common controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -163,6 +168,7 @@ struct State {
     on_correct: Option<OnTap>,
     on_mode: Option<OnMode>,
     on_moved: Option<OnMoved>,
+    on_range: Option<OnRange>,
     /// The switch: audio correction (true) or AI correction (false).
     audio_mode: bool,
     /// 0 idle, 1 listening (yellow arc), 2 processing (red arc).
@@ -349,6 +355,13 @@ pub fn set_range_mode(mode: RangeMode) {
     post(MSG_REDRAW);
 }
 
+/// Who hears about a range chosen by key (F2); set before `show`.
+pub fn on_range_key(on_range: Option<OnRange>) {
+    if let Ok(mut s) = state().lock() {
+        s.on_range = on_range;
+    }
+}
+
 pub fn set_busy(busy: Busy) {
     let v = match busy {
         Busy::None => 0,
@@ -459,6 +472,73 @@ pub fn set_standby(standby: bool) {
     post(MSG_REDRAW);
 }
 
+/// Takes the panel's keys system-wide: F2 for the correction range, F3 for
+/// the switch (each only when the panel has that part). Another program
+/// may hold a key already: then that part stays as it was, by click or in
+/// the settings.
+unsafe fn claim_keys(hwnd: HWND) {
+    let (range, mode) = state()
+        .lock()
+        .map(|s| (s.on_correct.is_some() && s.on_range.is_some(), s.on_mode.is_some()))
+        .unwrap_or((false, false));
+    // A second registration of the same id fails; drop the old ones first.
+    release_keys(hwnd);
+    if range {
+        if let Err(e) = RegisterHotKey(Some(hwnd), HOTKEY_RANGE, MOD_NOREPEAT, VK_F2.0 as u32) {
+            tracing::warn!(%e, "F2 is taken by another program; the range is chosen in the settings only");
+        }
+    }
+    if mode {
+        if let Err(e) = RegisterHotKey(Some(hwnd), HOTKEY_MODE, MOD_NOREPEAT, VK_F3.0 as u32) {
+            tracing::warn!(%e, "F3 is taken by another program; the switch works by click only");
+        }
+    }
+}
+
+unsafe fn release_keys(hwnd: HWND) {
+    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_RANGE);
+    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_MODE);
+}
+
+/// F2: the next correction range, in the order of the settings (click to
+/// click, cursor to end, single word, whole text); the shell saves it.
+unsafe fn next_range(hwnd: HWND) {
+    let (mode, on_range) = state()
+        .lock()
+        .ok()
+        .map(|mut s| {
+            let (code, mode) = match s.range_mode {
+                2 => (0, RangeMode::CursorToEnd),
+                0 => (3, RangeMode::Word),
+                3 => (1, RangeMode::WholeText),
+                _ => (2, RangeMode::ClickToClick),
+            };
+            s.range_mode = code;
+            (mode, s.on_range.clone())
+        })
+        .unwrap_or((RangeMode::CursorToEnd, None));
+    render(hwnd);
+    if let Some(on_range) = on_range {
+        std::thread::spawn(move || on_range(mode));
+    }
+}
+
+/// The switch was pressed (click or F3): flip it and tell the shell.
+unsafe fn flip_mode(hwnd: HWND) {
+    let (audio, on_mode) = state()
+        .lock()
+        .ok()
+        .map(|mut s| {
+            s.audio_mode = !s.audio_mode;
+            (s.audio_mode, s.on_mode.clone())
+        })
+        .unwrap_or((false, None));
+    render(hwnd);
+    if let Some(on_mode) = on_mode {
+        std::thread::spawn(move || on_mode(audio));
+    }
+}
+
 /// The window's own thread: create, then pump messages.
 fn run() {
     unsafe {
@@ -506,6 +586,7 @@ fn run() {
         let _ = l;
         render(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        claim_keys(hwnd);
         note_position(hwnd, false);
         // Settings that arrived while the window was being created (the
         // shell switches shrinking on right after `show`): size and shape
@@ -611,18 +692,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
                 if which == 2 {
                     // The switch: any press flips it.
-                    let (audio, on_mode) = state()
-                        .lock()
-                        .ok()
-                        .map(|mut s| {
-                            s.audio_mode = !s.audio_mode;
-                            (s.audio_mode, s.on_mode.clone())
-                        })
-                        .unwrap_or((false, None));
-                    render(hwnd);
-                    if let Some(on_mode) = on_mode {
-                        std::thread::spawn(move || on_mode(audio));
-                    }
+                    flip_mode(hwnd);
                     return LRESULT(0);
                 }
                 let action = state().lock().ok().and_then(|s| match which {
@@ -648,12 +718,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             render(hwnd);
             LRESULT(0)
         }
+        WM_HOTKEY if wparam.0 == HOTKEY_RANGE as usize => {
+            next_range(hwnd);
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 == HOTKEY_MODE as usize => {
+            flip_mode(hwnd);
+            LRESULT(0)
+        }
         MSG_HIDE => {
             let _ = ShowWindow(hwnd, SW_HIDE);
+            // No panel: F2 and F3 belong to the other programs again.
+            release_keys(hwnd);
             LRESULT(0)
         }
         MSG_SHOW => {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            claim_keys(hwnd);
             LRESULT(0)
         }
         MSG_MOVE => {
@@ -755,8 +836,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_CAPTURE => {
-            // Nobody clicked twice in time.
+            // Nobody clicked (often enough) in time. The shell hears it with
+            // the clicks that did come — too few to act on — so it can let
+            // go of what it armed; otherwise it would stay armed for good.
+            let cap = CAPTURE.lock().ok().and_then(|mut c| c.take());
             cancel_capture();
+            if let Some(cap) = cap {
+                let (points, on_done) = (cap.points, cap.on_done);
+                std::thread::spawn(move || on_done(points));
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

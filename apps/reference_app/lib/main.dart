@@ -419,6 +419,12 @@ class _HomeScreenState extends State<HomeScreen> {
           // The switch on the floating panel: remembered for the next start.
           _ui['correction_mode'] = (v as Map<String, dynamic>)['audio'] == true ? 'audio' : 'ai';
           _saveUi();
+        case 'CorrectionRange':
+          // The range key on the floating panel: kept like a choice in the settings.
+          final range = (v as Map<String, dynamic>)['range'] as String;
+          _text['correction_range'] = range;
+          KeyboardBridge.setCorrectionRange(range);
+          _saveSettings();
         case 'ReplaceListening':
           _snack(_t.fmt('replaceListening', {'s': (v as Map<String, dynamic>)['original']}));
         case 'Replaced':

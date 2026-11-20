@@ -104,6 +104,15 @@ impl IkkEngine {
     #[frb(sync)]
     pub fn show_floating_button(&self, show: bool) {
         if show {
+            // The range key: the shell writes the range into the settings,
+            // which come back here and to the engine as usual.
+            ikk_overlay::on_range_key(Some(std::sync::Arc::new(|range| {
+                if let Some(s) = crate::shared::get() {
+                    let _ = s
+                        .events
+                        .send(format!("{{\"CorrectionRange\":{{\"range\":\"{}\"}}}}", range.as_str()));
+                }
+            })));
             ikk_overlay::show(
                 std::sync::Arc::new(|| {
                     if let Some(s) = crate::shared::get() {
