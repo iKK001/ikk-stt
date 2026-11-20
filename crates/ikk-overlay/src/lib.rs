@@ -28,9 +28,16 @@ pub type OnMode = Arc<dyn Fn(bool) + Send + Sync>;
 /// Show the buttons (created on first use): `on_tap` for the microphone,
 /// `on_correct` for the correction button, `on_mode` for the switch
 /// between AI and audio correction (none: fewer buttons), `on_moved`
-/// after every drag.
-pub fn show(on_tap: OnTap, on_correct: Option<OnTap>, on_mode: Option<OnMode>, on_moved: Option<OnMoved>) {
-    platform::show(on_tap, on_correct, on_mode, on_moved);
+/// after every drag, `on_next_range` when F1 is pressed anywhere while
+/// the buttons are shown (the correction button's range moves on).
+pub fn show(
+    on_tap: OnTap,
+    on_correct: Option<OnTap>,
+    on_mode: Option<OnMode>,
+    on_moved: Option<OnMoved>,
+    on_next_range: Option<OnTap>,
+) {
+    platform::show(on_tap, on_correct, on_mode, on_moved, on_next_range);
 }
 
 /// What the correction button is doing: a rotating arc on its rim shows

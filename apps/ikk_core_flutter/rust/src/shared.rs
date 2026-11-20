@@ -341,6 +341,45 @@ impl Shared {
         }
     }
 
+    /// F1: the correction button's range moves on — click to click, click
+    /// to end, single word, whole text, and round again. The settings copy
+    /// here changes at once (the button shows it, every reader of the settings
+    /// sees it); the `CorrectionRange` event tells the shell, which saves it.
+    /// Returns the new range name ("" when no settings are known yet).
+    pub fn next_range(&self) -> String {
+        const ORDER: [&str; 4] = ["click_to_click", "cursor_to_end", "single_word", "whole_text"];
+        let mut next = String::new();
+        if let Ok(mut s) = self.settings.lock() {
+            let Some(json) = s.as_deref() else {
+                return next;
+            };
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(json) else {
+                return next;
+            };
+            if !v.is_object() {
+                return next;
+            }
+            let now = v["text"]["correction_range"]
+                .as_str()
+                .unwrap_or("cursor_to_end")
+                .trim()
+                .to_string();
+            let i = ORDER.iter().position(|r| *r == now).unwrap_or(1);
+            next = ORDER[(i + 1) % ORDER.len()].to_string();
+            if !v["text"].is_object() {
+                v["text"] = serde_json::json!({});
+            }
+            v["text"]["correction_range"] = serde_json::Value::String(next.clone());
+            *s = Some(v.to_string());
+        }
+        ikk_overlay::set_range_mode(ikk_overlay::RangeMode::parse(&next));
+        self.persist();
+        let _ = self
+            .events
+            .send(format!("{{\"CorrectionRange\":{{\"range\":\"{next}\"}}}}"));
+        next
+    }
+
     /// The switch flipped: audio correction (replace by voice) or AI.
     pub fn set_audio_mode(&self, on: bool) {
         self.audio_mode.store(on, Ordering::SeqCst);

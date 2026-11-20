@@ -150,8 +150,36 @@ class _HomeScreenState extends State<HomeScreen> {
     _vocabFocus.addListener(() {
       if (!_vocabFocus.hasFocus) _saveVocab();
     });
+    HardwareKeyboard.instance.addHandler(_onKey);
     _init();
   }
+
+  /// F1 while this window is in front: the correction range moves on, as
+  /// it does from the floating buttons (any app).
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent || event.logicalKey != LogicalKeyboardKey.f1) return false;
+    _nextRange();
+    return true;
+  }
+
+  /// The next correction range; the engine answers with `CorrectionRange`,
+  /// which is saved and shown.
+  void _nextRange() {
+    if (_settings.isEmpty) return;
+    try {
+      _engine.nextCorrectionRange();
+    } catch (e) {
+      _snack('$e');
+    }
+  }
+
+  /// The string key of a correction range's name.
+  static String _rangeKey(String range) => switch (range) {
+        'click_to_click' => 'rangeClickToClick',
+        'single_word' => 'rangeWord',
+        'whole_text' => 'rangeWholeText',
+        _ => 'rangeCursorToEnd',
+      };
 
   Future<void> _init() async {
     final dir = configDir() ?? (await getApplicationSupportDirectory()).path;
@@ -222,6 +250,9 @@ class _HomeScreenState extends State<HomeScreen> {
             KeyboardBridge.done(false);
             _snack('$e');
           }
+        case 'next_range':
+          // F1 on a hardware keyboard while the iKK keyboard is up.
+          _nextRange();
         default:
           break;
       }
@@ -419,6 +450,14 @@ class _HomeScreenState extends State<HomeScreen> {
           // The switch on the floating panel: remembered for the next start.
           _ui['correction_mode'] = (v as Map<String, dynamic>)['audio'] == true ? 'audio' : 'ai';
           _saveUi();
+        case 'CorrectionRange':
+          // F1: the correction button's range moved on; saved like a choice
+          // on the profile page.
+          final range = (v as Map<String, dynamic>)['range'] as String? ?? 'cursor_to_end';
+          _text['correction_range'] = range;
+          KeyboardBridge.setCorrectionRange(range);
+          _saveSettings();
+          _snack(_t.fmt('rangeNow', {'r': _t[_rangeKey(range)]}));
         case 'ReplaceListening':
           _snack(_t.fmt('replaceListening', {'s': (v as Map<String, dynamic>)['original']}));
         case 'Replaced':
@@ -1037,6 +1076,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
     _events?.cancel();
     _keyCtl.dispose();
     _nameCtl.dispose();
@@ -2316,6 +2356,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 4),
             Text(_t[range == 'click_to_click' ? 'rangeClickNote' : 'rangeNote'], style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 4),
+            Text(_t['rangeHotkeyNote'], style: Theme.of(context).textTheme.bodySmall),
             const Divider(height: 24),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,

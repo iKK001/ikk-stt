@@ -13,14 +13,15 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey, MOD_NOREPEAT, TME_LEAVE,
+    TRACKMOUSEEVENT, VK_F1,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
     GetWindowRect, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, IDC_HAND, MA_NOACTIVATE, MSG,
     MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
@@ -48,6 +49,9 @@ const TIMER_ANIM: usize = 8;
 /// Redraws the rotating arc while the correction button is busy.
 const TIMER_SPIN: usize = 9;
 const MSG_SPIN: u32 = WM_APP + 10;
+/// The F1 hot key's id: while the buttons are shown, F1 anywhere moves
+/// the correction button's range on (and does not reach the app).
+const HOTKEY_NEXT_RANGE: i32 = 1;
 // COLORREF is 0x00BBGGRR.
 const BLUE: COLORREF = COLORREF(0x00B3_8600); // #0086B3, brand primary: listening for the start word
 const BRAND: COLORREF = COLORREF(0x00CC_9900); // #0099CC: the correction button
@@ -163,6 +167,8 @@ struct State {
     on_correct: Option<OnTap>,
     on_mode: Option<OnMode>,
     on_moved: Option<OnMoved>,
+    /// F1 anywhere while the buttons are shown.
+    on_next_range: Option<OnTap>,
     /// The switch: audio correction (true) or AI correction (false).
     audio_mode: bool,
     /// 0 idle, 1 listening (yellow arc), 2 processing (red arc).
@@ -418,13 +424,20 @@ fn post(msg: u32) {
     }
 }
 
-pub fn show(on_tap: OnTap, on_correct: Option<OnTap>, on_mode: Option<OnMode>, on_moved: Option<OnMoved>) {
+pub fn show(
+    on_tap: OnTap,
+    on_correct: Option<OnTap>,
+    on_mode: Option<OnMode>,
+    on_moved: Option<OnMoved>,
+    on_next_range: Option<OnTap>,
+) {
     let create = {
         let Ok(mut s) = state().lock() else { return };
         s.on_tap = Some(on_tap);
         s.on_correct = on_correct;
         s.on_mode = on_mode;
         s.on_moved = on_moved;
+        s.on_next_range = on_next_range;
         s.hwnd == 0
     };
     if create {
@@ -506,6 +519,7 @@ fn run() {
         let _ = l;
         render(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        hotkey(hwnd, true);
         note_position(hwnd, false);
         // Settings that arrived while the window was being created (the
         // shell switches shrinking on right after `show`): size and shape
@@ -522,6 +536,18 @@ fn run() {
 thread_local! {
     /// Drag in progress: cursor and window position at mouse-down, moved yet.
     static DRAG: Cell<Option<(POINT, RECT, bool)>> = const { Cell::new(None) };
+}
+
+/// Window thread only: take F1 (when there is someone to tell) or give it back.
+unsafe fn hotkey(hwnd: HWND, on: bool) {
+    let wanted = on && state().lock().map(|s| s.on_next_range.is_some()).unwrap_or(false);
+    // Unregistering what is not registered is harmless; registering twice fails.
+    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_NEXT_RANGE);
+    if wanted {
+        if let Err(e) = RegisterHotKey(Some(hwnd), HOTKEY_NEXT_RANGE, MOD_NOREPEAT, VK_F1.0 as u32) {
+            tracing::warn!("F1 hot key not available: {e}");
+        }
+    }
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -649,11 +675,21 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         MSG_HIDE => {
+            hotkey(hwnd, false);
             let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
         MSG_SHOW => {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            hotkey(hwnd, true);
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_NEXT_RANGE => {
+            let next = state().lock().ok().and_then(|s| s.on_next_range.clone());
+            if let Some(next) = next {
+                // Off the window thread: it talks to the engine.
+                std::thread::spawn(move || next());
+            }
             LRESULT(0)
         }
         MSG_MOVE => {

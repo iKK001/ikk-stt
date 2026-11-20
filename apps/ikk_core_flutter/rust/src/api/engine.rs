@@ -132,6 +132,12 @@ impl IkkEngine {
                         let _ = s.events.send(format!("{{\"FloatingMoved\":{{\"x\":{x},\"y\":{y}}}}}"));
                     }
                 })),
+                Some(std::sync::Arc::new(|| {
+                    // F1 anywhere: the next range; the shell saves it.
+                    if let Some(s) = crate::shared::get() {
+                        s.next_range();
+                    }
+                })),
             );
             ikk_overlay::set_listening(self.inner.listening.load(std::sync::atomic::Ordering::SeqCst));
             ikk_overlay::set_standby(self.inner.standby.load(std::sync::atomic::Ordering::SeqCst));
@@ -177,6 +183,14 @@ impl IkkEngine {
     #[frb(sync)]
     pub fn set_correction_mode(&self, audio: bool) {
         self.inner.set_audio_mode(audio);
+    }
+    /// F1 in the shell's own window: the
+    /// correction button's range moves on. The new range comes back as
+    /// the `CorrectionRange` event, which the shell saves; "" when no
+    /// settings are known yet.
+    #[frb(sync)]
+    pub fn next_correction_range(&self) -> String {
+        self.inner.next_range()
     }
     /// Shrinking buttons: small and darker while the mouse is elsewhere,
     /// a little larger than plain under it. Off: always the plain size.

@@ -36,6 +36,12 @@ abstract class IkkEngine implements RustOpaqueInterface {
 
   void loadConsent({required String consentJson});
 
+  /// F1 in the shell's own window: the
+  /// correction button's range moves on. The new range comes back as
+  /// the `CorrectionRange` event, which the shell saves; "" when no
+  /// settings are known yet.
+  String nextCorrectionRange();
+
   /// Settings the Android accessibility service starts with.
   void rememberSettings({required String settingsJson});
 
