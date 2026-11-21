@@ -5,11 +5,13 @@
 
 pub mod dictionary;
 pub mod learned;
+pub mod parts;
 
 use serde::{Deserialize, Serialize};
 
 pub use dictionary::{all_words, is_word};
 pub use learned::{apply_text, find_swaps, similar_hints, LearnedWord, Swap};
+pub use parts::{join_parts, join_word_parts};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TextConfig {
@@ -31,6 +33,10 @@ pub struct TextConfig {
     /// ("Lehrerinnen" → "Lehrer:innen", "Ärztinnen" → "Ärzt:innen").
     #[serde(default)]
     pub gender_colon_auto: bool,
+    /// The speaker is on a ventilator and words may come back in parts:
+    /// a text model that corrects is told so.
+    #[serde(default)]
+    pub broken_words: bool,
 }
 
 /// One deterministic pass over a committed fragment.

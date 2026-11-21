@@ -5,7 +5,17 @@
 use std::io::Write;
 
 const LANGUAGES: &[&str] = &["de", "en"];
-const DICTIONARIES: &[&str] = &["de_CH_frami.aff", "de_CH_frami.dic", "en_US.aff", "en_US.dic"];
+const DICTIONARIES: &[&str] = &[
+    "de_CH_frami.aff",
+    "de_CH_frami.dic",
+    "en_US.aff",
+    "en_US.dic",
+    // Spelling only (no grammar rules): for joining word parts.
+    "fr.aff",
+    "fr.dic",
+    "it_IT.aff",
+    "it_IT.dic",
+];
 
 fn gzip(from: &str, to: &str) {
     let data = std::fs::read(from).unwrap_or_else(|e| panic!("{from}: {e}"));

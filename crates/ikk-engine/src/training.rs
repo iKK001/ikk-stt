@@ -42,6 +42,11 @@ pub async fn take(
     timeout: Duration,
 ) -> Result<String, String> {
     let start = crate::config::start_config(settings);
+    // On a ventilator a breath may fall inside the word: the take ends
+    // only after quiet longer than a breath, and may last longer.
+    let breath = start.session.breath;
+    let tail_quiet = breath.map_or(TAIL_QUIET, |b| TAIL_QUIET.max(b.longest + Duration::from_millis(500)));
+    let max_speech = if breath.is_some() { MAX_SPEECH * 2 } else { MAX_SPEECH };
     let mut capture = ikk_audio::open_capture(&start.capture).map_err(|e| e.to_string())?;
     let opened = Instant::now();
     let deadline = opened + CALIBRATION + timeout.max(Duration::from_secs(1));
@@ -57,7 +62,11 @@ pub async fn take(
         if !speaking && left.is_zero() {
             return Err("nothing heard".into());
         }
-        let wait = if speaking { Duration::from_secs(2) } else { left };
+        let wait = if speaking {
+            tail_quiet + Duration::from_secs(1)
+        } else {
+            left
+        };
         let frame = match tokio::time::timeout(wait, capture.frames().recv()).await {
             Ok(Some(f)) => f,
             Ok(None) => return Err("microphone closed".into()),
@@ -102,10 +111,10 @@ pub async fn take(
         } else {
             quiet_len += dur;
         }
-        if (quiet_len >= TAIL_QUIET && speech_len >= MIN_SPEECH) || speech_len >= MAX_SPEECH {
+        if (quiet_len >= tail_quiet && speech_len >= MIN_SPEECH) || speech_len >= max_speech {
             break;
         }
-        if quiet_len >= TAIL_QUIET {
+        if quiet_len >= tail_quiet {
             // A click, not a word: keep waiting for the real take.
             speaking = false;
             taken.clear();
@@ -128,6 +137,16 @@ pub async fn take(
     cfg.keywords.clear();
     cfg.learned.clear();
     cfg.transfer = ikk_stt::TransferMode::Batch;
+    if breath.is_some() {
+        // The long wait for the end is not part of the word.
+        let mut quiet = Duration::ZERO;
+        while quiet_len > TAIL_QUIET + quiet && taken.len() > 1 {
+            quiet += taken.pop().map_or(Duration::ZERO, |f| f.duration());
+        }
+    }
+    if breath.is_some_and(|b| b.shorten) {
+        taken = ikk_stt::chunked::shorten_breaks(&taken).0;
+    }
     let t = provider
         .transcribe(AudioClip { frames: taken }, &cfg)
         .await

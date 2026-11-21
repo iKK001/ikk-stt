@@ -31,6 +31,7 @@ pub struct AiCorrector {
     model: std::sync::RwLock<String>,
     /// Ask for the gender colon in feminine plurals of persons.
     gender_colon: std::sync::atomic::AtomicBool,
+    broken_words: std::sync::atomic::AtomicBool,
 }
 
 impl AiCorrector {
@@ -45,6 +46,7 @@ impl AiCorrector {
             vendor,
             model: std::sync::RwLock::new(String::new()),
             gender_colon: std::sync::atomic::AtomicBool::new(false),
+            broken_words: std::sync::atomic::AtomicBool::new(false),
         }
     }
     fn model(&self) -> String {
@@ -61,7 +63,7 @@ impl AiCorrector {
 
 /// The instruction, with the language when known. Dictated text comes in
 /// pieces and without formatting, so the model is told to keep it plain.
-pub fn instruction(language: &str, gender_colon: bool) -> String {
+pub fn instruction(language: &str, gender_colon: bool, broken_words: bool) -> String {
     let lang = match language.trim() {
         "" => String::new(),
         "deu" | "gsw" => " The text is German (Swiss spelling, no ß).".into(),
@@ -77,7 +79,13 @@ pub fn instruction(language: &str, gender_colon: bool) -> String {
         "You correct text that was dictated by a person with impaired speech and written down by a speech recogniser.{lang} \
          Fix words the recogniser misheard, judged from the context, and fix grammar, spelling and punctuation. \
          Keep the meaning, the language, the person's wording and the sentence order; do not shorten, expand, \
-         rephrase or comment. Keep line breaks. Answer with the corrected text only, nothing else.{}",
+         rephrase or comment. Keep line breaks. Answer with the corrected text only, nothing else.{}{}",
+        if broken_words {
+            " The person speaks on a ventilator and has to stop for breath in the middle of words: \
+             where the parts of one word stand apart or a word is cut off and continued, write the whole word."
+        } else {
+            ""
+        },
         if gender_colon && matches!(language.trim(), "deu" | "gsw") {
             " Write feminine plural forms of persons with the gender colon: Autor:innen, Lehrer:innen, Kolleg:innen. \
              Only these plurals get the colon: a singular stays as it is (Autorin, Lehrerin, never Autor:in), \
@@ -150,6 +158,10 @@ impl TextCorrector for AiCorrector {
     fn set_gender_colon(&self, on: bool) {
         self.gender_colon.store(on, std::sync::atomic::Ordering::Relaxed);
     }
+
+    fn set_broken_words(&self, on: bool) {
+        self.broken_words.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
     async fn correct(&self, text: &str, language: &str, credential: Option<&str>) -> Result<Option<String>, SttError> {
         let key = credential.ok_or(SttError::MissingCredential)?.trim().to_string();
         if key.is_empty() {
@@ -157,7 +169,11 @@ impl TextCorrector for AiCorrector {
         }
         let err = |e: reqwest::Error| SttError::Provider(ErrorClass::from_message(&e.to_string()));
         let model = self.model();
-        let system = instruction(language, self.gender_colon.load(std::sync::atomic::Ordering::Relaxed));
+        let system = instruction(
+            language,
+            self.gender_colon.load(std::sync::atomic::Ordering::Relaxed),
+            self.broken_words.load(std::sync::atomic::Ordering::Relaxed),
+        );
         let (request, headers): (serde_json::Value, Vec<(&str, String)>) = match self.vendor {
             Vendor::OpenAi => (
                 serde_json::json!({
@@ -256,12 +272,14 @@ mod tests {
 
     #[test]
     fn instruction_names_the_language() {
-        assert!(instruction("deu", false).contains("German"));
-        assert!(!instruction("", false).contains("language code"));
-        assert!(instruction("deu", true).contains("Autor:innen"));
+        assert!(instruction("deu", false, false).contains("German"));
+        assert!(instruction("deu", false, true).contains("ventilator"));
+        assert!(!instruction("deu", false, false).contains("ventilator"));
+        assert!(!instruction("", false, false).contains("language code"));
+        assert!(instruction("deu", true, false).contains("Autor:innen"));
         // The colon is German writing: no other language is told about it.
-        assert!(!instruction("eng", true).contains("Autor:innen"));
-        assert!(!instruction("", true).contains("Autor:innen"));
+        assert!(!instruction("eng", true, false).contains("Autor:innen"));
+        assert!(!instruction("", true, false).contains("Autor:innen"));
     }
 
     #[test]

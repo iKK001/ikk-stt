@@ -1733,6 +1733,8 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 16),
         _impairedSection(),
         const SizedBox(height: 16),
+        _ventilatorSection(),
+        const SizedBox(height: 16),
         _filtersSection(),
         const SizedBox(height: 16),
         _commandsSection(),
@@ -1970,7 +1972,10 @@ class _HomeScreenState extends State<HomeScreen> {
       1 => _providerSection(),
       2 => _languageSection(),
       3 => _correctionSection(),
-      4 => _impairedSection(),
+      4 => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [_impairedSection(), const SizedBox(height: 16), _ventilatorSection()],
+        ),
       5 => _filtersSection(),
       _ => _commandsSection(),
     };
@@ -3117,6 +3122,72 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Speaking on a ventilator: breathing pauses, also inside a word, end
+  /// nothing; they are shortened for the speech service and word parts
+  /// that still come back apart are joined.
+  Widget _ventilatorSection() {
+    final sound = _settings['sound'] as Map<String, dynamic>;
+    final vent = (sound['ventilator'] ??= <String, dynamic>{}) as Map<String, dynamic>;
+    final on = vent['enabled'] == true;
+    final breath = (vent['breath_pause_ms'] as num?) ?? 3000;
+    // The engine's rule: the set pause, but never less than a breath and a margin.
+    final setPause = ((sound['vad'] as Map<String, dynamic>?)?['silence_duration_ms'] as num?) ?? 0;
+    final thoughtEnd = setPause > breath + 1500 ? setPause : breath + 1500;
+    Widget onOff(String title, String body, String key) => SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(_t[title]),
+          subtitle: Text(_t[body]),
+          value: vent[key] != false,
+          onChanged: (b) {
+            vent[key] = b;
+            _saveSettings();
+          },
+        );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_t['ventTitle'], style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(_t['ventBody'], style: Theme.of(context).textTheme.bodySmall),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(_t['ventSwitch']),
+              subtitle: Text(_t['ventSwitchBody']),
+              value: on,
+              onChanged: (b) {
+                vent['enabled'] = b;
+                vent['breath_pause_ms'] ??= 3000;
+                vent['shorten_pauses'] ??= true;
+                vent['join_words'] ??= true;
+                _saveSettings();
+              },
+            ),
+            if (on) ...[
+              _stepper(
+                label: _t['ventPause'],
+                value: breath,
+                min: 1000,
+                max: 8000,
+                step: 250,
+                unit: 'ms',
+                onChanged: (v) => vent['breath_pause_ms'] = v.round(),
+              ),
+              Text(
+                _t.fmt('ventPauseBody', {'s': (thoughtEnd / 1000).toStringAsFixed(1)}),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              onOff('ventShorten', 'ventShortenBody', 'shorten_pauses'),
+              onOff('ventJoin', 'ventJoinBody', 'join_words'),
+            ],
           ],
         ),
       ),

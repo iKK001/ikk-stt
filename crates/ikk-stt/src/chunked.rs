@@ -44,7 +44,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    Agreement, AudioClip, ErrorClass, Provider, SessionConfig, StreamingSession, SttError, Transcript, TranscriptEvent,
+    Agreement, AudioClip, BreathPauses, ErrorClass, Provider, SessionConfig, StreamingSession, SttError, Transcript,
+    TranscriptEvent,
 };
 
 /// Most transcriptions running at the same time, whatever the backlog.
@@ -84,6 +85,109 @@ const WINDOW_TIMEOUT: Duration = Duration::from_secs(6);
 /// The final window of a thought may take longer: nothing follows it.
 const LAST_WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Ventilator mode: a thought ends this long after the longest breath.
+const BREATH_MARGIN: Duration = Duration::from_millis(1500);
+/// Ventilator mode, plain chunks: nothing is cut at a gap (the gap may sit
+/// inside a word), so the safety net for speech without an end is wider.
+const BREATH_HARD_MAX: Duration = Duration::from_secs(30);
+/// Ventilator mode: a stretch without speech longer than this inside a
+/// clip is a breath…
+const BREAK_MIN: Duration = Duration::from_millis(400);
+/// …and goes to the recogniser this short: the length of the closure
+/// before a p, t or k, so the halves of a word meet again and two words
+/// still stand apart.
+const BREAK_KEEP: Duration = Duration::from_millis(160);
+
+/// A clip with its breathing pauses shortened, and where the cuts are:
+/// position in the shortened clip and how much was taken out there.
+pub type Cuts = Vec<(Duration, Duration)>;
+
+/// Shortens every stretch without speech longer than [`BREAK_MIN`] inside
+/// a clip to [`BREAK_KEEP`] (half from its start, half from its end, with
+/// a short fade at the joint). Quiet at the very start or end is left to
+/// the callers; frames the noise model did not judge count as speech.
+pub fn shorten_breaks(frames: &[AudioFrame]) -> (Vec<AudioFrame>, Cuts) {
+    let quiet = |f: &AudioFrame| matches!(f.speech, Some(p) if p < GAP_SPEECH_PROB);
+    let mut out: Vec<AudioFrame> = Vec::with_capacity(frames.len());
+    let mut cuts = Cuts::new();
+    let mut pos = Duration::ZERO;
+    let mut i = 0;
+    while i < frames.len() {
+        if !quiet(&frames[i]) {
+            pos += frames[i].duration();
+            out.push(frames[i].clone());
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        let mut run = Duration::ZERO;
+        while j < frames.len() && quiet(&frames[j]) {
+            run += frames[j].duration();
+            j += 1;
+        }
+        let (mut head_end, mut tail_start) = (i, j);
+        if run > BREAK_MIN && i > 0 && j < frames.len() {
+            let mut kept = Duration::ZERO;
+            while head_end < j && kept < BREAK_KEEP / 2 {
+                kept += frames[head_end].duration();
+                head_end += 1;
+            }
+            kept = Duration::ZERO;
+            while tail_start > head_end && kept < BREAK_KEEP / 2 {
+                tail_start -= 1;
+                kept += frames[tail_start].duration();
+            }
+        }
+        if head_end >= tail_start || head_end == i {
+            // Nothing to take out.
+            for f in &frames[i..j] {
+                pos += f.duration();
+                out.push(f.clone());
+            }
+        } else {
+            for f in &frames[i..head_end] {
+                pos += f.duration();
+                out.push(f.clone());
+            }
+            fade(out.last_mut().expect("head kept"), false);
+            let removed: Duration = frames[head_end..tail_start].iter().map(|f| f.duration()).sum();
+            cuts.push((pos, removed));
+            for (k, f) in frames[tail_start..j].iter().enumerate() {
+                pos += f.duration();
+                out.push(f.clone());
+                if k == 0 {
+                    fade(out.last_mut().expect("just pushed"), true);
+                }
+            }
+        }
+        i = j;
+    }
+    (out, cuts)
+}
+
+/// 5 ms linear fade at the end (`into = false`) or start of a frame.
+fn fade(frame: &mut AudioFrame, into: bool) {
+    let n = ((frame.sample_rate_hz / 200) as usize).min(frame.samples.len());
+    let len = frame.samples.len();
+    for k in 0..n {
+        let g = k as f32 / n as f32;
+        if into {
+            frame.samples[k] *= g;
+        } else {
+            frame.samples[len - 1 - k] *= g;
+        }
+    }
+}
+
+/// A time in a shortened clip → the time in the clip as recorded.
+fn uncut(t: Duration, cuts: &Cuts) -> Duration {
+    t + cuts
+        .iter()
+        .take_while(|(at, _)| *at <= t)
+        .map(|(_, removed)| *removed)
+        .sum::<Duration>()
+}
+
 /// What goes to the transcribers, in sequence order.
 enum Upload {
     Chunk(u64, AudioClip),
@@ -106,6 +210,9 @@ enum Upload {
         last: bool,
         from_start: bool,
         clip_start: Duration,
+        /// Length as recorded and what [`shorten_breaks`] took out.
+        clip_len: Duration,
+        cuts: Cuts,
     },
 }
 
@@ -156,6 +263,8 @@ pub struct ChunkedBatchSession {
     refine: bool,
     preview: bool,
     agreement: Option<Agreement>,
+    /// Ventilator mode (see [`SessionConfig::breath`]).
+    breath: Option<BreathPauses>,
     /// Agreement mode: thought length at which the next window goes out.
     window_due: Duration,
     /// Highest speech probability heard in the thought.
@@ -175,7 +284,14 @@ impl ChunkedBatchSession {
         let refine = cfg.refine && cfg.agreement.is_none();
         let preview = refine && cfg.refine_preview;
         let agreement = cfg.agreement;
-        let pause = cfg.endpointing.max(Duration::from_millis(1500));
+        let breath = cfg.breath;
+        let mut pause = cfg.endpointing.max(Duration::from_millis(1500));
+        let mut hard_max = interval * HARD_MAX_FACTOR;
+        if let Some(b) = breath {
+            // A breath is no end of a thought, and no place to cut.
+            pause = pause.max(b.longest + BREATH_MARGIN);
+            hard_max = hard_max.max(BREATH_HARD_MAX);
+        }
         let stale = Arc::new(AtomicBool::new(false));
         let recorded = Arc::new(AtomicU64::new(0));
         let worker = tokio::spawn(run_ordered(
@@ -197,7 +313,7 @@ impl ChunkedBatchSession {
             stale,
             gap_vad: None,
             interval,
-            hard_max: interval * HARD_MAX_FACTOR,
+            hard_max,
             next_seq: 0,
             thought: Vec::new(),
             thought_len: Duration::ZERO,
@@ -206,6 +322,7 @@ impl ChunkedBatchSession {
             refine,
             preview,
             agreement,
+            breath,
             window_due: agreement.map_or(Duration::ZERO, |a| a.step),
             thought_speech: None,
             recorded,
@@ -238,6 +355,12 @@ impl ChunkedBatchSession {
         self.next_seq += 1;
         self.thought_chunks += 1;
         info!(seq, ms = buffered.as_millis() as u64, why, "chunk cut");
+        let mut frames = frames;
+        if self.breath.is_some() {
+            // The wait for the end of the thought is not part of it.
+            trim_tail(&mut frames, WINDOW_TAIL);
+        }
+        let frames = self.for_recogniser(frames).0;
         if self
             .uploads
             .send(Upload::Chunk(seq, AudioClip { frames }))
@@ -245,6 +368,38 @@ impl ChunkedBatchSession {
             .is_err()
         {
             warn!(seq, "transcriber gone; dropping chunk");
+        }
+    }
+
+    /// Ventilator mode: the clip with its breathing pauses shortened.
+    fn for_recogniser(&self, frames: Vec<AudioFrame>) -> (Vec<AudioFrame>, Cuts) {
+        if !self.breath.is_some_and(|b| b.shorten) {
+            return (frames, Cuts::new());
+        }
+        let (short, cuts) = shorten_breaks(&frames);
+        if !cuts.is_empty() {
+            let removed: Duration = cuts.iter().map(|(_, r)| *r).sum();
+            info!(
+                pauses = cuts.len(),
+                removed_ms = removed.as_millis() as u64,
+                "breathing pauses shortened"
+            );
+        }
+        (short, cuts)
+    }
+
+    /// An agreement window as it goes out.
+    fn window(&self, seq: u64, frames: Vec<AudioFrame>, last: bool, from_start: bool, clip_start: Duration) -> Upload {
+        let clip_len: Duration = frames.iter().map(|f| f.duration()).sum();
+        let (frames, cuts) = self.for_recogniser(frames);
+        Upload::Window {
+            seq,
+            clip: AudioClip { frames },
+            last,
+            from_start,
+            clip_start,
+            clip_len,
+            cuts,
         }
     }
 
@@ -265,7 +420,10 @@ impl ChunkedBatchSession {
             self.send_window(true).await;
             return;
         }
-        if self.stale.swap(false, Ordering::SeqCst) && self.thought_len > Duration::ZERO {
+        // On a ventilator the readings stay the same through every breath:
+        // only quiet longer than a breath says the speaker has stopped.
+        let stale = self.stale.swap(false, Ordering::SeqCst);
+        if stale && self.thought_len > Duration::ZERO && self.breath.is_none_or(|b| self.thought_quiet > b.longest) {
             // Several readings in a row heard nothing new: the speaker has
             // stopped, whatever the level and the noise model say.
             info!("readings unchanged; the thought ends");
@@ -276,9 +434,14 @@ impl ChunkedBatchSession {
         // soon after the speech: it got no window before, and nothing is
         // gained by waiting out the long pause.
         let spoken = self.thought_len.saturating_sub(self.thought_quiet);
+        // On a ventilator the short thought may be half a word: it waits
+        // out the breath like everything else.
+        let short_pause = self.breath.map_or(SHORT_THOUGHT_PAUSE, |b| {
+            SHORT_THOUGHT_PAUSE.max(b.longest + Duration::from_millis(500))
+        });
         if spoken >= MIN_CHUNK
             && spoken < MIN_RELEASE_WINDOW
-            && self.thought_quiet >= SHORT_THOUGHT_PAUSE
+            && self.thought_quiet >= short_pause
             && self.thought_speech.is_some_and(|p| p >= SURE_SPEECH_PROB)
         {
             info!(ms = spoken.as_millis() as u64, "short thought ends early");
@@ -368,13 +531,7 @@ impl ChunkedBatchSession {
             let seq = self.next_seq;
             self.next_seq += 1;
             info!(seq, ms = (clip_len - skipped).as_millis() as u64, "ending check");
-            let up = Upload::Window {
-                seq,
-                clip: AudioClip { frames: second },
-                last: false,
-                from_start: false,
-                clip_start: clip_start + skipped,
-            };
+            let up = self.window(seq, second, false, false, clip_start + skipped);
             if self.uploads.send(up).await.is_err() {
                 warn!(seq, "transcriber gone; dropping window");
             }
@@ -382,13 +539,7 @@ impl ChunkedBatchSession {
         let seq = self.next_seq;
         self.next_seq += 1;
         info!(seq, ms = clip_len.as_millis() as u64, last, "window");
-        let up = Upload::Window {
-            seq,
-            clip: AudioClip { frames },
-            last,
-            from_start,
-            clip_start,
-        };
+        let up = self.window(seq, frames, last, from_start, clip_start);
         if self.uploads.send(up).await.is_err() {
             warn!(seq, "transcriber gone; dropping window");
         }
@@ -430,6 +581,9 @@ impl ChunkedBatchSession {
             first_seq,
             "transcribing the whole thought again"
         );
+        // (On a ventilator the breathing pauses are another matter: they
+        // sit inside words.)
+        let frames = self.for_recogniser(frames).0;
         let up = Upload::Refine {
             seq,
             first_seq,
@@ -1098,6 +1252,21 @@ async fn run_ordered(
     // Agreement mode: which sequence numbers are windows (and last ones),
     // the recent results of the thought, how many words are out already.
     let mut windows: BTreeMap<u64, (bool, bool, Duration, Duration)> = BTreeMap::new();
+    // Ventilator mode: what was taken out of each window's clip.
+    let mut window_cuts: BTreeMap<u64, Cuts> = BTreeMap::new();
+    // Ventilator mode: joins the parts of a word written apart.
+    let breath_language = |text: &str| -> String {
+        match cfg.breath.and_then(|b| b.language_of) {
+            Some(language_of) if cfg.language.trim().is_empty() => language_of(text).to_string(),
+            _ => cfg.language.clone(),
+        }
+    };
+    let join = cfg.breath.and_then(|b| b.is_word).map(|is_word| {
+        move |text: &str| {
+            let language = breath_language(text);
+            ikk_text::join_word_parts(text, &|w| is_word(w, &language))
+        }
+    });
     // When each upload went out, for the latency line in the log.
     let mut sent_at: BTreeMap<u64, Instant> = BTreeMap::new();
     let mut agreed = Agreed::new(cfg.agreement.map_or(1, |a| a.windows));
@@ -1139,9 +1308,13 @@ async fn run_ordered(
                     last,
                     from_start,
                     clip_start,
+                    clip_len,
+                    cuts,
                 } => {
-                    let clip_len: Duration = clip.frames.iter().map(|f| f.duration()).sum();
                     windows.insert(seq, (last, from_start, clip_start, clip_len));
+                    if !cuts.is_empty() {
+                        window_cuts.insert(seq, cuts);
+                    }
                     (seq, clip, if last { LAST_WINDOW_TIMEOUT } else { WINDOW_TIMEOUT })
                 }
                 Upload::Refine { seq, first_seq, clip } => {
@@ -1233,6 +1406,7 @@ async fn run_ordered(
                     next_emit += 1;
                     let refine_of = refines.remove(&seq).map(|(first, _)| first);
                     if let Some((last, from_start, clip_start, clip_len)) = windows.remove(&seq) {
+                        let cuts = window_cuts.remove(&seq);
                         let answer = match outcome {
                             Outcome::Timed(t) => t,
                             Outcome::Text(t) => Transcript {
@@ -1257,6 +1431,23 @@ async fn run_ordered(
                                 continue;
                             }
                         };
+                        let mut answer = answer;
+                        if let Some(cuts) = &cuts {
+                            // Word times back onto the thought as spoken.
+                            for w in &mut answer.words {
+                                w.start = uncut(w.start, cuts);
+                                w.end = uncut(w.end, cuts);
+                            }
+                        }
+                        if let (Some(join), Some(is_word)) = (&join, cfg.breath.and_then(|b| b.is_word)) {
+                            let before = answer.text.clone();
+                            let language = breath_language(&before);
+                            answer.text = join(&answer.text);
+                            if answer.text != before {
+                                info!(seq, %before, after = %answer.text, "word parts joined");
+                            }
+                            join_timed(&mut answer.words, &|w| is_word(w, &language));
+                        }
                         let text = ikk_text::apply_text(&cfg.learned, &answer.text, true);
                         heard_so_far = if last { String::new() } else { answer.text.clone() };
                         if last {
@@ -1296,9 +1487,19 @@ async fn run_ordered(
                     }
                     // Timed answers come only for windows; a stale one has no
                     // window left, its text is all that matters.
+                    let joined = |t: &str| match &join {
+                        Some(join) => {
+                            let after = join(t);
+                            if after != t {
+                                info!(seq, before = %t, %after, "word parts joined");
+                            }
+                            after
+                        }
+                        None => t.to_string(),
+                    };
                     let outcome = match outcome {
-                        Outcome::Timed(t) => Outcome::Text(ikk_text::apply_text(&cfg.learned, &t.text, true)),
-                        Outcome::Text(t) => Outcome::Text(ikk_text::apply_text(&cfg.learned, &t, true)),
+                        Outcome::Timed(t) => Outcome::Text(ikk_text::apply_text(&cfg.learned, &joined(&t.text), true)),
+                        Outcome::Text(t) => Outcome::Text(ikk_text::apply_text(&cfg.learned, &joined(&t), true)),
                         o => o,
                     };
                     let event = match outcome {
@@ -1386,6 +1587,30 @@ async fn run_ordered(
         let _ = events.send(TranscriptEvent::Final(held.join(" "))).await;
     }
     let _ = events.send(TranscriptEvent::Closed).await;
+}
+
+/// The timed words of an answer with the parts of a word joined: one
+/// word from the start of its first part to the end of its last.
+fn join_timed(words: &mut Vec<crate::Word>, is_word: &dyn Fn(&str) -> bool) {
+    let tokens: Vec<&str> = words.iter().map(|w| w.text.trim()).collect();
+    if tokens.iter().any(|t| t.contains(' ')) {
+        return;
+    }
+    let groups = ikk_text::join_parts(&tokens, is_word);
+    if groups.len() == words.len() {
+        return;
+    }
+    let mut out = Vec::with_capacity(groups.len());
+    let mut i = 0;
+    for (text, used) in groups {
+        out.push(crate::Word {
+            text,
+            start: words[i].start,
+            end: words[i + used - 1].end,
+        });
+        i += used;
+    }
+    *words = out;
 }
 
 /// One chunk: transcribes with retries, reports back (and whether the
@@ -1485,6 +1710,15 @@ impl StreamingSession for ChunkedBatchSession {
         self.buffer.push(frame);
         if self.buffered >= self.hard_max {
             self.rotate("timer").await;
+        } else if self.breath.is_some() {
+            // On a ventilator a gap may sit inside a word: nothing is cut
+            // there. The piece ends when the speaker has been quiet longer
+            // than a breath (as the noise model hears it; the caller's
+            // level-based pause cuts as well).
+            if self.quiet_for >= self.pause {
+                self.rotate("pause").await;
+                self.end_thought().await;
+            }
         } else if self.buffered >= self.interval && gap {
             self.rotate("gap").await;
         }
@@ -2619,5 +2853,104 @@ mod tests {
         s.finish().await.unwrap();
         assert!(drain(&mut s).await.is_empty());
         assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn frame_at(ms: u64, speech: f32) -> AudioFrame {
+        AudioFrame {
+            samples: vec![if speech >= 0.5 { 0.2 } else { 0.001 }; 320],
+            sample_rate_hz: 16_000,
+            offset: Duration::from_millis(ms),
+            speech: Some(speech),
+        }
+    }
+
+    /// 20 ms frames: `speech` and `quiet` stretches in turn, starting with speech.
+    fn breathing(stretches_ms: &[u64]) -> Vec<AudioFrame> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        for (i, ms) in stretches_ms.iter().enumerate() {
+            for _ in 0..ms / 20 {
+                out.push(frame_at(at, if i % 2 == 0 { 0.9 } else { 0.05 }));
+                at += 20;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn breathing_pauses_are_shortened_and_times_map_back() {
+        // 1 s speech, 2 s breath, 1 s speech, 0.2 s gap, 1 s speech.
+        let frames = breathing(&[1000, 2000, 1000, 200, 1000]);
+        let (short, cuts) = shorten_breaks(&frames);
+        let len: Duration = short.iter().map(|f| f.duration()).sum();
+        assert_eq!(len, Duration::from_millis(5200 - 2000 + 160));
+        assert_eq!(cuts, vec![(Duration::from_millis(1080), Duration::from_millis(1840))]);
+        // A word that ends before the breath keeps its time, one after it
+        // gets the breath back.
+        assert_eq!(uncut(Duration::from_millis(900), &cuts), Duration::from_millis(900));
+        assert_eq!(uncut(Duration::from_millis(1200), &cuts), Duration::from_millis(3040));
+        // The short gap between words is untouched, speech is untouched.
+        let speech = short.iter().filter(|f| f.speech == Some(0.9)).count();
+        assert_eq!(speech, 150);
+    }
+
+    #[test]
+    fn quiet_at_the_edges_stays() {
+        let mut frames = vec![frame_at(0, 0.05); 50];
+        frames.extend(breathing(&[1000, 1000]));
+        let (short, cuts) = shorten_breaks(&frames);
+        assert!(cuts.is_empty());
+        assert_eq!(short.len(), frames.len());
+    }
+
+    fn knows(w: &str, _: &str) -> bool {
+        ["Krankenhaus", "im", "bin", "ich"].contains(&w)
+    }
+
+    #[tokio::test]
+    async fn a_breath_inside_a_word_cuts_nothing() {
+        let fake = Arc::new(Fake::new(|_| 10));
+        let mut cfg = config();
+        cfg.chunk_interval = Duration::from_millis(500);
+        cfg.endpointing = Duration::from_millis(900);
+        cfg.breath = Some(BreathPauses {
+            longest: Duration::from_millis(2000),
+            shorten: true,
+            is_word: Some(knows),
+            language_of: None,
+        });
+        let mut s = ChunkedBatchSession::new(fake.clone(), cfg);
+        // Speech, a breath of 2 s, speech, then quiet beyond a breath.
+        for f in breathing(&[1000, 2000, 1000, 4000]) {
+            s.push(f).await.unwrap();
+        }
+        s.finish().await.unwrap();
+        let mut texts = Vec::new();
+        while let Ok(ev) = s.events().try_recv() {
+            if let TranscriptEvent::Final(t) = ev {
+                texts.push(t);
+            }
+        }
+        // One piece: both halves, the breath shortened to 0.16 s between
+        // them and 0.4 s of the quiet that ended it.
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "{texts:?}");
+        assert_eq!(texts, vec!["2560ms".to_string()]);
+    }
+
+    #[test]
+    fn timed_parts_become_one_word() {
+        let w = |t: &str, a: u64, b: u64| crate::Word {
+            text: t.into(),
+            start: Duration::from_millis(a),
+            end: Duration::from_millis(b),
+        };
+        let mut words = vec![
+            w("im", 0, 200),
+            w("Kran", 300, 600),
+            w("ken", 2600, 2900),
+            w("haus", 3000, 3400),
+        ];
+        join_timed(&mut words, &|x| knows(x, ""));
+        assert_eq!(words, vec![w("im", 0, 200), w("Krankenhaus", 300, 3400)]);
     }
 }

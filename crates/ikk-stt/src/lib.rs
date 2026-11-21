@@ -125,6 +125,25 @@ pub struct SessionConfig {
     /// heard forms are swapped in every result, and the ones resembling
     /// the thought so far go along as hints where the provider takes any.
     pub learned: Vec<ikk_text::LearnedWord>,
+    /// The speaker is on a ventilator: pauses up to `longest` belong to
+    /// the sentence, also inside a word (batch sessions).
+    pub breath: Option<BreathPauses>,
+}
+
+/// See [`SessionConfig::breath`].
+#[derive(Debug, Clone, Copy)]
+pub struct BreathPauses {
+    /// The longest pause one breath makes.
+    pub longest: Duration,
+    /// Shorten such pauses in the clips that go to the recogniser.
+    pub shorten: bool,
+    /// Whether a string is a word of a language (word, language code):
+    /// with it, word parts written apart are joined when the whole is a
+    /// word and a part alone is not. `None`: nothing is joined.
+    pub is_word: Option<fn(&str, &str) -> bool>,
+    /// The language of a text, for sessions without a set language (the
+    /// speech service finds it by itself): the code to pass to `is_word`.
+    pub language_of: Option<fn(&str) -> &'static str>,
 }
 
 /// See [`SessionConfig::agreement`].
@@ -164,6 +183,7 @@ impl SessionConfig {
             refine: false,
             refine_preview: false,
             agreement: None,
+            breath: None,
             learned: Vec::new(),
         }
     }
@@ -521,6 +541,9 @@ pub trait TextCorrector: Send + Sync {
     /// Text-model correctors: write feminine plurals of persons with the
     /// gender colon ("Autor:innen"). Rule-based checkers ignore it.
     fn set_gender_colon(&self, _on: bool) {}
+    /// Text-model correctors: the speaker is on a ventilator, a word may
+    /// have come back in parts. Rule-based checkers ignore it.
+    fn set_broken_words(&self, _on: bool) {}
 }
 
 #[cfg(test)]

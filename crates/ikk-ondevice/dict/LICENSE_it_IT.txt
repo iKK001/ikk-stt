@@ -1,0 +1,1 @@
+it_IT Hunspell dictionary (Estensione linguistica italiana, Copyright (C) 2020-2022 LibreItalia - Marina Latini, portions Copyright (C) 2001-2015 other authors, https://libreitalia.org), taken from the LibreOffice dictionaries repository (dictionaries/it_IT). Licensed under the GNU General Public License, version 3 (see COPYING_GPLv3). Unchanged.

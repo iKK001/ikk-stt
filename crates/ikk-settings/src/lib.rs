@@ -331,6 +331,49 @@ pub struct SoundSettings {
     pub denoise: Denoise,
     pub ios_session_mode: IosSessionMode,
     pub vad: VadSettings,
+    /// Speaking on a ventilator (see [`VentilatorSettings`]).
+    #[serde(default)]
+    pub ventilator: VentilatorSettings,
+}
+
+/// Speaking on a ventilator: the machine sets the rhythm of the breath, so
+/// the voice stops for every breath wherever the breath falls — between
+/// words and in the middle of one. With `enabled`, such a pause is no
+/// end of anything: nothing is cut, closed or typed as final because of
+/// it, the recogniser gets the speech with the pauses shortened, and the
+/// parts of a word that still came back apart are put together.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VentilatorSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The longest pause one breath of the machine makes, ms. Silence up
+    /// to this length is part of the sentence; a thought ends only after
+    /// a clearly longer one.
+    #[serde(default = "default_breath_pause")]
+    pub breath_pause_ms: u32,
+    /// Shorten the breathing pauses in what the recogniser gets, so that
+    /// the two halves of a word stand next to each other again.
+    #[serde(default = "default_true")]
+    pub shorten_pauses: bool,
+    /// Put the parts of a word together when the recogniser wrote them
+    /// apart ("Kran ken haus"), checked against the spelling dictionary.
+    #[serde(default = "default_true")]
+    pub join_words: bool,
+}
+
+fn default_breath_pause() -> u32 {
+    3000
+}
+
+impl Default for VentilatorSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            breath_pause_ms: default_breath_pause(),
+            shorten_pauses: true,
+            join_words: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -434,6 +477,7 @@ impl Default for SoundSettings {
             denoise: Denoise::Off,
             ios_session_mode: IosSessionMode::Default,
             vad: VadSettings::default(),
+            ventilator: VentilatorSettings::default(),
         }
     }
 }

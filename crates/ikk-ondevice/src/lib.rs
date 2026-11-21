@@ -110,6 +110,65 @@ pub fn capital_only(word: &str, language_code: &str) -> Option<bool> {
     }
 }
 
+/// A spelling dictionary without grammar rules.
+fn spelling_only(name: &str, aff: &[u8], dic: &[u8]) -> Option<spellbook::Dictionary> {
+    let started = std::time::Instant::now();
+    let aff = String::from_utf8(gunzip(aff)).ok()?;
+    let dic = String::from_utf8(gunzip(dic)).ok()?;
+    let dict = spellbook::Dictionary::new(&aff, &dic).ok()?;
+    info!(
+        language = name,
+        ms = started.elapsed().as_millis() as u64,
+        "spelling dictionary loaded"
+    );
+    Some(dict)
+}
+
+fn french() -> Option<&'static spellbook::Dictionary> {
+    static D: OnceLock<Option<spellbook::Dictionary>> = OnceLock::new();
+    D.get_or_init(|| spelling_only("fr", embedded!("fr.aff.gz"), embedded!("fr.dic.gz")))
+        .as_ref()
+}
+
+fn italian() -> Option<&'static spellbook::Dictionary> {
+    static D: OnceLock<Option<spellbook::Dictionary>> = OnceLock::new();
+    D.get_or_init(|| spelling_only("it", embedded!("it_IT.aff.gz"), embedded!("it_IT.dic.gz")))
+        .as_ref()
+}
+
+/// Which of the four languages a text is written in: the one whose
+/// dictionary knows most of its words ("" when none knows any). For
+/// sessions in which the speech service finds the language by itself.
+pub fn language_of(text: &str) -> &'static str {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| w.chars().filter(|c| c.is_alphabetic()).collect::<String>())
+        .filter(|w| w.chars().count() >= 2)
+        .collect();
+    let mut best = ("", 0usize);
+    for code in ["deu", "eng", "fra", "ita"] {
+        let known = words.iter().filter(|w| is_word(w, code)).count();
+        if known > best.1 {
+            best = (code, known);
+        }
+    }
+    best.0
+}
+
+/// Whether the spelling dictionary of the language knows the word as it
+/// is written: German, English, French and Italian. False for every
+/// other language and without one (see [`language_of`]).
+pub fn is_word(word: &str, language_code: &str) -> bool {
+    let code = language_code.trim().to_ascii_lowercase();
+    let known = |d: Option<&spellbook::Dictionary>| d.is_some_and(|d| d.check(word));
+    match code.as_str() {
+        "fra" | "fr" | "fr-ch" | "fr-fr" => known(french()),
+        "ita" | "it" | "it-ch" | "it-it" => known(italian()),
+        "" => false,
+        _ => language(&code).is_some_and(|l| l.dict.check(word)),
+    }
+}
+
 /// Whether the language is covered (for the app: say so in the settings).
 pub fn supports(code: &str) -> bool {
     matches!(

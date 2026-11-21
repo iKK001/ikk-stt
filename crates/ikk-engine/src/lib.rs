@@ -851,6 +851,7 @@ impl Engine {
         c.dirty = false;
         c.last_request = Some(Instant::now());
         corrector.set_gender_colon(self.text_cfg.gender_colon_auto);
+        corrector.set_broken_words(self.text_cfg.broken_words);
         let (generation, language, tx) = (c.generation, c.language.clone(), self.self_tx.clone());
         tokio::spawn(async move {
             let (result, throttled) = match corrector.correct(&text, &language, credential.as_deref()).await {
@@ -1890,6 +1891,7 @@ impl Engine {
         );
         corrector.set_model(&req.model);
         corrector.set_gender_colon(self.text_cfg.gender_colon_auto);
+        corrector.set_broken_words(self.text_cfg.broken_words);
         let (language, tx) = (req.language.clone(), self.self_tx.clone());
         tokio::spawn(async move {
             let started = Instant::now();
