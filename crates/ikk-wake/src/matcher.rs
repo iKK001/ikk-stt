@@ -95,6 +95,29 @@ impl VoiceCommands {
         Ok(Self { start, stop })
     }
 
+    /// One command recorded anew, the other kept as it is: the new takes
+    /// must hold together and be told apart from the kept command.
+    pub fn retrain_one(&self, which: Command, takes: &[Vec<f32>], leniency: u32) -> Result<Self, WakeError> {
+        let (model, _) = CommandModel::train_measured(&Extractor::new(), takes, leniency)?;
+        let other = match which {
+            Command::Start => &self.stop,
+            Command::Stop => &self.start,
+        };
+        if !told_apart(&model.templates, &other.templates) || !told_apart(&other.templates, &model.templates) {
+            return Err(WakeError::WordsTooSimilar);
+        }
+        Ok(match which {
+            Command::Start => Self {
+                start: model,
+                stop: other.clone(),
+            },
+            Command::Stop => Self {
+                start: other.clone(),
+                stop: model,
+            },
+        })
+    }
+
     /// Check the takes of one word right after recording them, so a bad
     /// take can be repeated before the other word is recorded.
     pub fn check_word(takes: &[Vec<f32>]) -> Result<(), WakeError> {

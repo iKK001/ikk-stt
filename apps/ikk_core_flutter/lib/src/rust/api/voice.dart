@@ -52,3 +52,18 @@ Future<String> voiceTranscribeTake({
   credential: credential,
   take: take,
 );
+
+/// Record one command anew (`start`: the start command, else the stop
+/// command) and keep the other from the stored model; returns the new
+/// model JSON.
+Future<String> voiceRetrainOne({
+  required String commandsJson,
+  required bool start,
+  required List<Float32List> takes,
+  required int attempt,
+}) => RustLib.instance.api.crateApiVoiceVoiceRetrainOne(
+  commandsJson: commandsJson,
+  start: start,
+  takes: takes,
+  attempt: attempt,
+);

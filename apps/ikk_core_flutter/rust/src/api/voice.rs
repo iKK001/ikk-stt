@@ -29,3 +29,15 @@ pub fn voice_transcribe_take(
 ) -> Result<String, String> {
     ikk_ffi::training::transcribe_clip(&settings_json, &consent_json, &credential, take)
 }
+
+/// Record one command anew (`start`: the start command, else the stop
+/// command) and keep the other from the stored model; returns the new
+/// model JSON.
+pub fn voice_retrain_one(
+    commands_json: String,
+    start: bool,
+    takes: Vec<Vec<f32>>,
+    attempt: u32,
+) -> Result<String, String> {
+    ikk_ffi::voice::retrain_one(&commands_json, start, &takes, attempt)
+}

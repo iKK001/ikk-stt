@@ -117,6 +117,20 @@ pub fn check_word(takes: &[Vec<f32>], attempt: u32) -> Result<(), String> {
     result.map_err(|e| e.to_string())
 }
 
+/// Record one command anew and keep the other from the stored model
+/// (`commands_json`). Returns the new model as JSON.
+pub fn retrain_one(commands_json: &str, start: bool, takes: &[Vec<f32>], attempt: u32) -> Result<String, String> {
+    let which = if start {
+        ikk_wake::Command::Start
+    } else {
+        ikk_wake::Command::Stop
+    };
+    ikk_wake::VoiceCommands::from_json(commands_json)
+        .and_then(|c| c.retrain_one(which, takes, attempt))
+        .map(|c| c.to_json())
+        .map_err(|e| e.to_string())
+}
+
 /// Train start and stop word from three or more takes each. Returns the
 /// model as JSON for the shell to store.
 pub fn train(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>], attempt: u32) -> Result<String, String> {

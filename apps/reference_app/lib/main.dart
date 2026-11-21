@@ -1088,7 +1088,9 @@ class _HomeScreenState extends State<HomeScreen> {
       subtitle: facts == null
           ? null
           : Text(_t.fmt('voiceCmdFacts', {'n': facts.$1, 's': facts.$2.toStringAsFixed(1)})),
-      trailing: IconButton(
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        TextButton(onPressed: () => _trainVoice(only: which), child: Text(_t['voiceRecordOne'])),
+        IconButton(
         icon: const Icon(Icons.edit_outlined),
         tooltip: _t['voiceCmdName'],
         onPressed: () async {
@@ -1115,6 +1117,7 @@ class _HomeScreenState extends State<HomeScreen> {
           if (mounted) setState(() {});
         },
       ),
+      ]),
     );
   }
 
@@ -1134,7 +1137,10 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Guided recording: three takes of the start word, then three of the
   /// stop word. Every take is confirmed or repeated with a clear message;
   /// each word is checked right after its takes.
-  Future<void> _trainVoice() async {
+  /// Record the start and the stop command; `only` ('start' or 'stop'):
+  /// just that one, the other stays as it is.
+  Future<void> _trainVoice({String? only}) async {
+    if (_voiceModel == null) only = null;
     final denied = await ensureMicPermission();
     if (denied != null) {
       _snack(denied);
@@ -1147,6 +1153,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final step = ValueNotifier<_VoiceStep>(_VoiceStep(_t['getReady'], _StepKind.info));
       var cancelled = false;
       var detail = '';
+      final failed = ValueNotifier<bool>(false);
+      // Three takes were refused: the user decides how to go on (the
+      // label of the command to record again, and where the answer goes).
+      final ask = ValueNotifier<(String, Completer<bool>)?>(null);
       if (!mounted) return;
       showDialog<void>(
         context: context,
@@ -1164,9 +1174,39 @@ class _HomeScreenState extends State<HomeScreen> {
             ]),
           ),
           actions: [
+            // Three takes refused: a button records this command again.
+            ValueListenableBuilder<(String, Completer<bool>)?>(
+              valueListenable: ask,
+              builder: (_, a, _) => a == null
+                  ? const SizedBox.shrink()
+                  // Only the refused command: the other one is fine (or
+                  // not recorded yet). Everything again is offered when
+                  // both are in question, after the learning failed.
+                  : FilledButton.icon(
+                      onPressed: () => a.$2.complete(false),
+                      icon: const Icon(Icons.mic),
+                      label: Text(_t.fmt('voiceRedoOne', {'l': a.$1})),
+                    ),
+            ),
+            // Only when the learning failed: start the recording over.
+            ValueListenableBuilder<bool>(
+              valueListenable: failed,
+              builder: (_, f, _) => f
+                  ? FilledButton.icon(
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        _trainVoice(only: only);
+                      },
+                      icon: const Icon(Icons.replay),
+                      label: Text(_t['voiceRestart']),
+                    )
+                  : const SizedBox.shrink(),
+            ),
             TextButton(
               onPressed: () {
                 cancelled = true;
+                final a = ask.value;
+                if (a != null && !a.$2.isCompleted) a.$2.complete(false);
                 Navigator.of(ctx).pop();
               },
               child: Text(_t['close']),
@@ -1184,7 +1224,9 @@ class _HomeScreenState extends State<HomeScreen> {
       // the three takes more room to differ, so the recording can always
       // be finished.
       var repeats = 0;
-      for (final word in ['start', 'stop']) {
+      everything:
+      while (true) {
+      for (final word in only == null ? const ['start', 'stop'] : [only]) {
         final label = _t[word == 'start' ? 'wordStart' : 'wordStop'];
         var retry = false;
         var again = 0;
@@ -1200,22 +1242,30 @@ class _HomeScreenState extends State<HomeScreen> {
           );
           try {
             // The microphone opens and measures the room for a moment;
-            // what is said in that moment is lost. So the prompt stands
-            // still first and shows the running bar only when the take
-            // really counts. (A slow speaker's two-word command needs
-            // time, hence the long wait.)
+            // what is said in that moment is lost. Whatever is on the
+            // screen (get ready, the green tick, a reason) stays until
+            // that moment is over: the prompt to speak comes up, with its
+            // running bar, only when the take really counts — a prompt
+            // shown earlier made the user speak too early every time. (A
+            // slow speaker's two-word command needs time, hence the long
+            // wait for speech.)
             final recording = voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 12);
             recording.ignore();
-            await show(prompt, retry ? _StepKind.retry : _StepKind.info, 900);
-            if (!cancelled) await show(prompt, _StepKind.listening);
+            await Future<void>.delayed(const Duration(milliseconds: 1000));
+            if (cancelled) break;
+            await show(prompt, _StepKind.listening);
             final take = await recording;
             if (cancelled) break;
             takes[word]!.add(take);
             retry = false;
+            // The tick stays through the next take's start; after the
+            // last take of a command it gets a moment of its own.
+            await show(_t.fmt('understood', {'n': n}), _StepKind.ok, takes[word]!.length == 3 ? 900 : 0);
           } catch (e) {
             if (cancelled) break;
             retry = true;
             detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
+            await show(_t.fmt('notClear', {'d': detail}), _StepKind.retry, 1000);
           }
           if (!cancelled && takes[word]!.length == 3) {
             try {
@@ -1227,26 +1277,50 @@ class _HomeScreenState extends State<HomeScreen> {
               if (again > repeats) repeats = again;
               // Say what was wrong: too short is not "too different".
               final short = '$e'.contains('too short');
-              await show(short ? _t['voiceErrShort'] : _t.fmt('tooDifferent', {'l': label}), _StepKind.retry, 3000);
+              await show(short ? _t['voiceErrShort'] : _t.fmt('tooDifferent', {'l': label}), _StepKind.retry);
+              // Nothing goes on by itself: the user starts the next try.
+              final answer = Completer<bool>();
+              ask.value = (label, answer);
+              final all = await answer.future;
+              ask.value = null;
+              if (cancelled) break;
+              await show(_t['getReady'], _StepKind.info);
+              if (all) {
+                takes['start']!.clear();
+                takes['stop']!.clear();
+                continue everything;
+              }
             }
           }
         }
         if (cancelled) break;
       }
+      break;
+      }
       if (cancelled) {
         _applyVoice();
         return;
       }
-      await show(_t['learningWords'], _StepKind.listening);
+      // One command recorded anew: the texts speak of that one only.
+      final oneLabel = only == null ? null : _t[only == 'start' ? 'wordStart' : 'wordStop'];
+      await show(oneLabel == null ? _t['learningWords'] : _t.fmt('learningOne', {'l': oneLabel}), _StepKind.listening);
       try {
-        _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!, attempt: repeats);
+        _voiceModel = only == null
+            ? await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!, attempt: repeats)
+            : await voiceRetrainOne(
+                commandsJson: _voiceModel!,
+                start: only == 'start',
+                takes: takes[only]!,
+                attempt: repeats,
+              );
         _voiceOn = true;
         _voiceRecordedAt = DateTime.now().toIso8601String().substring(0, 10);
         // The words, as the speech service hears them (the user can
         // change them): a new recording gets new words.
-        _voiceLabels = await _voiceWords(takes);
+        // The command that was not recorded keeps its words.
+        _voiceLabels = {..._voiceLabels, ...await _voiceWords(takes)};
         await _saveVoice();
-        await show(_t['voiceDone'], _StepKind.ok, 2500);
+        await show(oneLabel == null ? _t['voiceDone'] : _t.fmt('voiceDoneOne', {'l': oneLabel}), _StepKind.ok, 3500);
         if (mounted && !cancelled) Navigator.of(context).pop();
       } catch (e) {
         // Stays visible until closed: the reason matters for the next try.
@@ -1260,6 +1334,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ? _t['voiceErrShort']
                     : raw;
         await show(_t.fmt('couldNotLearn', {'e': msg}), _StepKind.retry);
+        failed.value = true;
       }
       _applyVoice();
       setState(() {});
@@ -1715,7 +1790,19 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(_activeSummary(), style: Theme.of(context).textTheme.bodySmall),
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(child: Text(_activeSummary(), style: Theme.of(context).textTheme.bodySmall)),
+              // Everything a maker needs to know about this setup, as
+              // text for an e-mail or an issue. No keys, no dictated text.
+              IconButton(
+                icon: const Icon(Icons.copy),
+                tooltip: _t['copySettings'],
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: _settingsReport()));
+                  _snack(_t['settingsCopied']);
+                },
+              ),
+            ]),
             if (_recordedMs > 0)
               Text(
                 _t.fmt('usageLine', {
@@ -2289,48 +2376,94 @@ class _HomeScreenState extends State<HomeScreen> {
             ]),
             if (!hasKey) Padding(padding: const EdgeInsets.only(top: 4), child: Text(_t['enterKeyFirst'])),
             ..._teachFromText(words),
-            for (final e in words)
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(e['word'] as String),
-                subtitle: Text(
-                  ((e['heard'] as List?) ?? const []).isEmpty
-                      ? _t['recognisedAsIs']
-                      : _t.fmt('heardAs', {
-                          's': ((e['heard'] as List).cast<Map<String, dynamic>>()).map((f) => '${f['text']} ×${f['count'] ?? 1}').join(', '),
-                        }),
-                ),
-                children: [
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(_t['replaceAlways']),
-                    subtitle: Text(_t['replaceAlwaysBody']),
-                    value: e['always'] as bool? ?? false,
-                    onChanged: (b) {
-                      e['always'] = b;
-                      _saveSettings();
-                      setState(() {});
-                    },
-                  ),
-                  Row(children: [
-                    TextButton.icon(
-                      onPressed: hasKey && _state != 'Listening' ? () => _trainWord(e['word'] as String) : null,
-                      icon: const Icon(Icons.mic),
-                      label: Text(_t['sayAgain']),
-                    ),
-                    TextButton.icon(
-                      onPressed: () {
-                        (t['words'] as List).remove(e);
-                        _saveSettings();
-                        setState(() {});
-                      },
-                      icon: const Icon(Icons.delete_outline),
-                      label: Text(_t['remove']),
-                    ),
-                  ]),
-                ],
-              ),
+            const SizedBox(height: 8),
+            // The trained words have a page of their own (per profile).
+            OutlinedButton.icon(
+              onPressed: _openTrainedWords,
+              icon: const Icon(Icons.list_alt),
+              label: Text(_t.fmt('trainedWords', {'n': words.length})),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// The page of the active profile's trained words: each word with what
+  /// the recogniser heard for it, a small play button to say it again and
+  /// a button to delete it.
+  void _openTrainedWords() {
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => StatefulBuilder(
+          builder: (page, setPage) {
+            final t = _training();
+            final words = (t['words'] as List).cast<Map<String, dynamic>>();
+            final hasKey = _keyTail != null;
+            void changed() {
+              _saveSettings();
+              setPage(() {});
+              if (mounted) setState(() {});
+            }
+
+            return Scaffold(
+              appBar: AppBar(
+                title: Text('${_t.fmt('trainedWords', {'n': words.length})} – ${_profiles.active['title'] ?? ''}'),
+              ),
+              body: words.isEmpty
+                  ? Center(child: Text(_t['noTrainedWords']))
+                  : ListView.separated(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: words.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (_, i) {
+                        final e = words[i];
+                        final heard = ((e['heard'] as List?) ?? const []).cast<Map<String, dynamic>>();
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(e['word'] as String, style: Theme.of(page).textTheme.titleMedium),
+                                    Text(
+                                      heard.isEmpty
+                                          ? _t['recognisedAsIs']
+                                          : _t.fmt('heardAs', {
+                                              's': heard.map((f) => '${f['text']} ×${f['count'] ?? 1}').join(', '),
+                                            }),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.play_arrow),
+                                tooltip: _t['sayAgain'],
+                                onPressed: hasKey && _state != 'Listening'
+                                    ? () async {
+                                        await _trainWord(e['word'] as String);
+                                        setPage(() {});
+                                      }
+                                    : null,
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline),
+                                tooltip: _t['remove'],
+                                onPressed: () {
+                                  (t['words'] as List).remove(e);
+                                  changed();
+                                },
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            );
+          },
         ),
       ),
     );
@@ -3127,6 +3260,42 @@ class _HomeScreenState extends State<HomeScreen> {
   static String _clock(int ms) {
     final s = ms ~/ 1000;
     return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  /// The setup as plain text (English, for the makers): app and build, the
+  /// system it runs on, the profile, and then its settings and the general
+  /// settings in full, so the setup can be reproduced exactly. API keys
+  /// (kept in the system's key store, never in the settings), dictated
+  /// text, the other profiles and the computer's name are left out.
+  String _settingsReport() {
+    final a = about();
+    final text = (_settings['text'] as Map<String, dynamic>?) ?? const {};
+    return [
+      '$appName ${a.coreVersion} (${a.buildNumber}), built ${a.buildDate}, ${a.gitSha}',
+      'Built for: ${a.targetOs} / ${a.targetArch}',
+      'System: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+      'Device: ${_mobile ? 'phone or tablet' : 'computer'}, ${Platform.numberOfProcessors} processors, locale ${Platform.localeName}',
+      'App language: ${_appLanguage.isEmpty ? 'eng' : _appLanguage}',
+      '',
+      'Profile: ${_profiles.active['title'] ?? ''}${_profiles.activeIsDefault ? ' (default)' : ''}',
+      _activeSummary(),
+      'Live correction: ${text['corrector'] ?? '-'}, range ${text['correction_range'] ?? '-'}',
+      'Start and stop command: ${_voiceModel == null ? 'not recorded' : (_voiceOn ? 'on' : 'recorded, off')}',
+      'Trained words: ${(_training()['words'] as List).length}',
+      if (_shrinkSupported) 'Floating buttons: size $_buttonSize %, growth $_buttonGrowth %, grow under the mouse ${_shrinkButtons ? 'on' : 'off'}',
+      '',
+      // Everything needed to set the app up the same way again: the
+      // active profile's settings in full (the other profiles are left
+      // out) and the general settings. Neither holds a key.
+      'Settings of this profile (settings.json):',
+      const JsonEncoder.withIndent('  ').convert({
+        for (final e in _settings.entries)
+          if (e.key != 'profiles') e.key: e.value,
+      }),
+      '',
+      'General settings (ui.json):',
+      const JsonEncoder.withIndent('  ').convert(_ui),
+    ].join('\n');
   }
 
   /// One line with the settings the next session runs with.
