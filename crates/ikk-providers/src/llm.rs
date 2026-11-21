@@ -78,12 +78,47 @@ pub fn instruction(language: &str, gender_colon: bool) -> String {
          Fix words the recogniser misheard, judged from the context, and fix grammar, spelling and punctuation. \
          Keep the meaning, the language, the person's wording and the sentence order; do not shorten, expand, \
          rephrase or comment. Keep line breaks. Answer with the corrected text only, nothing else.{}",
-        if gender_colon {
-            " Write feminine plural forms of persons with the gender colon: Autor:innen, Lehrer:innen, Kolleg:innen."
+        if gender_colon && matches!(language.trim(), "deu" | "gsw") {
+            " Write feminine plural forms of persons with the gender colon: Autor:innen, Lehrer:innen, Kolleg:innen. \
+             Only these plurals get the colon: a singular stays as it is (Autorin, Lehrerin, never Autor:in), \
+             and a masculine plural stays as it is (die Lehrer stays die Lehrer)."
         } else {
             ""
         }
     )
+}
+
+/// The gender colon is for plurals only: a singular colon form the model
+/// wrote on its own ("Lehrer:in", "Autor*in") goes back to the plain word
+/// ("Lehrerin"). A form the person wrote that way in `original` stays.
+fn singular_without_colon(original: &str, answer: &str) -> String {
+    if !answer.contains("in") {
+        return answer.to_string();
+    }
+    let chars: Vec<char> = answer.chars().collect();
+    let mut out = String::with_capacity(answer.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let joiner = matches!(chars[i], ':' | '*' | '_' | '·');
+        let after_letter = i > 0 && chars[i - 1].is_alphabetic();
+        let suffix = i + 2 < chars.len() && chars[i + 1] == 'i' && chars[i + 2] == 'n';
+        let ends = i + 3 >= chars.len() || !chars[i + 3].is_alphanumeric();
+        if joiner && after_letter && suffix && ends {
+            let mut start = i;
+            while start > 0 && chars[start - 1].is_alphabetic() {
+                start -= 1;
+            }
+            let form: String = chars[start..i + 3].iter().collect();
+            if !original.contains(&form) {
+                // Drop the joiner; "in" follows as ordinary letters.
+                i += 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 /// `None` when the answer equals the input (nothing to change).
@@ -191,7 +226,7 @@ impl TextCorrector for AiCorrector {
                     .unwrap_or_default()
             }
         };
-        let corrected = changed(text, &answer);
+        let corrected = changed(text, &singular_without_colon(text, &answer));
         debug!(vendor = ?self.vendor, model = %model, changed = corrected.is_some(), "text model answered");
         Ok(corrected)
     }
@@ -224,5 +259,21 @@ mod tests {
         assert!(instruction("deu", false).contains("German"));
         assert!(!instruction("", false).contains("language code"));
         assert!(instruction("deu", true).contains("Autor:innen"));
+        // The colon is German writing: no other language is told about it.
+        assert!(!instruction("eng", true).contains("Autor:innen"));
+        assert!(!instruction("", true).contains("Autor:innen"));
+    }
+
+    #[test]
+    fn the_colon_is_for_plurals_only() {
+        let f = singular_without_colon;
+        assert_eq!(f("die lehrerin kam", "Die Lehrer:in kam."), "Die Lehrerin kam.");
+        assert_eq!(f("eine autorin", "Eine Autor*in"), "Eine Autorin");
+        assert_eq!(f("die lehrerinnen", "Die Lehrer:innen"), "Die Lehrer:innen");
+        // Written that way by the person: kept.
+        assert_eq!(f("Die Lehrer:in kam", "Die Lehrer:in kam."), "Die Lehrer:in kam.");
+        // A colon that is punctuation is not touched.
+        assert_eq!(f("merke in der tat", "Merke: in der Tat"), "Merke: in der Tat");
+        assert_eq!(f("Ärzt:in", "Ärzt:in"), "Ärzt:in");
     }
 }

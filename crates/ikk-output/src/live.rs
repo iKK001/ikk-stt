@@ -30,6 +30,18 @@ pub struct Segment {
     pub id: SegmentId,
     pub text: String,
     pub span: Range<usize>,
+    /// Joins the text before it without a space: a sign ("."), a line
+    /// break, the word after an opening quotation mark or a line break.
+    pub tight: bool,
+}
+
+/// `acc` with `seg` joined on: by one space, or by none when it is tight.
+fn compose(acc: &str, seg: &Segment) -> String {
+    if seg.tight {
+        format!("{acc}{}", seg.text)
+    } else {
+        compose_segment(acc, &seg.text)
+    }
 }
 
 pub struct LiveTyper {
@@ -115,9 +127,7 @@ impl LiveTyper {
     }
     /// What the field should contain (committed text).
     pub fn text(&self) -> String {
-        self.committed
-            .iter()
-            .fold(String::new(), |acc, s| compose_segment(&acc, &s.text))
+        self.committed.iter().fold(String::new(), |acc, s| compose(&acc, s))
     }
     /// What is physically in the field as far as we know.
     pub fn typed(&self) -> &str {
@@ -126,12 +136,24 @@ impl LiveTyper {
 
     /// Commit a final and bring the field up to date (or enqueue it).
     pub fn append(&mut self, text: &str, sink: &mut dyn TextSink) -> Result<SegmentId, OutputError> {
+        self.append_joined(text, false, sink)
+    }
+
+    /// As [`append`](Self::append); `tight` joins the final to the text
+    /// before it without a space.
+    pub fn append_joined(
+        &mut self,
+        text: &str,
+        tight: bool,
+        sink: &mut dyn TextSink,
+    ) -> Result<SegmentId, OutputError> {
         let id = self.next_id;
         self.next_id += 1;
         self.committed.push(Segment {
             id,
             text: text.to_string(),
             span: 0..0,
+            tight,
         });
         self.reindex();
         // Nothing was waiting: the new text starts without a pause.
@@ -150,6 +172,7 @@ impl LiveTyper {
             id,
             text: text.to_string(),
             span: 0..0,
+            tight: false,
         }];
         self.reindex();
         self.drive(sink)
@@ -196,6 +219,8 @@ impl LiveTyper {
             return Ok(false);
         }
         let tail = self.committed.split_off(b + 1);
+        // The replacement joins as the first replaced segment did.
+        let tight = self.committed[a].tight;
         self.committed.truncate(a);
         let new_id = self.next_id;
         self.next_id += 1;
@@ -203,6 +228,7 @@ impl LiveTyper {
             id: new_id,
             text: text.to_string(),
             span: 0..0,
+            tight,
         });
         self.committed.extend(tail);
         self.reindex();
@@ -217,7 +243,7 @@ impl LiveTyper {
         (a <= b).then(|| {
             self.committed[a..=b]
                 .iter()
-                .fold(String::new(), |acc, s| compose_segment(&acc, &s.text))
+                .fold(String::new(), |acc, s| compose(&acc, s))
         })
     }
 
@@ -236,6 +262,7 @@ impl LiveTyper {
                 id,
                 text: new_text,
                 span: 0..0,
+                tight: false,
             }]
         };
         self.reindex();
@@ -258,6 +285,7 @@ impl LiveTyper {
                 id,
                 text: new_text,
                 span: 0..0,
+                tight: false,
             }]
         };
         self.reindex();
@@ -329,7 +357,7 @@ impl LiveTyper {
         let mut acc = String::new();
         let mut spans = Vec::with_capacity(self.committed.len());
         for seg in &self.committed {
-            acc = compose_segment(&acc, &seg.text);
+            acc = compose(&acc, seg);
             let after = acc.chars().count();
             spans.push(after.saturating_sub(seg.text.chars().count())..after);
         }
@@ -349,6 +377,22 @@ mod tests {
         fn may_inject(&self) -> bool {
             self.0
         }
+    }
+
+    #[test]
+    fn tight_finals_join_without_a_space() {
+        let mut lt = LiveTyper::default();
+        let mut s = RecordingSink::default();
+        lt.append("Hallo Welt", &mut s).unwrap();
+        let dot = lt.append_joined(".", true, &mut s).unwrap();
+        lt.append_joined("\n", true, &mut s).unwrap();
+        let word = lt.append_joined("Neu", true, &mut s).unwrap();
+        lt.append("hier", &mut s).unwrap();
+        assert_eq!(lt.text(), "Hallo Welt.\nNeu hier");
+        // A corrected range keeps the joint of its first segment.
+        assert_eq!(lt.text_of_range(dot, word).as_deref(), Some(".\nNeu"));
+        assert!(lt.replace_range(dot, word, "!\nNeu", &mut s).unwrap());
+        assert_eq!(lt.text(), "Hallo Welt!\nNeu hier");
     }
 
     #[test]

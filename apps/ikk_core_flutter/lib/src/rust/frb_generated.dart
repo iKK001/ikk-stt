@@ -72,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1553619806;
+  int get rustContentHash => -1773232829;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -146,6 +146,18 @@ abstract class RustLibApi extends BaseApi {
     required String secret,
   });
 
+  void crateApiEngineIkkEngineSetFloatingAnchor({
+    required IkkEngine that,
+    required double x,
+    required double y,
+    required bool right,
+    required double dx,
+    required bool bottom,
+    required double dy,
+    required double rx,
+    required double ry,
+  });
+
   void crateApiEngineIkkEngineSetFloatingPosition({
     required IkkEngine that,
     required double x,
@@ -155,6 +167,12 @@ abstract class RustLibApi extends BaseApi {
   void crateApiEngineIkkEngineSetFloatingShrink({
     required IkkEngine that,
     required bool on_,
+  });
+
+  void crateApiEngineIkkEngineSetFloatingSize({
+    required IkkEngine that,
+    required int sizePercent,
+    required int growthPercent,
   });
 
   void crateApiEngineIkkEngineSetVoiceCommands({
@@ -748,6 +766,53 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiEngineIkkEngineSetFloatingAnchor({
+    required IkkEngine that,
+    required double x,
+    required double y,
+    required bool right,
+    required double dx,
+    required bool bottom,
+    required double dy,
+    required double rx,
+    required double ry,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerIkkEngine(
+            that,
+            serializer,
+          );
+          sse_encode_f_64(x, serializer);
+          sse_encode_f_64(y, serializer);
+          sse_encode_bool(right, serializer);
+          sse_encode_f_64(dx, serializer);
+          sse_encode_bool(bottom, serializer);
+          sse_encode_f_64(dy, serializer);
+          sse_encode_f_64(rx, serializer);
+          sse_encode_f_64(ry, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineIkkEngineSetFloatingAnchorConstMeta,
+        argValues: [that, x, y, right, dx, bottom, dy, rx, ry],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineIkkEngineSetFloatingAnchorConstMeta =>
+      const TaskConstMeta(
+        debugName: "IkkEngine_set_floating_anchor",
+        argNames: ["that", "x", "y", "right", "dx", "bottom", "dy", "rx", "ry"],
+      );
+
+  @override
   void crateApiEngineIkkEngineSetFloatingPosition({
     required IkkEngine that,
     required double x,
@@ -763,7 +828,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_f_64(x, serializer);
           sse_encode_f_64(y, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -796,7 +861,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_bool(on_, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -816,6 +881,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiEngineIkkEngineSetFloatingSize({
+    required IkkEngine that,
+    required int sizePercent,
+    required int growthPercent,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerIkkEngine(
+            that,
+            serializer,
+          );
+          sse_encode_u_32(sizePercent, serializer);
+          sse_encode_u_32(growthPercent, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineIkkEngineSetFloatingSizeConstMeta,
+        argValues: [that, sizePercent, growthPercent],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineIkkEngineSetFloatingSizeConstMeta =>
+      const TaskConstMeta(
+        debugName: "IkkEngine_set_floating_size",
+        argNames: ["that", "sizePercent", "growthPercent"],
+      );
+
+  @override
   void crateApiEngineIkkEngineSetVoiceCommands({
     required IkkEngine that,
     String? commandsJson,
@@ -831,7 +931,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_opt_String(commandsJson, serializer);
           sse_encode_String(settingsJson, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -864,7 +964,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_bool(active, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -897,7 +997,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_bool(show_, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -930,7 +1030,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(settingsJson, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -959,7 +1059,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -985,7 +1085,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 25)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1010,7 +1110,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_about_info,
@@ -1032,7 +1132,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 25)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 27)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -1058,7 +1158,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1090,7 +1190,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1116,7 +1216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 28)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 30)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1138,7 +1238,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 29)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -1163,7 +1263,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1187,7 +1287,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 33)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1212,7 +1312,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1236,7 +1336,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 33)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 35)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -1258,7 +1358,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 34)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 36)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1288,7 +1388,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1314,7 +1414,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 36)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 38)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1346,7 +1446,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1376,7 +1476,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1408,7 +1508,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1434,7 +1534,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 40)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 42)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1466,7 +1566,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1497,7 +1597,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1529,7 +1629,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 45,
             port: port_,
           );
         },
@@ -1564,7 +1664,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 46,
             port: port_,
           );
         },
@@ -2222,8 +2322,13 @@ class IkkEngineImpl extends RustOpaque implements IkkEngine {
   Stream<String> events() =>
       RustLib.instance.api.crateApiEngineIkkEngineEvents(that: this);
 
-  /// Where the floating buttons are (top-left corner, screen points), or
-  /// empty when they do not exist on this platform.
+  /// Where the floating buttons are: x, y (top-left corner, screen
+  /// points) and, when known, their anchor on the screen — 1 if measured
+  /// from the right edge (else 0), that distance, 1 if measured from the
+  /// bottom edge (else 0), that distance, then the share of the screen's
+  /// width and of its height at which their centre lies (-1 where the
+  /// buttons are close to the edge and the distance counts). Empty when
+  /// they do not exist on this platform.
   Float64List floatingPosition() =>
       RustLib.instance.api.crateApiEngineIkkEngineFloatingPosition(that: this);
 
@@ -2233,7 +2338,7 @@ class IkkEngineImpl extends RustOpaque implements IkkEngine {
   void loadConsent({required String consentJson}) => RustLib.instance.api
       .crateApiEngineIkkEngineLoadConsent(that: this, consentJson: consentJson);
 
-  /// F8 in the shell's own window: the
+  /// A range button outside the floating panel: the
   /// correction button's range moves on. The new range comes back as
   /// the `CorrectionRange` event, which the shell saves; "" when no
   /// settings are known yet.
@@ -2272,6 +2377,31 @@ class IkkEngineImpl extends RustOpaque implements IkkEngine {
         secret: secret,
       );
 
+  /// Move the floating buttons to their anchor: the given distances to
+  /// the nearest edges, or — where `rx` / `ry` is not negative — that
+  /// share of the screen's width / height for their centre; on the
+  /// screen that holds (x, y), else on the main screen.
+  void setFloatingAnchor({
+    required double x,
+    required double y,
+    required bool right,
+    required double dx,
+    required bool bottom,
+    required double dy,
+    required double rx,
+    required double ry,
+  }) => RustLib.instance.api.crateApiEngineIkkEngineSetFloatingAnchor(
+    that: this,
+    x: x,
+    y: y,
+    right: right,
+    dx: dx,
+    bottom: bottom,
+    dy: dy,
+    rx: rx,
+    ry: ry,
+  );
+
   /// Move the floating buttons there.
   void setFloatingPosition({required double x, required double y}) => RustLib
       .instance
@@ -2282,6 +2412,18 @@ class IkkEngineImpl extends RustOpaque implements IkkEngine {
   /// a little larger than plain under it. Off: always the plain size.
   void setFloatingShrink({required bool on_}) => RustLib.instance.api
       .crateApiEngineIkkEngineSetFloatingShrink(that: this, on_: on_);
+
+  /// The floating buttons' plain size in percent (100 = as designed) and
+  /// how much larger than that they grow under the mouse, in percent
+  /// (counts while shrinking is on). Out-of-range values are pulled in.
+  void setFloatingSize({
+    required int sizePercent,
+    required int growthPercent,
+  }) => RustLib.instance.api.crateApiEngineIkkEngineSetFloatingSize(
+    that: this,
+    sizePercent: sizePercent,
+    growthPercent: growthPercent,
+  );
 
   /// Offline voice commands on (model JSON from `voice_train`) or off
   /// (`None`). `settings_json`: what a voice start dictates with.

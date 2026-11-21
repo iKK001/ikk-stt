@@ -175,6 +175,36 @@ fn spell(text: &str, dict: &spellbook::Dictionary) -> String {
     out
 }
 
+fn quotation_mark(c: char) -> bool {
+    matches!(c, '"' | '„' | '“' | '”' | '«' | '»' | '‹' | '›' | '‚' | '‘')
+}
+
+/// The grammar rules over one line. A suggestion that touches a quotation
+/// mark (or the character right beside one) is dropped: the marks are set
+/// by the person ("Zitat", "Zitat Ende"), often with the quotation still
+/// open, and the rules would push a full stop in beside them
+/// ("Er sagte «" → "Er sagte.«", "kommt gut“" → "kommt gut.“").
+fn grammar(line: &str, lang: &Language) -> String {
+    let mut suggestions = lang.rules.suggest(line, &lang.tokenizer);
+    if line.chars().any(quotation_mark) {
+        let chars: Vec<char> = line.chars().collect();
+        suggestions.retain(|s| {
+            let span = s.span().char();
+            let from = span.start.saturating_sub(1);
+            let to = (span.end + 1).min(chars.len());
+            let touches = chars[from.min(to)..to].iter().copied().any(quotation_mark);
+            if touches {
+                debug!(rule = s.source(), "grammar: suggestion beside a quotation mark dropped");
+            }
+            !touches
+        });
+    }
+    if suggestions.is_empty() {
+        return line.to_string();
+    }
+    nlprule::rules::apply_suggestions(line, &suggestions)
+}
+
 /// Grammar rules, then spelling, line by line (line breaks are kept).
 fn correct_text(text: &str, lang: &Language) -> String {
     text.split('\n')
@@ -182,7 +212,7 @@ fn correct_text(text: &str, lang: &Language) -> String {
             if line.trim().is_empty() {
                 return line.to_string();
             }
-            let grammar = lang.rules.correct(line, &lang.tokenizer);
+            let grammar = grammar(line, lang);
             spell(&grammar, &lang.dict)
         })
         .collect::<Vec<_>>()
@@ -268,5 +298,29 @@ mod tests {
         assert_eq!(distance("gros", "gross"), 1);
         assert_eq!(distance("Haus", "Maus"), 1);
         assert_eq!(distance("abc", "xyz"), 3);
+    }
+
+    #[test]
+    fn quotation_marks_are_left_alone() {
+        let lang = german().expect("German pack");
+        // Zitat / Zitat Ende set these marks; no sign is pushed in beside
+        // them, whether the quotation is still open or closed.
+        for t in [
+            "Er sagte «",
+            "Er sagte «kommt gut",
+            "Er sagte «kommt gut»",
+            "Er sagte «kommt gut» und ging",
+            "Er sagte „",
+            "Er sagte „kommt gut“",
+            "Er sagte „kommt gut“ und ging",
+            "Er sagte \"kommt gut\" und ging",
+        ] {
+            assert_eq!(correct_text(t, lang), t);
+        }
+        // The words inside and around are still corrected.
+        assert_eq!(
+            correct_text("er sagte «ich komme morgen» und ging nach hause", lang),
+            "er sagte «ich komme morgen» und ging nach Hause"
+        );
     }
 }

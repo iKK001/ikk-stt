@@ -1305,10 +1305,12 @@ impl Engine {
                     };
                     // A piece that starts with a sign ("Punkt") joins the text
                     // before it without a space.
-                    let tight = shaped
-                        .chars()
-                        .next()
-                        .is_some_and(|c| ".,;:!?)]}»”’…%°\n".contains(c) || c == '\u{202F}');
+                    let closing = commands::quotation_marks(&self.language).1;
+                    let tight = shaped.starts_with(closing)
+                        || shaped
+                            .chars()
+                            .next()
+                            .is_some_and(|c| ".,;:!?)]}»”’…%°\n".contains(c) || c == '\u{202F}');
                     let with_space = if self.session_text.is_empty()
                         || self.dictation.selection > 0
                         || self.after_opening_quote()
@@ -1517,7 +1519,12 @@ impl Engine {
                                 t = inline.text;
                             }
                         }
-                        let with_space = if self.session_text.is_empty() || self.after_opening_quote() {
+                        let closing = commands::quotation_marks(&self.language).1;
+                        let tight = t.starts_with(closing)
+                            || t.chars()
+                                .next()
+                                .is_some_and(|c| ".,;:!?)]}»”’…%°\n".contains(c) || c == '\u{202F}');
+                        let with_space = if self.session_text.is_empty() || self.after_opening_quote() || tight {
                             t
                         } else {
                             format!(" {t}")
@@ -1967,10 +1974,15 @@ impl Engine {
     /// The text so far ends with an opening quotation mark (or a line
     /// break): the next word joins without a space.
     fn after_opening_quote(&self) -> bool {
-        self.session_text
-            .chars()
-            .next_back()
-            .is_some_and(|c| matches!(c, '„' | '“' | '«' | '‹' | '‘' | '\u{202F}' | '\n' | '(' | '['))
+        // “ opens a quotation in English and closes one in German: only
+        // the language's own opening mark counts.
+        let opening = commands::quotation_marks(&self.language).0;
+        self.session_text.ends_with(opening)
+            || self
+                .session_text
+                .chars()
+                .next_back()
+                .is_some_and(|c| matches!(c, '„' | '«' | '‹' | '‘' | '\u{202F}' | '\n' | '(' | '['))
     }
 
     async fn say_error(&mut self, msg: &str) {
@@ -2056,6 +2068,9 @@ impl Engine {
             return Ok(n);
         }
         // Only the joining space is dropped here; a line break is text.
+        // No joining space (a sign, a line break, the word after one):
+        // the typer must not put one in either.
+        let tight = !text.starts_with(' ');
         let segment = text.trim_start_matches(' ');
         self.typed_log.push((Instant::now(), n));
         if self.sink.access_level() == AccessLevel::Host {
@@ -2078,7 +2093,7 @@ impl Engine {
                 })
                 .await;
         }
-        match self.live.append(segment, &mut *self.sink) {
+        match self.live.append_joined(segment, tight, &mut *self.sink) {
             Ok(id) => {
                 self.last_segment = Some(id);
                 if self.live.flow_rate_ms() == 0 {

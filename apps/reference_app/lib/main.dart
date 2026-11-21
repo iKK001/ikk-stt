@@ -24,6 +24,7 @@ import 'profiles.dart';
 import 'history.dart';
 import 'keyboard_bridge.dart';
 import 'background.dart';
+import 'position_info.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -150,31 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _vocabFocus.addListener(() {
       if (!_vocabFocus.hasFocus) _saveVocab();
     });
-    HardwareKeyboard.instance.addHandler(_onKey);
     _init();
-  }
-
-  /// While this window is in front: F8 moves the correction range on and
-  /// F9 flips the switch between AI and audio correction, as they do from
-  /// the floating buttons (any app).
-  bool _onKey(KeyEvent event) {
-    if (event is! KeyDownEvent) return false;
-    if (event.logicalKey == LogicalKeyboardKey.f8) {
-      _nextRange();
-      return true;
-    }
-    if (event.logicalKey == LogicalKeyboardKey.f9 && _shrinkSupported) {
-      final audio = _ui['correction_mode'] != 'audio';
-      _ui['correction_mode'] = audio ? 'audio' : 'ai';
-      _saveUi();
-      try {
-        _engine.setCorrectionMode(audio: audio);
-      } catch (e) {
-        _snack('$e');
-      }
-      return true;
-    }
-    return false;
   }
 
   /// The next correction range; the engine answers with `CorrectionRange`,
@@ -204,6 +181,8 @@ class _HomeScreenState extends State<HomeScreen> {
     // Windows: %LOCALAPPDATA%, so the recordings never roam to other PCs.
     _voiceDir = localDataDir() ?? dir;
     _uiPath = '$dir${Platform.pathSeparator}ui.json';
+    // The general settings first: nothing may read or save them before.
+    await _loadUi();
     _history = HistoryStore(dir);
     _settings = jsonDecode(await settingsLoad(path: _settingsPath)) as Map<String, dynamic>;
     // First start after the update: the profile list is built from the
@@ -266,7 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _snack('$e');
           }
         case 'next_range':
-          // F8 on a hardware keyboard while the iKK keyboard is up.
+          // A range button outside the floating panel.
           _nextRange();
         default:
           break;
@@ -466,8 +445,8 @@ class _HomeScreenState extends State<HomeScreen> {
           _ui['correction_mode'] = (v as Map<String, dynamic>)['audio'] == true ? 'audio' : 'ai';
           _saveUi();
         case 'CorrectionRange':
-          // The range key (F8): the correction button's range moved on; saved
-          // like a choice on the profile page.
+          // The range button: the range moved on; saved like a choice on
+          // the profile page.
           final range = (v as Map<String, dynamic>)['range'] as String? ?? 'cursor_to_end';
           _text['correction_range'] = range;
           KeyboardBridge.setCorrectionRange(range);
@@ -490,8 +469,20 @@ class _HomeScreenState extends State<HomeScreen> {
         case 'FloatingMoved':
           // Dragged by hand: that is where they open next time, and no
           // saved position is "the chosen one" any more.
+          // With the anchor (nearest screen edges) when the panel names it.
           final m = v as Map<String, dynamic>;
-          _ui['button_position'] = {'x': (m['x'] as num).toDouble(), 'y': (m['y'] as num).toDouble()};
+          _ui['button_position'] = {
+            'x': (m['x'] as num).toDouble(),
+            'y': (m['y'] as num).toDouble(),
+            if (m['dx'] is num && m['dy'] is num) ...{
+              'right': m['right'] == true,
+              'dx': (m['dx'] as num).toDouble(),
+              'bottom': m['bottom'] == true,
+              'dy': (m['dy'] as num).toDouble(),
+              if (m['rx'] is num) 'rx': (m['rx'] as num).toDouble(),
+              if (m['ry'] is num) 'ry': (m['ry'] as num).toDouble(),
+            },
+          };
           _ui.remove('position_selected');
           _saveUi();
         case 'Command':
@@ -545,15 +536,25 @@ class _HomeScreenState extends State<HomeScreen> {
   // Shell preferences outside the engine's settings file (ui.json).
   Map<String, dynamic> _ui = {};
 
+  bool _uiLoaded = false;
+
+  /// Read ui.json once. What the file holds wins over anything put into
+  /// `_ui` before it was read (an empty list a getter created), so an
+  /// early touch can never make the stored settings look absent.
   Future<void> _loadUi() async {
-    if (_ui.isNotEmpty) return;
+    if (_uiLoaded) return;
+    _uiLoaded = true;
     try {
       final f = File(_uiPath);
-      if (await f.exists()) _ui = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      if (await f.exists()) {
+        _ui = {..._ui, ...jsonDecode(await f.readAsString()) as Map<String, dynamic>};
+      }
     } catch (_) {}
   }
 
+  /// Never before the file was read: a save would wipe what it holds.
   Future<void> _saveUi() async {
+    await _loadUi();
     try {
       await File(_uiPath).writeAsString(jsonEncode(_ui));
     } catch (_) {}
@@ -567,6 +568,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_floatingSupported) return;
     await _loadUi();
     _engine.showFloatingButton(show_: true);
+    if (_shrinkSupported) _engine.setFloatingSize(sizePercent: _buttonSize, growthPercent: _buttonGrowth);
     if (_shrinkSupported) _engine.setFloatingShrink(on_: _shrinkButtons);
     if (_shrinkSupported) _engine.setCorrectionMode(audio: _ui['correction_mode'] == 'audio');
   }
@@ -576,6 +578,68 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _shrinkSupported => Platform.isMacOS || Platform.isWindows;
   bool get _shrinkButtons => _ui['button_shrink'] as bool? ?? true;
 
+  /// The desktop buttons' plain size in percent (ui.json `button_size`)
+  /// and how much larger they are under the mouse than at rest
+  /// (`button_grow`, percent; `button_growth` was an older meaning).
+  static const _defaultButtonSize = 100, _defaultButtonGrowth = 60;
+  int get _buttonSize => (_ui['button_size'] as num?)?.round() ?? _defaultButtonSize;
+  int get _buttonGrowth => (_ui['button_grow'] as num?)?.round() ?? _defaultButtonGrowth;
+
+  /// Shown at once; written to ui.json when `save` (the slider let go).
+  Future<void> _setButtonSize({int? size, int? growth, bool save = true}) async {
+    if (size != null) _ui['button_size'] = size;
+    if (growth != null) _ui['button_grow'] = growth;
+    _engine.setFloatingSize(sizePercent: _buttonSize, growthPercent: _buttonGrowth);
+    if (save) {
+      // The buttons grew around their centre, so their corner moved: that
+      // is where they were left (the panel resizes a moment later).
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      final now = await _currentButtonPosition();
+      if (now != null) _ui['button_position'] = now;
+      await _saveUi();
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// A percent slider with its value in the title and a button back to
+  /// the default.
+  Widget _percentSlider({
+    required String title,
+    String? body,
+    required int value,
+    required int min,
+    required int max,
+    required int standard,
+    required bool enabled,
+    required void Function(int v, bool save) onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 8),
+        Text(title),
+        if (body != null) Text(body, style: Theme.of(context).textTheme.bodySmall),
+        Row(children: [
+          Expanded(
+            child: Slider(
+              value: value.clamp(min, max).toDouble(),
+              min: min.toDouble(),
+              max: max.toDouble(),
+              divisions: (max - min) ~/ 5,
+              label: '$value %',
+              onChanged: enabled ? (v) => onChanged(v.round(), false) : null,
+              onChangeEnd: enabled ? (v) => onChanged(v.round(), true) : null,
+            ),
+          ),
+          TextButton(
+            onPressed: enabled && value != standard ? () => onChanged(standard, true) : null,
+            child: Text('${_t['defaultValue']} ($standard %)'),
+          ),
+        ]),
+      ],
+    );
+  }
+
   // ------------------------------------------------ button positions
 
   bool get _buttonsMovable => _floatingSupported || Platform.isAndroid;
@@ -583,21 +647,62 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> get _savedPositions =>
       ((_ui['positions'] ??= <dynamic>[]) as List).cast<Map<String, dynamic>>();
 
-  /// Where the buttons are right now (screen points; Android: layout x, y).
-  Future<List<double>?> _currentButtonPosition() async {
-    if (Platform.isAndroid) return hostButtonPosition();
+  /// Where the buttons are right now: x, y (screen points; Android:
+  /// layout x, y) and, on the desktop, the anchor — the distances to the
+  /// two nearest screen edges (`right`, `dx`, `bottom`, `dy`).
+  Future<Map<String, dynamic>?> _currentButtonPosition() async {
+    if (Platform.isAndroid) {
+      final p = await hostButtonPosition();
+      return p == null ? null : {'x': p[0], 'y': p[1]};
+    }
     if (!_floatingSupported) return null;
     final p = _engine.floatingPosition();
-    return p.length >= 2 ? [p[0], p[1]] : null;
+    if (p.length < 2) return null;
+    return {
+      'x': p[0],
+      'y': p[1],
+      if (p.length >= 6) ...{'right': p[2] > 0.5, 'dx': p[3], 'bottom': p[4] > 0.5, 'dy': p[5]},
+      // Further in from the edge: the share of the screen instead.
+      if (p.length >= 8 && p[6] >= 0) 'rx': p[6],
+      if (p.length >= 8 && p[7] >= 0) 'ry': p[7],
+    };
   }
 
-  Future<void> _moveButtons(double x, double y) async {
+  /// Move the buttons to a remembered position: by its anchor when it has
+  /// one (so it holds on another resolution), else to the fixed point.
+  /// False when the position is incomplete.
+  Future<bool> _moveButtons(Map<String, dynamic> p) async {
+    final x = (p['x'] as num?)?.toDouble();
+    final y = (p['y'] as num?)?.toDouble();
+    if (x == null || y == null) return false;
     if (Platform.isAndroid) {
       await setHostButtonPosition(x, y);
     } else if (_floatingSupported) {
-      _engine.setFloatingPosition(x: x, y: y);
+      final dx = (p['dx'] as num?)?.toDouble();
+      final dy = (p['dy'] as num?)?.toDouble();
+      if (dx != null && dy != null) {
+        _engine.setFloatingAnchor(
+          x: x,
+          y: y,
+          right: p['right'] == true,
+          dx: dx,
+          bottom: p['bottom'] == true,
+          dy: dy,
+          rx: (p['rx'] as num?)?.toDouble() ?? -1,
+          ry: (p['ry'] as num?)?.toDouble() ?? -1,
+        );
+      } else {
+        _engine.setFloatingPosition(x: x, y: y);
+      }
     }
+    return true;
   }
+
+  /// The position without its name: what `button_position` holds.
+  Map<String, dynamic> _placeOf(Map<String, dynamic> p) => {
+        for (final k in const ['x', 'y', 'right', 'dx', 'bottom', 'dy', 'rx', 'ry'])
+          if (p[k] != null) k: p[k],
+      };
 
   /// At start: the chosen saved position, else where they were left.
   Future<void> _applyButtonPosition() async {
@@ -610,12 +715,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     target ??= _ui['button_position'] as Map<String, dynamic>?;
     if (target == null) return;
-    final x = (target['x'] as num?)?.toDouble();
-    final y = (target['y'] as num?)?.toDouble();
-    if (x == null || y == null) return;
     // The buttons are created a moment after the show call.
     await Future<void>.delayed(const Duration(milliseconds: 300));
-    await _moveButtons(x, y);
+    await _moveButtons(target);
   }
 
   Future<void> _saveCurrentPosition() async {
@@ -645,19 +747,24 @@ class _HomeScreenState extends State<HomeScreen> {
     if (name == null || name.isEmpty) return;
     final list = _savedPositions;
     list.removeWhere((p) => p['name'] == name);
-    list.add({'name': name, 'x': pos[0], 'y': pos[1]});
+    list.add({'name': name, ...pos});
     _ui['position_selected'] = name;
-    _ui['button_position'] = {'x': pos[0], 'y': pos[1]};
+    _ui['button_position'] = pos;
     await _saveUi();
     if (mounted) setState(() {});
   }
 
   Future<void> _choosePosition(Map<String, dynamic> p) async {
-    final x = (p['x'] as num).toDouble();
-    final y = (p['y'] as num).toDouble();
-    await _moveButtons(x, y);
+    if (!await _moveButtons(p)) return;
+    if (p['dx'] == null && _floatingSupported) {
+      // Saved before the anchor existed: taken over from where the
+      // buttons are now (they are moved a moment after the call).
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      final now = await _currentButtonPosition();
+      if (now != null) p.addAll(now);
+    }
     _ui['position_selected'] = p['name'];
-    _ui['button_position'] = {'x': x, 'y': y};
+    _ui['button_position'] = _placeOf(p);
     await _saveUi();
     _snack(_t.fmt('positionApplied', {'n': p['name']}));
     if (mounted) setState(() {});
@@ -672,8 +779,14 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_t['positionsTitle'], style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 4),
+            Row(children: [
+              Expanded(child: Text(_t['positionsTitle'], style: Theme.of(context).textTheme.titleMedium)),
+              IconButton(
+                tooltip: _t['positionInfoTip'],
+                icon: const Icon(Icons.info_outline),
+                onPressed: () => showPositionInfo(context, _t),
+              ),
+            ]),
             Text(_t['positionsBody']),
             const SizedBox(height: 8),
             if (list.isEmpty) Text(_t['noPositions'], style: Theme.of(context).textTheme.bodySmall),
@@ -682,7 +795,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(p['name'] == chosen ? Icons.radio_button_checked : Icons.radio_button_off),
                 title: Text(p['name'] as String),
-                subtitle: Text('${(p['x'] as num).round()} · ${(p['y'] as num).round()}'),
+                // By the anchor: the edge it is measured from and how far.
+                // Per direction: a share of the screen, or the edge and
+                // the distance to it.
+                subtitle: Text(p['dx'] is num && p['dy'] is num
+                    ? '${p['rx'] is num ? '↔ ${((p['rx'] as num) * 100).round()} %' : '${p['right'] == true ? '→' : '←'} ${(p['dx'] as num).round()}'} · '
+                        '${p['ry'] is num ? '↕ ${((p['ry'] as num) * 100).round()} %' : '${p['bottom'] == true ? '↓' : '↑'} ${(p['dy'] as num).round()}'}'
+                    : '${(p['x'] as num).round()} · ${(p['y'] as num).round()}'),
                 onTap: () => _choosePosition(p),
                 trailing: IconButton(
                   tooltip: _t['remove'],
@@ -788,6 +907,27 @@ class _HomeScreenState extends State<HomeScreen> {
                   await _saveUi();
                   if (mounted) setState(() {});
                 },
+              ),
+            if (_shrinkSupported)
+              _percentSlider(
+                title: _t.fmt('buttonSize', {'p': _buttonSize}),
+                value: _buttonSize,
+                min: 50,
+                max: 250,
+                standard: _defaultButtonSize,
+                enabled: true,
+                onChanged: (v, save) => _setButtonSize(size: v, save: save),
+              ),
+            if (_shrinkSupported)
+              _percentSlider(
+                title: _t.fmt('buttonGrowth', {'p': _buttonGrowth}),
+                body: _t['buttonGrowthBody'],
+                value: _buttonGrowth,
+                min: 0,
+                max: 150,
+                standard: _defaultButtonGrowth,
+                enabled: _shrinkButtons,
+                onChanged: (v, save) => _setButtonSize(growth: v, save: save),
               ),
           ],
         ),
@@ -1091,7 +1231,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_onKey);
     _events?.cancel();
     _keyCtl.dispose();
     _nameCtl.dispose();
@@ -2372,7 +2511,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 4),
             Text(_t[range == 'click_to_click' ? 'rangeClickNote' : 'rangeNote'], style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(height: 4),
-            Text(_t['rangeHotkeyNote'], style: Theme.of(context).textTheme.bodySmall),
+            Text(_t['rangeButtonsNote'], style: Theme.of(context).textTheme.bodySmall),
             const Divider(height: 24),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -2452,7 +2591,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 _saveVocab();
               },
             ),
-            _genderColonSwitch(),
+            // German writing only; other languages have no such form.
+            if (const {'deu', 'gsw'}.contains(_settings['providers']['language'])) _genderColonSwitch(),
           ],
         ),
       ),
@@ -2460,7 +2600,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// German: the gender colon for every feminine plural the word list
-  /// knows, plus the stems below.
+  /// knows. Plurals only; shown only while the language is German.
   Widget _genderColonSwitch() {
     return SwitchListTile(
       contentPadding: EdgeInsets.zero,
@@ -2919,14 +3059,99 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// The providers' own spelling for the ids the core names them by.
+  static const _providerNames = {
+    'deepgram': 'Deepgram',
+    'voiceitt': 'Voiceitt',
+    'openai': 'OpenAI',
+    'elevenlabs': 'ElevenLabs',
+    'azure': 'Microsoft Azure',
+    'anthropic': 'Anthropic',
+    'languagetool': 'LanguageTool',
+  };
+
+  static const _contactAddress = 'ikk-stt@ideenkaffee.ch';
+
+  static String _providerName(String id) =>
+      _providerNames[id] ?? (id.isEmpty ? id : id[0].toUpperCase() + id.substring(1));
+
   void _showAbout(BuildContext context) {
     final a = about();
+    final text = Theme.of(context).textTheme.bodyLarge;
+    final head = Theme.of(context).textTheme.titleMedium;
+    // Every service the app can send speech or text to: the speech
+    // recognizers of this build, and the services of the live correction.
+    final speech = [for (final id in a.providers) _providerName(id)];
+    const correction = ['LanguageTool', 'OpenAI', 'Anthropic'];
+    List<Widget> bullets(List<String> names) => [
+          for (final n in names)
+            Padding(
+              padding: const EdgeInsets.only(left: 8, top: 4),
+              child: Text('•  $n', style: text),
+            ),
+        ];
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(_t.fmt('aboutTitle', {'a': appName})),
-        content: Text('${_t.fmt('aboutVersion', {'v': a.coreVersion, 'b': a.buildNumber, 'd': a.buildDate})}\n'
-            '${_t['providers']}: ${a.providers.join(', ')}'),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Who is behind the app: name, firm and logo.
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(appName, style: Theme.of(context).textTheme.titleLarge),
+                          const SizedBox(height: 8),
+                          Text('Stephan Korner', style: text),
+                          Text('Ideen Kaffee Korner', style: text),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    // On white: the logo has black parts, lost on a dark theme.
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+                      child: Image.asset('assets/icon/ikk_logo.png', height: 118, fit: BoxFit.contain),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Text(_t['contact'], style: head),
+                const SizedBox(height: 4),
+                InkWell(
+                  onTap: () => launchUrl(Uri(scheme: 'mailto', path: _contactAddress)),
+                  child: Text(
+                    _contactAddress,
+                    style: text?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                      decoration: TextDecoration.underline,
+                      decorationColor: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(_t.fmt('aboutVersion', {'v': a.coreVersion, 'b': a.buildNumber, 'd': a.buildDate}), style: text),
+                const SizedBox(height: 20),
+                Text('${_t['providers']} – ${_t['providersSpeech']}', style: head),
+                ...bullets(speech),
+                const SizedBox(height: 16),
+                Text('${_t['providers']} – ${_t['providersCorrection']}', style: head),
+                ...bullets(correction),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        ),
         actions: [
           TextButton(
             onPressed: () {

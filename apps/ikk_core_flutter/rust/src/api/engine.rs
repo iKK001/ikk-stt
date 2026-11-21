@@ -129,11 +129,30 @@ impl IkkEngine {
                 Some(std::sync::Arc::new(|x, y| {
                     // The shell remembers where the buttons were left.
                     if let Some(s) = crate::shared::get() {
-                        let _ = s.events.send(format!("{{\"FloatingMoved\":{{\"x\":{x},\"y\":{y}}}}}"));
+                        // With the anchor (nearest edges of the screen), so
+                        // the place holds on another resolution.
+                        let anchor = match ikk_overlay::anchor() {
+                            Some(a) => {
+                                let share = |v: Option<f64>| v.map_or("null".to_string(), |v| v.to_string());
+                                format!(
+                                    ",\"right\":{},\"dx\":{},\"bottom\":{},\"dy\":{},\"rx\":{},\"ry\":{}",
+                                    a.right,
+                                    a.dx,
+                                    a.bottom,
+                                    a.dy,
+                                    share(a.rx),
+                                    share(a.ry)
+                                )
+                            }
+                            None => String::new(),
+                        };
+                        let _ = s
+                            .events
+                            .send(format!("{{\"FloatingMoved\":{{\"x\":{x},\"y\":{y}{anchor}}}}}"));
                     }
                 })),
                 Some(std::sync::Arc::new(|| {
-                    // F8 anywhere: the next range; the shell saves it.
+                    // The range button: the next range; the shell saves it.
                     if let Some(s) = crate::shared::get() {
                         s.next_range();
                     }
@@ -167,11 +186,51 @@ impl IkkEngine {
     pub fn transfer_to_target(&self) -> Result<(), String> {
         self.inner.engine.transfer_to_target()
     }
-    /// Where the floating buttons are (top-left corner, screen points), or
-    /// empty when they do not exist on this platform.
+    /// Where the floating buttons are: x, y (top-left corner, screen
+    /// points) and, when known, their anchor on the screen — 1 if measured
+    /// from the right edge (else 0), that distance, 1 if measured from the
+    /// bottom edge (else 0), that distance, then the share of the screen's
+    /// width and of its height at which their centre lies (-1 where the
+    /// buttons are close to the edge and the distance counts). Empty when
+    /// they do not exist on this platform.
     #[frb(sync)]
     pub fn floating_position(&self) -> Vec<f64> {
-        ikk_overlay::position().map(|(x, y)| vec![x, y]).unwrap_or_default()
+        let Some((x, y)) = ikk_overlay::position() else {
+            return Vec::new();
+        };
+        let mut out = vec![x, y];
+        if let Some(a) = ikk_overlay::anchor() {
+            out.extend([
+                f64::from(u8::from(a.right)),
+                a.dx,
+                f64::from(u8::from(a.bottom)),
+                a.dy,
+                a.rx.unwrap_or(-1.0),
+                a.ry.unwrap_or(-1.0),
+            ]);
+        }
+        out
+    }
+    /// Move the floating buttons to their anchor: the given distances to
+    /// the nearest edges, or — where `rx` / `ry` is not negative — that
+    /// share of the screen's width / height for their centre; on the
+    /// screen that holds (x, y), else on the main screen.
+    #[frb(sync)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_floating_anchor(&self, x: f64, y: f64, right: bool, dx: f64, bottom: bool, dy: f64, rx: f64, ry: f64) {
+        let share = |v: f64| (0.0..=1.0).contains(&v).then_some(v);
+        ikk_overlay::set_position_anchored(
+            x,
+            y,
+            ikk_overlay::Anchor {
+                right,
+                dx,
+                bottom,
+                dy,
+                rx: share(rx),
+                ry: share(ry),
+            },
+        );
     }
     /// Move the floating buttons there.
     #[frb(sync)]
@@ -184,7 +243,7 @@ impl IkkEngine {
     pub fn set_correction_mode(&self, audio: bool) {
         self.inner.set_audio_mode(audio);
     }
-    /// F8 in the shell's own window: the
+    /// A range button outside the floating panel: the
     /// correction button's range moves on. The new range comes back as
     /// the `CorrectionRange` event, which the shell saves; "" when no
     /// settings are known yet.
@@ -197,6 +256,13 @@ impl IkkEngine {
     #[frb(sync)]
     pub fn set_floating_shrink(&self, on: bool) {
         ikk_overlay::set_shrink(on);
+    }
+    /// The floating buttons' plain size in percent (100 = as designed) and
+    /// how much larger than that they grow under the mouse, in percent
+    /// (counts while shrinking is on). Out-of-range values are pulled in.
+    #[frb(sync)]
+    pub fn set_floating_size(&self, size_percent: u32, growth_percent: u32) {
+        ikk_overlay::set_size(size_percent, growth_percent);
     }
     /// Phones: replace by voice on text the host (keyboard, service)
     /// selected itself; the answer comes as the `HostReplace` event.

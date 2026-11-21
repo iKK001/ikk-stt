@@ -28,15 +28,20 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// Engine events as JSON; may be called again (e.g. after hot restart).
   Stream<String> events();
 
-  /// Where the floating buttons are (top-left corner, screen points), or
-  /// empty when they do not exist on this platform.
+  /// Where the floating buttons are: x, y (top-left corner, screen
+  /// points) and, when known, their anchor on the screen — 1 if measured
+  /// from the right edge (else 0), that distance, 1 if measured from the
+  /// bottom edge (else 0), that distance, then the share of the screen's
+  /// width and of its height at which their centre lies (-1 where the
+  /// buttons are close to the edge and the distance counts). Empty when
+  /// they do not exist on this platform.
   Float64List floatingPosition();
 
   void grantConsent({required String provider});
 
   void loadConsent({required String consentJson});
 
-  /// F8 in the shell's own window: the
+  /// A range button outside the floating panel: the
   /// correction button's range moves on. The new range comes back as
   /// the `CorrectionRange` event, which the shell saves; "" when no
   /// settings are known yet.
@@ -60,12 +65,32 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// service works after a reboot without opening the app.
   void setCredential({required String provider, required String secret});
 
+  /// Move the floating buttons to their anchor: the given distances to
+  /// the nearest edges, or — where `rx` / `ry` is not negative — that
+  /// share of the screen's width / height for their centre; on the
+  /// screen that holds (x, y), else on the main screen.
+  void setFloatingAnchor({
+    required double x,
+    required double y,
+    required bool right,
+    required double dx,
+    required bool bottom,
+    required double dy,
+    required double rx,
+    required double ry,
+  });
+
   /// Move the floating buttons there.
   void setFloatingPosition({required double x, required double y});
 
   /// Shrinking buttons: small and darker while the mouse is elsewhere,
   /// a little larger than plain under it. Off: always the plain size.
   void setFloatingShrink({required bool on_});
+
+  /// The floating buttons' plain size in percent (100 = as designed) and
+  /// how much larger than that they grow under the mouse, in percent
+  /// (counts while shrinking is on). Out-of-range values are pulled in.
+  void setFloatingSize({required int sizePercent, required int growthPercent});
 
   /// Offline voice commands on (model JSON from `voice_train`) or off
   /// (`None`). `settings_json`: what a voice start dictates with.

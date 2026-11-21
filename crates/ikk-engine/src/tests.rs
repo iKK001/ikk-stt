@@ -417,6 +417,82 @@ async fn spoken_stop_command_ends_session() {
     handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn spoken_signs_join_without_stray_spaces() {
+    // Provider that emits the command phrase as a final.
+    struct CmdProvider;
+    #[async_trait::async_trait]
+    impl Provider for CmdProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId("fake".into())
+        }
+        fn display_name(&self) -> &'static str {
+            "Cmd"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                streaming: true,
+                ..Default::default()
+            }
+        }
+        async fn transcribe(&self, _: AudioClip, _: &SessionConfig) -> Result<Transcript, SttError> {
+            Err(SttError::Unsupported)
+        }
+        async fn stream(&self, _: &SessionConfig) -> Result<Box<dyn StreamingSession>, SttError> {
+            let (tx, rx) = mpsc::channel(16);
+            for piece in [
+                "hallo welt",
+                "Punkt",
+                "Neue Zeile",
+                "weiter geht es",
+                "Zitat",
+                "kommt gut",
+                "Zitat Ende",
+                "und ging",
+                "Diktat Stopp",
+            ] {
+                tx.send(TranscriptEvent::Final(piece.into())).await.unwrap();
+            }
+            Ok(Box::new(FakeSession { pushed: 0, tx, rx }))
+        }
+    }
+    let mut reg = ProviderRegistry::new();
+    reg.register(Box::new(CmdProvider));
+    let log = SinkLog::default();
+    let (_ftx, frx) = mpsc::channel(8);
+    let frx = Arc::new(StdMutex::new(Some(frx)));
+    let opener: CaptureOpener = Box::new(move |_| {
+        Ok(Box::new(FakeCapture {
+            rx: frx.lock().unwrap().take().unwrap(),
+        }) as Box<dyn Capture>)
+    });
+    let mut handle = Engine::spawn_with(
+        reg,
+        Box::new(FakeSink {
+            status: TargetStatus::Unknown,
+            typing_ok: true,
+            log: log.clone(),
+        }),
+        opener,
+    );
+    handle.send(EngineCommand::Start(Box::new(start_cfg()))).await;
+    let evs = collect(
+        &mut handle,
+        |e| matches!(e, EngineEvent::State(EngineState::Idle)),
+        Duration::from_secs(3),
+    )
+    .await;
+    let _ = evs;
+    // No space before the full stop, none at the start of the new line,
+    // none inside the quotation marks; one after the closing mark.
+    assert_eq!(
+        log.typed.lock().unwrap().concat(),
+        // ("tail" is what the test recogniser says when the session ends.)
+        "hallo welt.\nWeiter geht es “kommt gut” und ging tail"
+    );
+    handle.shutdown().await;
+}
+
 // ---------- offline voice commands ----------
 
 /// Synthetic word: voiced sounds (pitch, formant 1, formant 2, seconds).

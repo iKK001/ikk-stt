@@ -23,6 +23,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/ikk_logo.png
 
 # App icon: `dart run flutter_launcher_icons` regenerates every platform set
 # from assets/icon (master: assets/icon/logo.svg). Windows keeps the

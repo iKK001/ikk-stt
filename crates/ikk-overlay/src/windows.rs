@@ -8,20 +8,21 @@ use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, SelectObject, PAINTSTRUCT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
+    SelectObject, MONITORINFO, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT,
 };
 use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey, MOD_NOREPEAT, TME_LEAVE,
-    TRACKMOUSEEVENT, VK_F8, VK_F9,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
     GetWindowRect, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, IDC_HAND, MA_NOACTIVATE, MSG,
     MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    SW_SHOWNOACTIVATE, WH_MOUSE_LL, WM_APP, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
@@ -36,10 +37,8 @@ const DRAG_THRESHOLD: i32 = 4;
 /// Sent once after `TrackMouseEvent(TME_LEAVE)` when the mouse has left
 /// (the `windows` crate files it under the common controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
-/// Shrinking buttons: drawn this much larger than [`SIZE`] under the
-/// mouse, and this much smaller (and darker) when the mouse is elsewhere.
-const HOVER_SCALE: f64 = 1.15;
-const IDLE_SCALE: f64 = 0.72;
+// Shrinking buttons: sizes come from the settings (crate::set_size).
+use crate::{base_scale, hover_scale, idle_scale};
 /// How much darker the idle buttons are drawn (multiplied into the colour).
 const DIM: f64 = 0.8;
 /// Growing and shrinking take this long, eased at both ends; redrawn
@@ -49,11 +48,6 @@ const TIMER_ANIM: usize = 8;
 /// Redraws the rotating arc while the correction button is busy.
 const TIMER_SPIN: usize = 9;
 const MSG_SPIN: u32 = WM_APP + 10;
-/// While the panel shows, in any application: F8 steps through the four
-/// correction ranges, F9 flips the AI/Audio switch (the keys do not reach
-/// the application).
-const HOTKEY_RANGE: i32 = 1;
-const HOTKEY_MODE: i32 = 2;
 // COLORREF is 0x00BBGGRR.
 const BLUE: COLORREF = COLORREF(0x00B3_8600); // #0086B3, brand primary: listening for the start word
 const BRAND: COLORREF = COLORREF(0x00CC_9900); // #0099CC: the correction button
@@ -169,7 +163,7 @@ struct State {
     on_correct: Option<OnTap>,
     on_mode: Option<OnMode>,
     on_moved: Option<OnMoved>,
-    /// F8 anywhere while the buttons are shown.
+    /// The range button (above the start button) was pressed.
     on_next_range: Option<OnTap>,
     /// The switch: audio correction (true) or AI correction (false).
     audio_mode: bool,
@@ -178,7 +172,7 @@ struct State {
     busy_since: Option<Instant>,
     /// Replace by voice armed: the replace button is yellow.
     replace_armed: bool,
-    /// The correction button's range: 0 cursor to end, 1 whole text, 2 click to click.
+    /// The range button's range: 0 cursor to end, 1 whole text, 2 click to click, 3 single word.
     range_mode: u8,
     /// The highlight window (0 = none) and where it should be.
     highlight_hwnd: isize,
@@ -187,6 +181,12 @@ struct State {
     position: Option<(f64, f64)>,
     /// Where MSG_MOVE should put the window.
     wanted: Option<(i32, i32)>,
+    /// MSG_MOVE places by this anchor (on the screen of `wanted`).
+    wanted_anchor: Option<crate::Anchor>,
+    /// The window's anchor on its screen.
+    anchor: Option<crate::Anchor>,
+    /// The window's exact centre: what a size change keeps in place.
+    centre: Option<(f64, f64)>,
     /// The buttons shrink when the mouse is not over them.
     shrink: bool,
     /// The mouse is over the window.
@@ -206,7 +206,7 @@ struct Layout {
     /// 0 = resting (small, dark), 1 = full size and bright.
     bright: f64,
     with_correct: bool,
-    /// Number of buttons (1–3).
+    /// Number of button columns (1–3).
     count: usize,
     /// An animation is still running.
     animating: bool,
@@ -214,11 +214,11 @@ struct Layout {
 
 fn target_scale(shrink: bool, hover: bool) -> f64 {
     if !shrink {
-        1.0
+        base_scale()
     } else if hover {
-        HOVER_SCALE
+        hover_scale()
     } else {
-        IDLE_SCALE
+        idle_scale()
     }
 }
 
@@ -228,7 +228,8 @@ fn layout() -> Layout {
         .map(|s| (button_count(&s), s.on_correct.is_some(), s.shrink, s.hover, s.anim))
         .unwrap_or((1, false, false, false, None));
     let content = width(count) as f64;
-    let panel_scale = if shrink { HOVER_SCALE } else { 1.0 };
+    let content_h = height(with_correct) as f64;
+    let panel_scale = if shrink { hover_scale() } else { base_scale() };
     let target = target_scale(shrink, hover);
     let mut scale = target;
     let mut animating = false;
@@ -240,21 +241,28 @@ fn layout() -> Layout {
             animating = true;
         }
     }
-    let bright = if shrink {
-        ((scale - IDLE_SCALE) / (HOVER_SCALE - IDLE_SCALE)).clamp(0.0, 1.0)
+    let bright = if shrink && hover_scale() - idle_scale() < 1e-6 {
+        // No growth: bright under the mouse, dark away from it.
+        if hover {
+            1.0
+        } else {
+            0.0
+        }
+    } else if shrink {
+        ((scale - idle_scale()) / (hover_scale() - idle_scale()).max(1e-6)).clamp(0.0, 1.0)
     } else {
         1.0
     };
     // Two pixels of room: the disc regions are one pixel wider than the
     // drawing and must never touch the window's edge.
     let w = (content * panel_scale).ceil() + 2.0;
-    let h = (SIZE as f64 * panel_scale).ceil() + 2.0;
+    let h = (content_h * panel_scale).ceil() + 2.0;
     Layout {
         width: w as i32,
         height: h as i32,
         scale,
         dx: (w - content * scale) / 2.0,
-        dy: (h - SIZE as f64 * scale) / 2.0,
+        dy: (h - content_h * scale) / 2.0,
         bright,
         with_correct,
         count,
@@ -281,6 +289,12 @@ unsafe fn start_animation(hwnd: HWND, from: f64) {
 /// is all a size or state change needs.
 unsafe fn apply_shape(hwnd: HWND, _l: Layout) {
     render(hwnd);
+}
+
+/// The plain size or the growth changed: the window takes its new size
+/// (around its centre) and is drawn anew.
+pub fn refresh_size() {
+    post(MSG_SHRINK);
 }
 
 pub fn set_shrink(on: bool) {
@@ -310,8 +324,59 @@ pub fn position() -> Option<(f64, f64)> {
 pub fn set_position(x: f64, y: f64) {
     if let Ok(mut s) = state().lock() {
         s.wanted = Some((x.round() as i32, y.round() as i32));
+        s.wanted_anchor = None;
     }
     post(MSG_MOVE);
+}
+
+pub fn anchor() -> Option<crate::Anchor> {
+    state().lock().ok().and_then(|s| s.anchor)
+}
+
+pub fn set_position_anchored(x: f64, y: f64, anchor: crate::Anchor) {
+    if let Ok(mut s) = state().lock() {
+        s.wanted = Some((x.round() as i32, y.round() as i32));
+        s.wanted_anchor = Some(anchor);
+    }
+    post(MSG_MOVE);
+}
+
+/// The work area (without the taskbar) of the screen that holds the
+/// point, and that screen's scaling (1.0 = 100 %); `or_primary`: of the
+/// primary screen when the point is on none.
+unsafe fn work_area(x: i32, y: i32, or_primary: bool) -> Option<(crate::Area, f64)> {
+    let flags = if or_primary {
+        MONITOR_DEFAULTTOPRIMARY
+    } else {
+        MONITOR_DEFAULTTONULL
+    };
+    let monitor = MonitorFromPoint(POINT { x, y }, flags);
+    if monitor.is_invalid() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+        return None;
+    }
+    let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
+    let scale = if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x > 0 {
+        dpi_x as f64 / 96.0
+    } else {
+        1.0
+    };
+    let r = info.rcWork;
+    Some((
+        (
+            r.left as f64,
+            r.top as f64,
+            (r.right - r.left) as f64,
+            (r.bottom - r.top) as f64,
+        ),
+        scale,
+    ))
 }
 
 /// Remember the window's corner and tell the shell when it was a drag.
@@ -321,8 +386,19 @@ unsafe fn note_position(hwnd: HWND, dragged: bool) {
         return;
     }
     let p = (rect.left as f64, rect.top as f64);
+    let size = ((rect.right - rect.left) as f64, (rect.bottom - rect.top) as f64);
+    let anchor = work_area((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2, true).map(|(screen, scale)| {
+        // Edge distances are kept at 100 % scaling, so they look the
+        // same on a screen that is scaled differently.
+        let mut a = crate::anchor_for(p, size, screen);
+        a.dx /= scale;
+        a.dy /= scale;
+        a
+    });
     let moved = state().lock().ok().and_then(|mut s| {
         s.position = Some(p);
+        s.centre = Some((p.0 + size.0 / 2.0, p.1 + size.1 / 2.0));
+        s.anchor = anchor;
         if dragged {
             s.on_moved.clone()
         } else {
@@ -339,7 +415,17 @@ fn width(n: usize) -> i32 {
     SIZE * n as i32 + GAP * (n as i32 - 1)
 }
 
-/// How many buttons the window holds (read under the state lock).
+/// Window height at scale 1: the correction column holds two buttons, the
+/// range button above the start button; the others sit beside its middle.
+fn height(with_correct: bool) -> i32 {
+    if with_correct {
+        2 * SIZE + GAP
+    } else {
+        SIZE
+    }
+}
+
+/// How many button columns the window holds (read under the state lock).
 fn button_count(s: &State) -> usize {
     1 + usize::from(s.on_correct.is_some()) + usize::from(s.on_mode.is_some())
 }
@@ -521,7 +607,6 @@ fn run() {
         let _ = l;
         render(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        claim_keys(hwnd);
         note_position(hwnd, false);
         // Settings that arrived while the window was being created (the
         // shell switches shrinking on right after `show`): size and shape
@@ -540,36 +625,7 @@ thread_local! {
     static DRAG: Cell<Option<(POINT, RECT, bool)>> = const { Cell::new(None) };
 }
 
-/// Window thread only. Takes the panel's keys system-wide: F8 for the
-/// correction range, F9 for the switch (each only when the panel has that
-/// part). Another program may hold a key already: then that part stays as
-/// it was, by click or in the settings.
-unsafe fn claim_keys(hwnd: HWND) {
-    let (range, mode) = state()
-        .lock()
-        .map(|s| (s.on_correct.is_some() && s.on_next_range.is_some(), s.on_mode.is_some()))
-        .unwrap_or((false, false));
-    // A second registration of the same id fails; drop the old ones first.
-    release_keys(hwnd);
-    if range {
-        if let Err(e) = RegisterHotKey(Some(hwnd), HOTKEY_RANGE, MOD_NOREPEAT, VK_F8.0 as u32) {
-            tracing::warn!(%e, "F8 is taken by another program; the range is chosen in the settings only");
-        }
-    }
-    if mode {
-        if let Err(e) = RegisterHotKey(Some(hwnd), HOTKEY_MODE, MOD_NOREPEAT, VK_F9.0 as u32) {
-            tracing::warn!(%e, "F9 is taken by another program; the switch works by click only");
-        }
-    }
-}
-
-/// Window thread only. Unregistering what is not registered is harmless.
-unsafe fn release_keys(hwnd: HWND) {
-    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_RANGE);
-    let _ = UnregisterHotKey(Some(hwnd), HOTKEY_MODE);
-}
-
-/// The switch was pressed (click or F9): flip it and tell the shell.
+/// The switch was pressed: flip it and tell the shell.
 unsafe fn flip_mode(hwnd: HWND) {
     let (audio, on_mode) = state()
         .lock()
@@ -653,8 +709,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 note_position(hwnd, true);
             }
             if let Some((start, rect, false)) = drag {
-                // Which button: by the x position inside the window, in
-                // equal slots.
+                // Which button: the column by the x position inside the
+                // window, in equal slots. In the correction column the
+                // upper half is the range button, the lower half the start
+                // button; the other buttons count on their own height only.
                 let l = layout();
                 let slot = (((start.x - rect.left) as f64 / l.width as f64) * l.count as f64)
                     .floor()
@@ -664,8 +722,29 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     (1, true) => 1,
                     _ => 2,
                 };
-                let replace_armed = state().lock().map(|s| s.replace_armed).unwrap_or(false);
-                // The correction button while waiting for clicks: cancel.
+                let y = (start.y - rect.top) as f64;
+                let mid = l.height as f64 / 2.0;
+                if which != 1 && (y - mid).abs() > SIZE as f64 * l.scale / 2.0 {
+                    return LRESULT(0);
+                }
+                let (replace_armed, busy) = state()
+                    .lock()
+                    .map(|s| (s.replace_armed, s.busy != 0))
+                    .unwrap_or((false, false));
+                if which == 1 && y < mid {
+                    // The range button: on to the next range, unless a
+                    // correction is under way.
+                    if is_capturing() || replace_armed || busy {
+                        return LRESULT(0);
+                    }
+                    let next = state().lock().ok().and_then(|s| s.on_next_range.clone());
+                    if let Some(next) = next {
+                        // Off the window thread: it talks to the engine.
+                        std::thread::spawn(move || next());
+                    }
+                    return LRESULT(0);
+                }
+                // The start button while waiting for clicks: cancel.
                 if which == 1 && is_capturing() && !replace_armed {
                     cancel_capture();
                     return LRESULT(0);
@@ -700,38 +779,41 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         MSG_HIDE => {
             let _ = ShowWindow(hwnd, SW_HIDE);
-            // No panel: F8 and F9 belong to the other programs again.
-            release_keys(hwnd);
             LRESULT(0)
         }
         MSG_SHOW => {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            claim_keys(hwnd);
-            LRESULT(0)
-        }
-        WM_HOTKEY if wparam.0 == HOTKEY_RANGE as usize => {
-            // F8: the next correction range; the bridge steps and saves it.
-            tracing::info!("F8: next correction range");
-            let next = state().lock().ok().and_then(|s| s.on_next_range.clone());
-            if let Some(next) = next {
-                // Off the window thread: it talks to the engine.
-                std::thread::spawn(move || next());
-            }
-            LRESULT(0)
-        }
-        WM_HOTKEY if wparam.0 == HOTKEY_MODE as usize => {
-            tracing::info!("F9: correction switch");
-            flip_mode(hwnd);
             LRESULT(0)
         }
         MSG_MOVE => {
-            let wanted = state().lock().ok().and_then(|s| s.wanted);
+            let (wanted, anchor) = state()
+                .lock()
+                .map(|s| (s.wanted, s.wanted_anchor))
+                .unwrap_or((None, None));
             if let Some((x, y)) = wanted {
-                // Kept on the screen: at least a corner inside the desktop.
-                let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
                 let l = layout();
-                let x = x.clamp(0, (sw - l.width).max(0));
-                let y = y.clamp(0, (sh - l.height).max(0));
+                let (x, y) = match anchor {
+                    // By the anchor: on the screen that holds the corner
+                    // it was taken at, else on the primary screen.
+                    Some(a) => {
+                        let centre = (x + l.width / 2, y + l.height / 2);
+                        match work_area(centre.0, centre.1, false).or_else(|| work_area(0, 0, true)) {
+                            Some((screen, scale)) => {
+                                let mut a = a;
+                                a.dx *= scale;
+                                a.dy *= scale;
+                                let (nx, ny) = crate::place(a, (l.width as f64, l.height as f64), screen);
+                                (nx.round() as i32, ny.round() as i32)
+                            }
+                            None => (x, y),
+                        }
+                    }
+                    // Kept on the screen: at least a corner inside the desktop.
+                    None => {
+                        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+                        (x.clamp(0, (sw - l.width).max(0)), y.clamp(0, (sh - l.height).max(0)))
+                    }
+                };
                 let _ = SetWindowPos(
                     hwnd,
                     Some(HWND_TOPMOST),
@@ -746,18 +828,60 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         MSG_SHRINK => {
-            // Resized around the top-left corner; the shape follows, and
-            // the animation set up by `set_shrink` runs.
+            // Resized around the centre, so the middle of the buttons
+            // stays where it is (until a button would leave the screen); the shape follows, and the animation set
+            // up by `set_shrink` runs.
             let l = layout();
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                l.width,
-                l.height,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            let mut rect = RECT::default();
+            let centre = state().lock().ok().and_then(|s| s.centre).or_else(|| {
+                GetWindowRect(hwnd, &mut rect).is_ok().then(|| {
+                    (
+                        (rect.left + rect.right) as f64 / 2.0,
+                        (rect.top + rect.bottom) as f64 / 2.0,
+                    )
+                })
+            });
+            match centre {
+                Some(c) => {
+                    let screen = work_area(c.0.round() as i32, c.1.round() as i32, true).map(|(area, _)| area);
+                    // What is seen with the mouse away: the edge of the
+                    // screen counts for that, not for the room kept for
+                    // the growth.
+                    let rest = state().lock().map(|s| target_scale(s.shrink, false)).unwrap_or(1.0);
+                    let shown = (width(l.count) as f64 * rest, height(l.with_correct) as f64 * rest);
+                    let (x, y) = crate::around_centre(c, (l.width as f64, l.height as f64), shown, screen);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOPMOST),
+                        x.round() as i32,
+                        y.round() as i32,
+                        l.width,
+                        l.height,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    note_position(hwnd, false);
+                    // The exact centre is kept over many small steps (a
+                    // slider), unless an edge pushed the window aside.
+                    let unmoved =
+                        (x + l.width as f64 / 2.0 - c.0).abs() < 1e-6 && (y + l.height as f64 / 2.0 - c.1).abs() < 1e-6;
+                    if unmoved {
+                        if let Ok(mut s) = state().lock() {
+                            s.centre = Some(c);
+                        }
+                    }
+                }
+                None => {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOPMOST),
+                        0,
+                        0,
+                        l.width,
+                        l.height,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
             apply_shape(hwnd, l);
             render(hwnd);
             SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
@@ -1008,7 +1132,11 @@ unsafe fn render(hwnd: HWND) {
         };
         let (size, ring) = (SIZE as f32, RING as f32);
         let inner = size - ring;
+        // The microphone and the switch sit beside the middle of the
+        // correction column (two buttons high).
+        let oy = ((height(l.with_correct) - SIZE) / 2) as f32;
         // --- the microphone button
+        GdipTranslateWorldTransform(g, 0.0, oy, MatrixOrderPrepend);
         let mic = if listening {
             RED
         } else if standby {
@@ -1031,9 +1159,13 @@ unsafe fn render(hwnd: HWND) {
             },
             glyph,
         );
-        // --- the correction button: wand over the range glyph
+        GdipTranslateWorldTransform(g, 0.0, -oy, MatrixOrderPrepend);
+        // --- the correction column: above, the range button (wand over
+        // the range glyph; a click moves the range on); below, the start
+        // button (a click corrects that range).
         if l.with_correct {
             let x0 = (SIZE + GAP) as f32;
+            let y1 = (SIZE + GAP) as f32;
             let face = if replace_armed {
                 YELLOW
             } else if is_capturing() {
@@ -1041,8 +1173,10 @@ unsafe fn render(hwnd: HWND) {
             } else {
                 BRAND
             };
-            fill_ellipse(x0 + ring / 2.0, ring / 2.0, inner, argb(face, bright));
+            fill_ellipse(x0 + ring / 2.0, ring / 2.0, inner, argb(BRAND, bright));
             stroke_ellipse(x0 + ring / 2.0, ring / 2.0, inner, ring, glyph);
+            fill_ellipse(x0 + ring / 2.0, y1 + ring / 2.0, inner, argb(face, bright));
+            stroke_ellipse(x0 + ring / 2.0, y1 + ring / 2.0, inner, ring, glyph);
             if busy != 0 {
                 let t = since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
                 let start = ((t * 400.0) % 360.0) as f32;
@@ -1056,7 +1190,7 @@ unsafe fn render(hwnd: HWND) {
                         g,
                         p,
                         x0 + inset,
-                        inset,
+                        y1 + inset,
                         size - 2.0 * inset,
                         size - 2.0 * inset,
                         start,
@@ -1065,8 +1199,15 @@ unsafe fn render(hwnd: HWND) {
                     GdipDeletePen(p);
                 }
             }
-            let ink = if replace_armed { argb(INK, 1.0) } else { glyph };
             let (cx, cy) = (x0 + size / 2.0, size / 2.0);
+            // The start button's glyph: a check mark ("make it right").
+            {
+                let ink = if replace_armed { argb(INK, 1.0) } else { glyph };
+                let sy = y1 + size / 2.0;
+                line(cx - 12.0, sy + 1.0, cx - 4.0, sy + 9.0, 5.5, ink);
+                line(cx - 4.0, sy + 9.0, cx + 12.0, sy - 9.0, 5.5, ink);
+            }
+            let ink = glyph;
             let (wx, wy) = (cx, cy - 6.0);
             line(wx - 10.0, wy + 9.0, wx + 3.0, wy - 4.0, 3.6, ink);
             star(wx + 8.0, wy - 9.0, 6.5, ink);
@@ -1099,6 +1240,7 @@ unsafe fn render(hwnd: HWND) {
         }
         // --- the switch: a disc cut in two, "AI" above, "Audio" below
         if with_replace {
+            GdipTranslateWorldTransform(g, 0.0, oy, MatrixOrderPrepend);
             let x0 = ((SIZE + GAP) * if l.with_correct { 2 } else { 1 }) as f32;
             fill_ellipse(x0 + ring / 2.0, ring / 2.0, inner, argb(GRAY, bright));
             let mut path: *mut GpPath = std::ptr::null_mut();
@@ -1150,6 +1292,7 @@ unsafe fn render(hwnd: HWND) {
                 },
                 if audio_mode { white } else { off },
             );
+            GdipTranslateWorldTransform(g, 0.0, -oy, MatrixOrderPrepend);
         }
         GdipDeleteGraphics(g);
     }
