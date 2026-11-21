@@ -264,6 +264,13 @@ impl IkkEngine {
     pub fn set_floating_size(&self, size_percent: u32, growth_percent: u32) {
         ikk_overlay::set_size(size_percent, growth_percent);
     }
+    /// The lines of help the floating buttons show after the start button,
+    /// in the app's language: click to click (AI, audio), single word (AI,
+    /// audio), speak now, correcting.
+    #[frb(sync)]
+    pub fn set_floating_hints(&self, hints: Vec<String>) {
+        crate::shared::set_hints(hints);
+    }
     /// Phones: replace by voice on text the host (keyboard, service)
     /// selected itself; the answer comes as the `HostReplace` event.
     #[frb(sync)]

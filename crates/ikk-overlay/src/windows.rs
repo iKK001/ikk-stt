@@ -14,9 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
     GetWindowRect, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowPos, SetWindowsHookExW,
@@ -34,9 +32,6 @@ const RING: i32 = 3;
 /// Space between the microphone and the correction button.
 const GAP: i32 = 10;
 const DRAG_THRESHOLD: i32 = 4;
-/// Sent once after `TrackMouseEvent(TME_LEAVE)` when the mouse has left
-/// (the `windows` crate files it under the common controls).
-const WM_MOUSELEAVE: u32 = 0x02A3;
 // Shrinking buttons: sizes come from the settings (crate::set_size).
 use crate::{base_scale, hover_scale, idle_scale};
 /// How much darker the idle buttons are drawn (multiplied into the colour).
@@ -47,6 +42,8 @@ const ANIM_MS: f64 = 340.0;
 const TIMER_ANIM: usize = 8;
 /// Redraws the rotating arc while the correction button is busy.
 const TIMER_SPIN: usize = 9;
+/// Looks where the mouse is: over the drawn buttons or not.
+const TIMER_HOVER: usize = 10;
 const MSG_SPIN: u32 = WM_APP + 10;
 // COLORREF is 0x00BBGGRR.
 const BLUE: COLORREF = COLORREF(0x00B3_8600); // #0086B3, brand primary: listening for the start word
@@ -185,6 +182,11 @@ struct State {
     wanted_anchor: Option<crate::Anchor>,
     /// The window's anchor on its screen.
     anchor: Option<crate::Anchor>,
+    /// The buttons' size with the mouse away at the last resize.
+    last_shown: Option<(f64, f64)>,
+    /// The line of help under the buttons and its window (0 = none).
+    hint: Option<String>,
+    hint_hwnd: isize,
     /// The window's exact centre: what a size change keeps in place.
     centre: Option<(f64, f64)>,
     /// The buttons shrink when the mouse is not over them.
@@ -436,6 +438,7 @@ pub fn set_range_mode(mode: RangeMode) {
         RangeMode::WholeText => 1,
         RangeMode::ClickToClick => 2,
         RangeMode::Word => 3,
+        RangeMode::Suggest => 4,
     };
     if let Ok(mut s) = state().lock() {
         s.range_mode = v;
@@ -461,6 +464,8 @@ pub fn set_busy(busy: Busy) {
 }
 
 const MSG_HIGHLIGHT_REPAINT: u32 = WM_APP + 11;
+/// Show, move or hide the line of help (`State::hint`).
+const MSG_HINT: u32 = WM_APP + 12;
 
 pub fn set_audio_mode(on: bool) {
     if let Ok(mut s) = state().lock() {
@@ -608,6 +613,7 @@ fn run() {
         render(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         note_position(hwnd, false);
+        SetTimer(Some(hwnd), TIMER_HOVER, 50, None);
         // Settings that arrived while the window was being created (the
         // shell switches shrinking on right after `show`): size and shape
         // follow the state as it is now.
@@ -655,22 +661,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            // Shrinking buttons: grow under the mouse, and be told when it leaves.
-            let from = layout().scale;
-            let entered = state()
-                .lock()
-                .map(|mut s| s.shrink && !std::mem::replace(&mut s.hover, true))
-                .unwrap_or(false);
-            if entered {
-                let mut track = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                let _ = TrackMouseEvent(&mut track);
-                start_animation(hwnd, from);
-            }
             if let Some((start, rect, moved)) = DRAG.get() {
                 let mut now = POINT::default();
                 if GetCursorPos(&mut now).is_ok() {
@@ -691,14 +681,30 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
-        WM_MOUSELEAVE => {
-            let from = layout().scale;
-            let left = state()
-                .lock()
-                .map(|mut s| std::mem::replace(&mut s.hover, false))
-                .unwrap_or(false);
-            if left {
-                start_animation(hwnd, from);
+        WM_TIMER if wparam.0 == TIMER_HOVER => {
+            // Over the buttons as they are drawn right now? The window is
+            // larger (invisible room for the growth) and fully transparent
+            // there, so it is the drawing that counts, not the window.
+            let l = layout();
+            let mut cursor = POINT::default();
+            let mut rect = RECT::default();
+            if DRAG.get().is_none() && GetCursorPos(&mut cursor).is_ok() && GetWindowRect(hwnd, &mut rect).is_ok() {
+                let (cx, cy) = (
+                    (rect.left + rect.right) as f64 / 2.0,
+                    (rect.top + rect.bottom) as f64 / 2.0,
+                );
+                let (hw, hh) = (
+                    width(l.count) as f64 * l.scale / 2.0,
+                    height(l.with_correct) as f64 * l.scale / 2.0,
+                );
+                let over = (cursor.x as f64 - cx).abs() <= hw && (cursor.y as f64 - cy).abs() <= hh;
+                let changed = state()
+                    .lock()
+                    .map(|mut s| s.shrink && std::mem::replace(&mut s.hover, over) != over)
+                    .unwrap_or(false);
+                if changed {
+                    start_animation(hwnd, l.scale);
+                }
             }
             LRESULT(0)
         }
@@ -714,9 +720,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 // upper half is the range button, the lower half the start
                 // button; the other buttons count on their own height only.
                 let l = layout();
-                let slot = (((start.x - rect.left) as f64 / l.width as f64) * l.count as f64)
-                    .floor()
-                    .clamp(0.0, (l.count - 1) as f64) as usize;
+                // Measured on the buttons as drawn, which sit in the middle
+                // of a window that is larger than they are.
+                let across =
+                    ((start.x - rect.left) as f64 - l.width as f64 / 2.0) / (width(l.count) as f64 * l.scale) + 0.5;
+                if !(0.0..1.0).contains(&across) {
+                    return LRESULT(0);
+                }
+                let slot = (across * l.count as f64).floor().clamp(0.0, (l.count - 1) as f64) as usize;
                 let which = match (slot, l.with_correct) {
                     (0, _) => 0,
                     (1, true) => 1,
@@ -849,7 +860,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     // the growth.
                     let rest = state().lock().map(|s| target_scale(s.shrink, false)).unwrap_or(1.0);
                     let shown = (width(l.count) as f64 * rest, height(l.with_correct) as f64 * rest);
-                    let (x, y) = crate::around_centre(c, (l.width as f64, l.height as f64), shown, screen);
+                    let before = state()
+                        .lock()
+                        .ok()
+                        .and_then(|mut s| s.last_shown.replace(shown))
+                        .unwrap_or(shown);
+                    let (x, y) = crate::around_centre(c, (l.width as f64, l.height as f64), shown, before, screen);
                     let _ = SetWindowPos(
                         hwnd,
                         Some(HWND_TOPMOST),
@@ -894,6 +910,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             if !l.animating {
                 let _ = KillTimer(Some(hwnd), TIMER_ANIM);
             }
+            LRESULT(0)
+        }
+        MSG_HINT => {
+            show_hint(hwnd);
             LRESULT(0)
         }
         MSG_HIGHLIGHT => {
@@ -997,8 +1017,9 @@ fn argb(c: COLORREF, bright: f64) -> u32 {
 
 /// Draw the panel into a 32-bit bitmap with GDI+ (anti-aliased, scaled
 /// by the shrink animation) and show it as the layered window's content:
-/// no flicker, no window region, smooth edges. The whole panel is left at
-/// alpha 1, so the mouse counts as over it everywhere (hover, drag).
+/// no flicker, no window region, smooth edges. Everything but the buttons
+/// is fully transparent and lets clicks through; whether the mouse is over
+/// the buttons is looked up by a timer (`TIMER_HOVER`).
 unsafe fn render(hwnd: HWND) {
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, CreateDIBSection, DeleteDC, GetDC, ReleaseDC, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
@@ -1054,7 +1075,8 @@ unsafe fn render(hwnd: HWND) {
     if GdipCreateFromHDC(mem, &mut g).0 == 0 && !g.is_null() {
         GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
         GdipSetTextRenderingHint(g, TextRenderingHintAntiAlias);
-        GdipGraphicsClear(g, 0x0100_0000);
+        // Nothing behind the buttons, ever: fully transparent.
+        GdipGraphicsClear(g, 0x0000_0000);
         GdipTranslateWorldTransform(g, l.dx as f32, l.dy as f32, MatrixOrderPrepend);
         GdipScaleWorldTransform(g, l.scale as f32, l.scale as f32, MatrixOrderPrepend);
         let bright = l.bright;
@@ -1200,12 +1222,23 @@ unsafe fn render(hwnd: HWND) {
                 }
             }
             let (cx, cy) = (x0 + size / 2.0, size / 2.0);
-            // The start button's glyph: a check mark ("make it right").
+            // The start button's glyph: a mouse pointer — "now click in
+            // the text". Its outline, in round strokes.
             {
                 let ink = if replace_armed { argb(INK, 1.0) } else { glyph };
                 let sy = y1 + size / 2.0;
-                line(cx - 12.0, sy + 1.0, cx - 4.0, sy + 9.0, 5.5, ink);
-                line(cx - 4.0, sy + 9.0, cx + 12.0, sy - 9.0, 5.5, ink);
+                let pts = crate::POINTER;
+                for i in 0..pts.len() {
+                    let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                    line(
+                        cx + a.0 as f32,
+                        sy + a.1 as f32,
+                        cx + b.0 as f32,
+                        sy + b.1 as f32,
+                        3.4,
+                        ink,
+                    );
+                }
             }
             let ink = glyph;
             let (wx, wy) = (cx, cy - 6.0);
@@ -1225,9 +1258,18 @@ unsafe fn render(hwnd: HWND) {
                     line(cx - 11.0, gy, cx + 11.0, gy, 2.0, ink);
                     line(cx - 11.0, gy + 5.0, cx + 1.0, gy + 5.0, 2.0, ink);
                 }
+                // Single word: a word bar with an arrow pointing down at it.
                 3 => {
-                    line(cx - 7.0, gy + 2.0, cx + 7.0, gy + 2.0, 3.0, ink);
-                    dot(cx, gy - 4.5, 2.0, ink);
+                    line(cx - 8.0, gy + 4.0, cx + 8.0, gy + 4.0, 3.0, ink);
+                    line(cx, gy - 8.0, cx, gy - 0.5, 2.2, ink);
+                    line(cx - 4.0, gy - 4.5, cx, gy - 0.5, 2.2, ink);
+                    line(cx + 4.0, gy - 4.5, cx, gy - 0.5, 2.2, ink);
+                }
+                // Word suggestions: a word bar and the arrow of a drop-down list.
+                4 => {
+                    line(cx - 12.0, gy, cx + 2.0, gy, 3.0, ink);
+                    line(cx + 6.0, gy - 2.5, cx + 10.0, gy + 2.5, 2.2, ink);
+                    line(cx + 10.0, gy + 2.5, cx + 14.0, gy - 2.5, 2.2, ink);
                 }
                 _ => {
                     line(cx - 12.0, gy - 4.0, cx - 12.0, gy + 4.0, 2.4, ink);
@@ -1386,6 +1428,167 @@ unsafe extern "system" fn highlight_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
             let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
             let _ = FillRect(hdc, &rect, brush);
             let _ = DeleteObject(brush.into());
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// A line of help under the buttons, or `None` to take it away.
+pub fn set_hint(text: Option<String>) {
+    if let Ok(mut s) = state().lock() {
+        s.hint = text;
+    }
+    post(MSG_HINT);
+}
+
+const HINT_BACK: COLORREF = COLORREF(0x0024_1F1F);
+
+unsafe fn hint_font(scale: f64) -> windows::Win32::Graphics::Gdi::HFONT {
+    use windows::Win32::Graphics::Gdi::{
+        CreateFontW, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    };
+    CreateFontW(
+        -((15.0 * scale).round() as i32),
+        0,
+        0,
+        0,
+        400,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        0,
+        w!("Segoe UI"),
+    )
+}
+
+/// Window thread: the dark label with `State::hint` right under the
+/// buttons as they are drawn (above them when there is no room below);
+/// clicks pass through it.
+unsafe fn show_hint(panel: HWND) {
+    use windows::Win32::Graphics::Gdi::{DrawTextW, GetDC, ReleaseDC, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetLayeredWindowAttributes, LWA_ALPHA, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    let (mut hw, text) = state()
+        .lock()
+        .map(|s| (s.hint_hwnd, s.hint.clone()))
+        .unwrap_or((0, None));
+    let Some(text) = text else {
+        if hw != 0 {
+            let _ = ShowWindow(HWND(hw as *mut _), SW_HIDE);
+        }
+        return;
+    };
+    let mut pr = RECT::default();
+    if GetWindowRect(panel, &mut pr).is_err() {
+        return;
+    }
+    let (cx, cy) = ((pr.left + pr.right) / 2, (pr.top + pr.bottom) / 2);
+    let (area, scale) = work_area(cx, cy, true).unwrap_or(((0.0, 0.0, 1e9, 1e9), 1.0));
+    if hw == 0 {
+        let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
+            return;
+        };
+        let class = w!("ikk_hint");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(hint_proc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            hbrBackground: CreateSolidBrush(HINT_BACK),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+            class,
+            w!("Help"),
+            WS_POPUP,
+            0,
+            0,
+            10,
+            10,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        ) else {
+            return;
+        };
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
+        hw = hwnd.0 as isize;
+        if let Ok(mut s) = state().lock() {
+            s.hint_hwnd = hw;
+        }
+    }
+    let hwnd = HWND(hw as *mut _);
+    // How wide the text is in the label's font.
+    let dc = GetDC(Some(hwnd));
+    let font = hint_font(scale);
+    let old = SelectObject(dc, font.into());
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut r = RECT::default();
+    DrawTextW(dc, &mut wide, &mut r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, old);
+    let _ = DeleteObject(font.into());
+    ReleaseDC(Some(hwnd), dc);
+    let (w, h) = (
+        r.right - r.left + (28.0 * scale) as i32,
+        r.bottom - r.top + (14.0 * scale) as i32,
+    );
+    let l = layout();
+    let half = (height(l.with_correct) as f64 * l.scale / 2.0).round() as i32;
+    let gap = (8.0 * scale) as i32;
+    let mut y = cy + half + gap;
+    if (y + h) as f64 > area.1 + area.3 {
+        y = cy - half - gap - h;
+    }
+    let x = ((cx - w / 2) as f64).clamp(area.0, (area.0 + area.2 - w as f64).max(area.0)) as i32;
+    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    let _ = InvalidateRect(Some(hwnd), None, true);
+}
+
+unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows::Win32::Graphics::Gdi::{
+        DrawTextW, SetBkMode, SetTextColor, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
+    };
+    match msg {
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_PAINT => {
+            let text = state().lock().ok().and_then(|s| s.hint.clone()).unwrap_or_default();
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+            let brush = CreateSolidBrush(HINT_BACK);
+            let _ = FillRect(hdc, &rect, brush);
+            let _ = DeleteObject(brush.into());
+            let scale = work_area(0, 0, true).map_or(1.0, |(_, s)| s);
+            let mut here = RECT::default();
+            let scale = if GetWindowRect(hwnd, &mut here).is_ok() {
+                work_area(here.left, here.top, true).map_or(scale, |(_, s)| s)
+            } else {
+                scale
+            };
+            let font = hint_font(scale);
+            let old = SelectObject(hdc, font.into());
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            DrawTextW(
+                hdc,
+                &mut wide,
+                &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            SelectObject(hdc, old);
+            let _ = DeleteObject(font.into());
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }

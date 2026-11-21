@@ -12,33 +12,60 @@ Future<void> showPositionInfo(BuildContext context, UiStrings t) {
   return showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
-      // Wide and nearly as tall as the window: the drawings need the room.
+      // Nearly as large as the window: the drawings need the room.
       insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       title: Text(t['positionInfoTitle']),
       content: SizedBox(
-        width: 1040,
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(t['positionInfoNearHead'], style: head),
-              const SizedBox(height: 8),
-              _Drawing(near: true, big: t['positionInfoBig'], small: t['positionInfoSmall']),
-              const SizedBox(height: 10),
-              Text(t['positionInfoNear'], style: body),
-              const SizedBox(height: 24),
-              Text(t['positionInfoFarHead'], style: head),
-              const SizedBox(height: 8),
-              _Drawing(near: false, big: t['positionInfoBig'], small: t['positionInfoSmall']),
-              const SizedBox(height: 10),
-              Text(t['positionInfoFar'], style: body),
-              const SizedBox(height: 16),
-              Text(t['positionInfoDotted'], style: body),
-              const SizedBox(height: 12),
-              Text(t['positionInfoNote'], style: Theme.of(context).textTheme.bodyMedium),
-            ],
-          ),
+        // As wide as the window lets it be: the two cases stand side by
+        // side, so everything fits without scrolling on a normal screen.
+        width: 1680,
+        child: LayoutBuilder(
+          builder: (context, box) {
+            Widget part(bool near) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(t[near ? 'positionInfoNearHead' : 'positionInfoFarHead'], style: head),
+                    const SizedBox(height: 8),
+                    _Drawing(near: near, big: t['positionInfoBig'], small: t['positionInfoSmall']),
+                    const SizedBox(height: 10),
+                    Text(t[near ? 'positionInfoNear' : 'positionInfoFar'], style: body, textAlign: TextAlign.justify),
+                  ],
+                );
+            final wide = box.maxWidth >= 900;
+            return SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (wide)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: part(true)),
+                        const SizedBox(width: 32),
+                        Expanded(child: part(false)),
+                      ],
+                    )
+                  else ...[
+                    part(true),
+                    const SizedBox(height: 24),
+                    part(false),
+                  ],
+                  const SizedBox(height: 16),
+                  const Divider(height: 1),
+                  const SizedBox(height: 16),
+                  Text(t['positionInfoDotted'], style: body, textAlign: TextAlign.justify),
+                  const SizedBox(height: 8),
+                  Text(
+                    t['positionInfoNote'],
+                    style: Theme.of(context).textTheme.bodyMedium,
+                    textAlign: TextAlign.justify,
+                  ),
+                ],
+              ),
+            );
+          },
         ),
       ),
       actions: [FilledButton(onPressed: () => Navigator.pop(ctx), child: Text(t['close']))],
@@ -100,8 +127,10 @@ class _AnchorPainter extends CustomPainter {
     // The buttons and their distances to the two edges.
     // (Three columns of one, two and one button: 3 wide, 2 high.)
     // Small enough that "further in" is true on the small monitor too.
-    final bw = w * 0.085, bh = bw * (2 + _gap) / (3 + 2 * _gap);
-    final dRight = w * 0.045, dBottom = w * 0.04;
+    // The dotted box is one button-row width in from every edge, so the
+    // smaller the buttons are drawn, the larger the box.
+    final bw = w * 0.062, bh = bw * (2 + _gap) / (3 + 2 * _gap);
+    final dRight = w * 0.03, dBottom = w * 0.026;
 
     final screenFill = Paint()..color = fill;
     final screenLine = Paint()

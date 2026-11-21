@@ -54,6 +54,44 @@ pub enum Busy {
 
 pub fn set_busy(busy: Busy) {
     platform::set_busy(busy);
+    // Nothing under way any more: nothing left to explain.
+    if busy == Busy::None {
+        set_hint(None);
+    }
+}
+
+/// The start button's glyph: a mouse pointer, as points around the
+/// button's centre (x to the right, y downwards), closed back to the tip.
+#[allow(dead_code)]
+pub(crate) const POINTER: [(f64, f64); 7] = [
+    (-8.0, -13.0),
+    (-8.0, 9.0),
+    (-2.5, 4.0),
+    (1.5, 13.0),
+    (5.5, 11.0),
+    (1.5, 2.5),
+    (9.0, 2.5),
+];
+
+static HINT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A short line of help under the buttons (what to do after the start
+/// button), or `None` to take it away. It goes by itself after 20 s, and
+/// when the correction ends.
+pub fn set_hint(text: Option<&str>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let generation = HINT_GENERATION.fetch_add(1, SeqCst) + 1;
+    let text = text.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
+    let shown = text.is_some();
+    platform::set_hint(text);
+    if shown {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            if HINT_GENERATION.load(SeqCst) == generation {
+                platform::set_hint(None);
+            }
+        });
+    }
 }
 
 /// Which half of the switch is lit: audio correction (true) or AI (false).
@@ -70,8 +108,11 @@ pub enum RangeMode {
     WholeText,
     /// Between two clicks: a start mark, a track, an end mark.
     ClickToClick,
-    /// The word under one click: a short word bar with a click dot above.
+    /// The word under one click: a word bar with an arrow pointing at it.
     Word,
+    /// Suggestions for the word under one click: a word bar with the
+    /// arrow of a drop-down list beside it.
+    Suggest,
 }
 
 impl RangeMode {
@@ -81,6 +122,7 @@ impl RangeMode {
             "whole_text" => Self::WholeText,
             "click_to_click" => Self::ClickToClick,
             "single_word" => Self::Word,
+            "word_suggestions" => Self::Suggest,
             _ => Self::CursorToEnd,
         }
     }
@@ -92,6 +134,7 @@ impl RangeMode {
             Self::WholeText => "whole_text",
             Self::ClickToClick => "click_to_click",
             Self::Word => "single_word",
+            Self::Suggest => "word_suggestions",
         }
     }
 }
@@ -230,63 +273,62 @@ pub fn set_shrink(on: bool) {
 /// The plain size of the buttons in percent, and their growth: how much
 /// larger they are under the mouse than at rest (counts only while
 /// shrinking is on; 0 % = one size, the plain one).
-pub const DEFAULT_SIZE_PERCENT: u32 = 100;
-/// How much larger the buttons are under the mouse than at rest.
+/// 72 % and a growth of 60 % are the two sizes the buttons had before
+/// they could be set: 72 % with the mouse away, 115 % under it.
+pub const DEFAULT_SIZE_PERCENT: u32 = 72;
+/// How much larger than their size the buttons are under the mouse.
 pub const DEFAULT_GROWTH_PERCENT: u32 = 60;
 pub const SIZE_PERCENT_RANGE: (u32, u32) = (50, 250);
-pub const GROWTH_PERCENT_RANGE: (u32, u32) = (0, 150);
+pub const GROWTH_PERCENT_RANGE: (u32, u32) = (0, 200);
 static SIZE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(DEFAULT_SIZE_PERCENT);
 static GROWTH_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(DEFAULT_GROWTH_PERCENT);
-/// The share of the growth that lies above the plain size; the rest lies
-/// below it. Chosen so that the default growth gives the sizes the
-/// buttons always had: 115 % under the mouse, 72 % at rest.
-const GROWTH_ABOVE: f64 = 0.2974;
 
-/// The plain size as a factor (1.0 = 100 %).
+/// The plain size as a factor (1.0 = 100 %): what the size setting says,
+/// and the size the buttons have with the mouse away.
 #[allow(dead_code)]
 pub(crate) fn base_scale() -> f64 {
     f64::from(SIZE_PERCENT.load(std::sync::atomic::Ordering::Relaxed)) / 100.0
 }
 
-/// Under the mouse over at rest (1.0 = no growth at all).
-#[allow(dead_code)]
-fn growth() -> f64 {
-    1.0 + f64::from(GROWTH_PERCENT.load(std::sync::atomic::Ordering::Relaxed)) / 100.0
-}
-
-/// The size under the mouse while shrinking is on.
+/// The size under the mouse while shrinking is on: the plain size plus
+/// the growth, whatever the plain size is.
 #[allow(dead_code)]
 pub(crate) fn hover_scale() -> f64 {
-    base_scale() * growth().powf(GROWTH_ABOVE)
+    base_scale() * (1.0 + f64::from(GROWTH_PERCENT.load(std::sync::atomic::Ordering::Relaxed)) / 100.0)
 }
 
-/// The resting size while shrinking is on: `hover_scale` divided by the
-/// growth, so with a growth of 0 % both are the plain size.
+/// The resting size while shrinking is on: the plain size. The growth
+/// setting never changes it.
 #[allow(dead_code)]
 pub(crate) fn idle_scale() -> f64 {
-    base_scale() * growth().powf(GROWTH_ABOVE - 1.0)
+    base_scale()
 }
 
 /// The top-left corner of a panel of size `panel` around `centre`. The
-/// centre stays where it is until the buttons themselves (`shown`: their
+/// centre stays where it is unless the buttons themselves (`shown`: their
 /// size with the mouse away, smaller than the panel, which leaves room
-/// for the growth) would reach over an edge of `screen`; only then is it
-/// pushed back, just far enough.
+/// for the growth) grow over an edge of `screen` they were inside of
+/// before (`shown_before`); only then is it pushed back, just far enough.
+/// Buttons that keep their size are never moved, wherever they are.
 #[allow(dead_code)]
 pub(crate) fn around_centre(
     centre: (f64, f64),
     panel: (f64, f64),
     shown: (f64, f64),
+    shown_before: (f64, f64),
     screen: Option<Area>,
 ) -> (f64, f64) {
     let (mut cx, mut cy) = centre;
     if let Some((sx, sy, sw, sh)) = screen {
-        let keep = |c: f64, len: f64, from: f64, room: f64| {
-            let lo = from + len / 2.0;
-            c.clamp(lo, (from + room - len / 2.0).max(lo))
+        let keep = |c: f64, len: f64, before: f64, from: f64, room: f64| {
+            // An edge the buttons already reached over stays as far out
+            // as they were.
+            let lo = from.min(c - before / 2.0) + len / 2.0;
+            let hi = (from + room).max(c + before / 2.0) - len / 2.0;
+            c.clamp(lo, hi.max(lo))
         };
-        cx = keep(cx, shown.0, sx, sw);
-        cy = keep(cy, shown.1, sy, sh);
+        cx = keep(cx, shown.0, shown_before.0, sx, sw);
+        cy = keep(cy, shown.1, shown_before.1, sy, sh);
     }
     (cx - panel.0 / 2.0, cy - panel.1 / 2.0)
 }
@@ -315,7 +357,11 @@ pub fn capture_clicks(count: usize, timeout: std::time::Duration, on_done: OnCli
 
 /// Stop a capture (the button pressed again); true when one was running.
 pub fn cancel_capture() -> bool {
-    platform::cancel_capture()
+    let cancelled = platform::cancel_capture();
+    if cancelled {
+        set_hint(None);
+    }
+    cancelled
 }
 
 pub fn is_capturing() -> bool {
@@ -389,25 +435,40 @@ mod anchor_tests {
     #[test]
     fn a_resize_keeps_the_centre_until_a_button_would_leave_the_screen() {
         let screen = Some((0.0, 0.0, 1000.0, 800.0));
-        let (panel, shown) = ((200.0, 100.0), (120.0, 60.0));
-        assert_eq!(around_centre((500.0, 400.0), panel, shown, screen), (400.0, 350.0));
+        let (panel, shown, small) = ((200.0, 100.0), (120.0, 60.0), (60.0, 30.0));
+        assert_eq!(
+            around_centre((500.0, 400.0), panel, shown, small, screen),
+            (400.0, 350.0)
+        );
         // The panel reaches over the edge, the buttons do not: unmoved.
-        assert_eq!(around_centre((930.0, 760.0), panel, shown, screen), (830.0, 710.0));
-        // The buttons would: pushed back until they touch the edge.
-        assert_eq!(around_centre((980.0, 790.0), panel, shown, screen), (840.0, 720.0));
-        assert_eq!(around_centre((980.0, 790.0), panel, shown, None), (880.0, 740.0));
+        assert_eq!(
+            around_centre((930.0, 760.0), panel, shown, small, screen),
+            (830.0, 710.0)
+        );
+        // Grown buttons would: pushed back until they touch the edge.
+        assert_eq!(
+            around_centre((960.0, 780.0), panel, shown, small, screen),
+            (840.0, 720.0)
+        );
+        assert_eq!(around_centre((960.0, 780.0), panel, shown, small, None), (860.0, 730.0));
+        // Buttons that keep their size are left where they are, even
+        // over the edge (only the room for the growth changed).
+        assert_eq!(
+            around_centre((980.0, 790.0), panel, shown, shown, screen),
+            (880.0, 740.0)
+        );
     }
 
     #[test]
-    fn growth_is_the_ratio_of_the_two_sizes() {
+    fn growth_only_changes_the_size_under_the_mouse() {
         use std::sync::atomic::Ordering::Relaxed;
-        // The default gives the sizes the buttons always had.
-        assert!((hover_scale() - 1.15).abs() < 0.005, "{}", hover_scale());
-        assert!((idle_scale() - 0.72).abs() < 0.005, "{}", idle_scale());
-        // No growth: one size, the plain one.
-        GROWTH_PERCENT.store(0, Relaxed);
-        assert_eq!(hover_scale(), base_scale());
-        assert_eq!(idle_scale(), base_scale());
+        SIZE_PERCENT.store(150, Relaxed);
+        for growth in [0, 60, 200] {
+            GROWTH_PERCENT.store(growth, Relaxed);
+            assert_eq!(idle_scale(), 1.5);
+            assert_eq!(hover_scale(), 1.5 * (1.0 + f64::from(growth) / 100.0));
+        }
+        SIZE_PERCENT.store(DEFAULT_SIZE_PERCENT, Relaxed);
         GROWTH_PERCENT.store(DEFAULT_GROWTH_PERCENT, Relaxed);
     }
 }

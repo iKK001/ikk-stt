@@ -156,7 +156,8 @@ impl CorrectionRange {
         match s.trim() {
             "whole_text" => CorrectionRange::WholeText,
             "click_to_click" => CorrectionRange::ClickToClick,
-            "single_word" => CorrectionRange::Word,
+            // Word suggestions name their word by one click as well.
+            "single_word" | "word_suggestions" => CorrectionRange::Word,
             _ => CorrectionRange::CursorToEnd,
         }
     }

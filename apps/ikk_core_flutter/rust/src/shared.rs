@@ -58,6 +58,24 @@ static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 pub const TRAINING: &str = "voice commands are being recorded";
 
 #[allow(dead_code)]
+/// The lines of help shown under the floating buttons after the start
+/// button, in the app's language (the shell sends them): 0 and 1 click
+/// to click (AI, audio), 2 and 3 single word (AI, audio), 4 speak now,
+/// 5 correcting, 6 click a word for suggestions, 7 no suggestions yet,
+/// 8 and 9 click to end (AI, audio).
+static HINTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn set_hints(hints: Vec<String>) {
+    if let Ok(mut h) = HINTS.lock() {
+        *h = hints;
+    }
+}
+
+fn show_hint(which: usize) {
+    let text = HINTS.lock().ok().and_then(|h| h.get(which).cloned());
+    ikk_overlay::set_hint(text.as_deref());
+}
+
 pub fn get() -> Option<Arc<Shared>> {
     SHARED.get().cloned()
 }
@@ -278,6 +296,7 @@ impl Shared {
                     self.end_replace();
                     return Err("click to click is not available on this platform".into());
                 }
+                show_hint(if audio { 1 } else { 0 });
                 Ok(())
             }
             // One click names the word.
@@ -309,9 +328,74 @@ impl Shared {
                     self.end_replace();
                     return Err("single word needs the floating button on this platform".into());
                 }
+                show_hint(if audio { 3 } else { 2 });
                 Ok(())
             }
-            // Cursor to end, whole text: at once.
+            // One click names the word whose suggestions are wanted. The
+            // sources (alternatives from the recognizer, word prediction)
+            // are not connected yet: the click is taken and the user told.
+            "word_suggestions" => {
+                let armed = ikk_overlay::capture_clicks(
+                    1,
+                    std::time::Duration::from_secs(15),
+                    std::sync::Arc::new(move |points| {
+                        let Some(s) = get() else { return };
+                        s.end_replace();
+                        if !points.is_empty() {
+                            show_hint(7);
+                        }
+                    }),
+                );
+                if !armed {
+                    self.end_replace();
+                    return Err("word suggestions need the floating button on this platform".into());
+                }
+                show_hint(6);
+                Ok(())
+            }
+            // From a click to the end: one click says where the range
+            // begins. The click itself reaches the program and puts the
+            // cursor there; from there to the end is then taken. (Acting at
+            // once from wherever the cursor stood made a later click cancel
+            // the selection, and the new text was inserted instead.)
+            "cursor_to_end" => {
+                self.arm(audio);
+                let armed = ikk_overlay::capture_clicks(
+                    1,
+                    std::time::Duration::from_secs(15),
+                    std::sync::Arc::new(move |points| {
+                        let Some(s) = get() else { return };
+                        if points.is_empty() {
+                            // The capture timed out: nothing is armed any more.
+                            s.end_replace();
+                            return;
+                        }
+                        // The program needs a moment to place its cursor.
+                        std::thread::sleep(std::time::Duration::from_millis(180));
+                        s.busy_start(audio);
+                        if audio {
+                            s.replace_armed.store(true, Ordering::SeqCst);
+                            ikk_overlay::set_replace_armed(true);
+                        }
+                        let r = if audio {
+                            s.engine.replace_by_voice(&json, None, true)
+                        } else {
+                            s.engine.correct_now(&json)
+                        };
+                        if let Err(e) = r {
+                            log::warn!("click to end: {e}");
+                            s.end_replace();
+                        }
+                    }),
+                );
+                if !armed {
+                    self.end_replace();
+                    return Err("click to end needs the floating button on this platform".into());
+                }
+                show_hint(if audio { 9 } else { 8 });
+                Ok(())
+            }
+            // The whole text: at once.
             _ => {
                 self.busy_start(audio);
                 if audio {
@@ -341,6 +425,7 @@ impl Shared {
 
     /// The range is fixed: the arc runs until the answer is there.
     fn busy_start(&self, audio: bool) {
+        show_hint(if audio { 4 } else { 5 });
         if audio {
             self.replace_armed.store(true, Ordering::SeqCst);
             ikk_overlay::set_replace_armed(true);
@@ -351,12 +436,18 @@ impl Shared {
     }
 
     /// The range button: the range moves on — click to click, click
-    /// to end, single word, whole text, and round again. The settings copy
+    /// to end, single word, whole text, word suggestions, and round again. The settings copy
     /// here changes at once (the button shows it, every reader of the settings
     /// sees it); the `CorrectionRange` event tells the shell, which saves it.
     /// Returns the new range name ("" when no settings are known yet).
     pub fn next_range(&self) -> String {
-        const ORDER: [&str; 4] = ["click_to_click", "cursor_to_end", "single_word", "whole_text"];
+        const ORDER: [&str; 5] = [
+            "click_to_click",
+            "cursor_to_end",
+            "single_word",
+            "whole_text",
+            "word_suggestions",
+        ];
         let mut next = String::new();
         if let Ok(mut s) = self.settings.lock() {
             let Some(json) = s.as_deref() else {

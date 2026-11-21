@@ -21,10 +21,10 @@ import 'ui_strings.dart';
 import 'app_name.dart';
 import 'platform_extras.dart';
 import 'profiles.dart';
-import 'history.dart';
 import 'keyboard_bridge.dart';
 import 'background.dart';
 import 'position_info.dart';
+import 'privacy_policy.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -131,8 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ------------------------------------------------ shell
   Profiles get _profiles => Profiles(_settings);
-  late HistoryStore _history;
-  /// 0 profiles, 1 general, 2 history.
+  /// 0 profiles, 1 general.
   int _tab = 0;
   static const _wizardSteps = 7;
   /// Open wizard: step index, the profile it edits, whether it was just
@@ -169,6 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static String _rangeKey(String range) => switch (range) {
         'click_to_click' => 'rangeClickToClick',
         'single_word' => 'rangeWord',
+        'word_suggestions' => 'rangeSuggest',
         'whole_text' => 'rangeWholeText',
         _ => 'rangeCursorToEnd',
       };
@@ -183,7 +183,12 @@ class _HomeScreenState extends State<HomeScreen> {
     _uiPath = '$dir${Platform.pathSeparator}ui.json';
     // The general settings first: nothing may read or save them before.
     await _loadUi();
-    _history = HistoryStore(dir);
+    // An earlier version kept the text of the last sessions in a folder
+    // "history"; nothing is kept any more, and what was kept is removed.
+    try {
+      final old = Directory('$dir${Platform.pathSeparator}history');
+      if (await old.exists()) await old.delete(recursive: true);
+    } catch (_) {}
     _settings = jsonDecode(await settingsLoad(path: _settingsPath)) as Map<String, dynamic>;
     // First start after the update: the profile list is built from the
     // settings as they are (see Profiles.ensure).
@@ -378,13 +383,11 @@ class _HomeScreenState extends State<HomeScreen> {
             _uploadedMs = 0;
             _recordedMs = 0;
           }
-          final wasRunning = _state != 'Idle';
           KeyboardBridge.setListening(v == 'Listening' || v == 'Finishing');
           _state = v as String;
           if (_state == 'Idle') {
             _interim = '';
             _speech = false;
-            if (wasRunning && _finals.isNotEmpty) _history.add(_finals.join('\n'));
           }
         case 'Speech':
           _speech = v as bool;
@@ -570,7 +573,15 @@ class _HomeScreenState extends State<HomeScreen> {
     _engine.showFloatingButton(show_: true);
     if (_shrinkSupported) _engine.setFloatingSize(sizePercent: _buttonSize, growthPercent: _buttonGrowth);
     if (_shrinkSupported) _engine.setFloatingShrink(on_: _shrinkButtons);
+    _sendButtonHints();
     if (_shrinkSupported) _engine.setCorrectionMode(audio: _ui['correction_mode'] == 'audio');
+  }
+
+  /// The lines of help the floating buttons show after the start button
+  /// (what to click, when to speak), in the app's language.
+  void _sendButtonHints() {
+    if (!_shrinkSupported) return;
+    _engine.setFloatingHints(hints: [for (var i = 0; i < 10; i++) _t['buttonHint$i']]);
   }
 
   /// Desktop buttons can shrink away from the mouse (ui.json
@@ -579,9 +590,9 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _shrinkButtons => _ui['button_shrink'] as bool? ?? true;
 
   /// The desktop buttons' plain size in percent (ui.json `button_size`)
-  /// and how much larger they are under the mouse than at rest
-  /// (`button_grow`, percent; `button_growth` was an older meaning).
-  static const _defaultButtonSize = 100, _defaultButtonGrowth = 60;
+  /// — the size with the mouse away — and how much larger than that they
+  /// are under the mouse (`button_grow`, percent).
+  static const _defaultButtonSize = 72, _defaultButtonGrowth = 60;
   int get _buttonSize => (_ui['button_size'] as num?)?.round() ?? _defaultButtonSize;
   int get _buttonGrowth => (_ui['button_grow'] as num?)?.round() ?? _defaultButtonGrowth;
 
@@ -780,7 +791,8 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
-              Expanded(child: Text(_t['positionsTitle'], style: Theme.of(context).textTheme.titleMedium)),
+              // The (i) right beside the title, not at the far edge.
+              Flexible(child: Text(_t['positionsTitle'], style: Theme.of(context).textTheme.titleMedium)),
               IconButton(
                 tooltip: _t['positionInfoTip'],
                 icon: const Icon(Icons.info_outline),
@@ -924,7 +936,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 body: _t['buttonGrowthBody'],
                 value: _buttonGrowth,
                 min: 0,
-                max: 150,
+                max: 200,
                 standard: _defaultButtonGrowth,
                 enabled: _shrinkButtons,
                 onChanged: (v, save) => _setButtonSize(growth: v, save: save),
@@ -1225,8 +1237,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _stop() => _engine.stop();
 
+  /// One message at a time: a new one takes the place of whatever is
+  /// showing or waiting, instead of queueing behind it — queued messages
+  /// came up one after the other long after their moment (a profile name
+  /// that was no longer the active one).
   void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 3)));
   }
 
   @override
@@ -1243,8 +1262,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // The widgets without settings at hand (licences page, platform cards,
-    // history) read the language from here.
+    // The widgets without settings at hand (licences page, platform cards)
+    // read the language from here.
     UiStrings.current = _t;
     if (_settings.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
     if (_wizardStep != null) return _wizardScaffold();
@@ -1253,11 +1272,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool get _listening => _state == 'Listening' || _state == 'Finishing';
 
-  /// Phones and tablets: three tabs at the bottom, the profile chips as a
+  /// Phones and tablets: two tabs at the bottom, the profile chips as a
   /// row at the top of the Profiles tab. The in-app microphone button
   /// stays where no floating button exists (iOS).
   Widget _mobileShell() {
-    final titles = [_t['profiles'], _t['general'], _t['history']];
+    final titles = [_t['profiles'], _t['general']];
     return Scaffold(
       appBar: AppBar(
         title: Text(titles[_tab]),
@@ -1265,8 +1284,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: switch (_tab) {
         0 => _profilePage(showChips: true),
-        1 => _generalPage(),
-        _ => HistoryPane(key: ValueKey(_history), store: _history),
+        _ => _generalPage(),
       },
       floatingActionButton: _floatingSupported ? null : _micFab(),
       bottomNavigationBar: NavigationBar(
@@ -1275,13 +1293,12 @@ class _HomeScreenState extends State<HomeScreen> {
         destinations: [
           NavigationDestination(icon: const Icon(Icons.people_outline), selectedIcon: const Icon(Icons.people), label: _t['profiles']),
           NavigationDestination(icon: const Icon(Icons.tune), label: _t['general']),
-          NavigationDestination(icon: const Icon(Icons.history), label: _t['history']),
         ],
       ),
     );
   }
 
-  /// Desktop: sidebar with the profiles, General and History on the left,
+  /// Desktop: sidebar with the profiles and General on the left,
   /// the chosen page on the right.
   Widget _desktopShell() {
     final scheme = Theme.of(context).colorScheme;
@@ -1289,8 +1306,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final activeId = _profiles.activeId;
     final title = switch (_tab) {
       0 => _profiles.active['title'] as String? ?? '',
-      1 => _t['general'],
-      _ => _t['history'],
+      _ => _t['general'],
     };
     return Scaffold(
       body: Row(
@@ -1312,6 +1328,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Text(_t['profiles'].toUpperCase(),
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant, letterSpacing: 1)),
                   ),
+                  // Above the list and outside it: always in reach, however
+                  // many profiles there are.
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                    child: AddProfileChip(label: _t['newProfile'], onTap: () => _startWizard()),
+                  ),
                   Expanded(
                     child: ListView(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1325,7 +1347,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               onTap: () => _activateProfile(p['id'] as String),
                             ),
                           ),
-                        AddProfileChip(label: _t['newProfile'], onTap: () => _startWizard()),
                       ],
                     ),
                   ),
@@ -1335,12 +1356,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     title: Text(_t['general']),
                     selected: _tab == 1,
                     onTap: () => setState(() => _tab = 1),
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.history),
-                    title: Text(_t['history']),
-                    selected: _tab == 2,
-                    onTap: () => setState(() => _tab = 2),
                   ),
                   ListTile(
                     leading: const Icon(Icons.info_outline),
@@ -1364,8 +1379,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Expanded(
                   child: switch (_tab) {
                     0 => _profilePage(showChips: false),
-                    1 => _generalPage(),
-                    _ => HistoryPane(key: ValueKey(_history), store: _history, embedded: true),
+                    _ => _generalPage(),
                   },
                 ),
               ],
@@ -1444,6 +1458,11 @@ class _HomeScreenState extends State<HomeScreen> {
             child: ListView(
               scrollDirection: Axis.horizontal,
               children: [
+                // First: in reach without scrolling past every profile.
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: AddProfileChip(label: _t['newProfile'], compact: true, onTap: () => _startWizard()),
+                ),
                 for (final q in _profiles.list)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
@@ -1454,7 +1473,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       onTap: () => _activateProfile(q['id'] as String),
                     ),
                   ),
-                AddProfileChip(label: _t['newProfile'], compact: true, onTap: () => _startWizard()),
               ],
             ),
           ),
@@ -1606,6 +1624,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 if (code == null) return;
                 (_settings['app'] ??= <String, dynamic>{})['language'] = code == 'eng' ? '' : code;
                 _saveSettings();
+                _sendButtonHints();
               },
             ),
           ],
@@ -2161,7 +2180,7 @@ class _HomeScreenState extends State<HomeScreen> {
             DropdownButton<String>(
               value: _providers.contains(_provider) ? _provider : null,
               isExpanded: true,
-              items: _providers.map((p) => DropdownMenuItem(value: p, child: Text(p))).toList(),
+              items: _providers.map((p) => DropdownMenuItem(value: p, child: Text(_providerName(p)))).toList(),
               onChanged: (p) async {
                 if (p == null) return;
                 _settings['providers']['active'] = p;
@@ -2183,7 +2202,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     controller: _keyCtl,
                     obscureText: true,
                     decoration: InputDecoration(
-                      labelText: _keyStored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': _provider}),
+                      labelText: _keyStored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': _providerName(_provider)}),
                       helperText: switch (_provider) {
                         'voiceitt' => 'Format: APP_ID:API_KEY',
                         'azure' => _t['azureKeyHelper'],
@@ -2210,10 +2229,10 @@ class _HomeScreenState extends State<HomeScreen> {
       (null, true) => (
           Icons.check_circle,
           Colors.green.shade700,
-          _t.fmt('keyFound', {'p': _provider, 's': _keyStoreName, 'k': _keyTail ?? ''}) +
+          _t.fmt('keyFound', {'p': _providerName(_provider), 's': _keyStoreName, 'k': _keyTail ?? ''}) +
               (_provider == 'azure' ? ' · ${_t['region']} ${_regionCtl.text.trim()}' : ''),
         ),
-      (null, false) => (Icons.key_off, Colors.orange.shade800, _t.fmt('keyNone', {'p': _provider})),
+      (null, false) => (Icons.key_off, Colors.orange.shade800, _t.fmt('keyNone', {'p': _providerName(_provider)})),
     };
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -2500,6 +2519,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ButtonSegment(value: 'cursor_to_end', label: Text(_t['rangeCursorToEnd'])),
                 ButtonSegment(value: 'single_word', label: Text(_t['rangeWord'])),
                 ButtonSegment(value: 'whole_text', label: Text(_t['rangeWholeText'])),
+                ButtonSegment(value: 'word_suggestions', label: Text(_t['rangeSuggest'])),
               ],
               selected: {range},
               onSelectionChanged: (sel) {
@@ -3093,7 +3113,10 @@ class _HomeScreenState extends State<HomeScreen> {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(_t.fmt('aboutTitle', {'a': appName})),
+        // White like the logo's own background, so the logo needs no tile.
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        title: Text(_t['about']),
         content: SizedBox(
           width: 560,
           child: SingleChildScrollView(
@@ -3101,9 +3124,10 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Who is behind the app: name, firm and logo.
+                // Who is behind the app: name, firm and logo, the logo's
+                // middle level with the middle of the lines beside it.
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     Expanded(
                       child: Column(
@@ -3112,15 +3136,14 @@ class _HomeScreenState extends State<HomeScreen> {
                           Text(appName, style: Theme.of(context).textTheme.titleLarge),
                           const SizedBox(height: 8),
                           Text('Stephan Korner', style: text),
-                          Text('Ideen Kaffee Korner', style: text),
+                          Text('Ideen Kaffee', style: text),
                         ],
                       ),
                     ),
                     const SizedBox(width: 16),
-                    // On white: the logo has black parts, lost on a dark theme.
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+                    // A little in from the dialog's right edge.
+                    Padding(
+                      padding: const EdgeInsets.only(right: 28),
                       child: Image.asset('assets/icon/ikk_logo.png', height: 118, fit: BoxFit.contain),
                     ),
                   ],
@@ -3156,6 +3179,24 @@ class _HomeScreenState extends State<HomeScreen> {
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => PrivacyPolicyScreen(
+                    german: _appLanguage == 'deu' || _appLanguage == 'gsw',
+                    appName: appName,
+                    contact: _contactAddress,
+                  ),
+                ),
+              );
+            },
+            child: Text(_t['privacyPolicy']),
+          ),
+          // Needed: the licences of the built-in components ask for their
+          // notices to stay within the user's reach.
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
               Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const LicensesScreen()));
             },
             child: Text(_t['licenses']),
@@ -3167,23 +3208,25 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+/// The licence of the app and the notices of its components, one page.
 class LicensesScreen extends StatelessWidget {
   const LicensesScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     final t = UiStrings.current;
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(t['licenses']),
-          bottom: TabBar(tabs: [Tab(text: t['license']), Tab(text: t['notice'])]),
-        ),
-        body: TabBarView(
-          children: [licenseText(), noticeText()]
-              .map((t) => SingleChildScrollView(padding: const EdgeInsets.all(16), child: SelectableText(t)))
-              .toList(),
+    return Scaffold(
+      appBar: AppBar(title: Text(t['licenses'])),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // The short notice first, the full licence text below it.
+            SelectableText(noticeText()),
+            const Divider(height: 32),
+            SelectableText(licenseText()),
+          ],
         ),
       ),
     );

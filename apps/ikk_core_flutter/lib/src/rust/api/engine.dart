@@ -80,6 +80,11 @@ abstract class IkkEngine implements RustOpaqueInterface {
     required double ry,
   });
 
+  /// The lines of help the floating buttons show after the start button,
+  /// in the app's language: click to click (AI, audio), single word (AI,
+  /// audio), speak now, correcting.
+  void setFloatingHints({required List<String> hints});
+
   /// Move the floating buttons there.
   void setFloatingPosition({required double x, required double y});
 
