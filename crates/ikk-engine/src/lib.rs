@@ -204,6 +204,8 @@ struct Correction {
 /// Replace by voice: the words spoken for a selection.
 struct ReplaceByVoice {
     original: String,
+    /// The range begins a sentence (`None`: cannot be told).
+    at_start: Option<bool>,
     prior_clipboard: Option<String>,
     collected: String,
     /// The engine opened the session for this and closes it afterwards.
@@ -505,6 +507,10 @@ pub struct Engine {
     /// The session's dictation language (ISO-639-3): quotation marks,
     /// and other typography the commands need.
     language: String,
+    /// The range a corrector is working on begins a sentence (`None`:
+    /// cannot be told), and the language its first word is looked up in.
+    range_at_start: Option<bool>,
+    range_language: String,
 }
 
 impl Engine {
@@ -558,6 +564,8 @@ impl Engine {
             host_mode: false,
             voice_stopped: false,
             language: String::new(),
+            range_at_start: None,
+            range_language: String::new(),
         };
         let task = tokio::spawn(engine.run(cmd_rx));
         EngineHandle {
@@ -1640,6 +1648,16 @@ impl Engine {
         );
         self.replace = Some(ReplaceByVoice {
             original: original.clone(),
+            at_start: {
+                let context = take_context();
+                let at_start = context.as_deref().and_then(sentence_start);
+                info!(
+                    read = context.is_some(),
+                    sentence_start = ?at_start,
+                    "replace by voice: what stands in front of the range"
+                );
+                at_start
+            },
             prior_clipboard,
             collected: String::new(),
             own_session,
@@ -1759,7 +1777,7 @@ impl Engine {
     async fn finish_replace(&mut self) -> bool {
         let Some(r) = self.replace.take() else { return false };
         self.replace_generation += 1;
-        let text = shape_replacement(&r.original, &r.collected);
+        let text = shape_replacement(&r.original, &r.collected, r.at_start, &self.language);
         let prior = r.prior_clipboard.clone();
         let changed = !text.is_empty();
         let host = std::mem::take(&mut self.host_mode);
@@ -1856,6 +1874,14 @@ impl Engine {
                 return;
             }
         };
+        let context = take_context();
+        self.range_at_start = context.as_deref().and_then(sentence_start);
+        self.range_language = req.language.clone();
+        info!(
+            read = context.is_some(),
+            sentence_start = ?self.range_at_start,
+            "correction: what stands in front of the range"
+        );
         info!(
             chars = original.chars().count(),
             corrector = corrector.id(),
@@ -1909,6 +1935,9 @@ impl Engine {
                 Ok((true, chars))
             }
             Ok(Some(text)) => {
+                // Where it goes decides the first letter; the range's own
+                // spaces at both ends stay.
+                let text = shape_correction(&original, &text, self.range_at_start.take(), &self.range_language);
                 let chars = text.chars().count();
                 tokio::task::spawn_blocking(move || paste_over_selection(&text, prior))
                     .await
@@ -2149,38 +2178,98 @@ fn same_standby_capture(a: &StartConfig, b: &StartConfig) -> bool {
 #[cfg(test)]
 mod tests;
 
-/// The spoken words shaped to the place they go: the case of the first
-/// letter follows the replaced text, and a sign that ended the replaced
-/// text (a comma, a full stop) is kept when the speaker did not say one.
-fn shape_replacement(original: &str, spoken: &str) -> String {
+/// Does a range that follows `before` (the few characters in front of
+/// it) begin a sentence? `None` when that cannot be told.
+fn sentence_start(before: &str) -> Option<bool> {
+    let line_end = before.trim_end_matches([' ', '\u{a0}', '\t']).ends_with(['\n', '\r']);
+    if line_end {
+        return Some(true);
+    }
+    let t = before.trim_end();
+    // Closing quotation marks and brackets do not hide the sign before them.
+    let t = t.trim_end_matches(['"', '”', '“', '»', '«', '\'', '’', ')', ']']);
+    let last = t.chars().next_back()?;
+    Some(matches!(last, '.' | '!' | '?' | '…'))
+}
+
+/// The whitespace a selected range begins and ends with, and what lies
+/// between: a replacement is put between the same two pieces, so it
+/// starts and stops exactly where the range did and no space is added
+/// or lost at either end.
+fn split_edges(original: &str) -> (&str, &str, &str) {
+    let body = original.trim();
+    if body.is_empty() {
+        return ("", "", "");
+    }
+    let start = original.len() - original.trim_start().len();
+    (&original[..start], body, &original[start + body.len()..])
+}
+
+/// The first letter of `text` in upper or lower case.
+fn with_first(text: &str, upper: bool) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if upper => c.to_uppercase().chain(chars).collect(),
+        Some(c) => c.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The spoken words shaped to the place they go. The first letter: a
+/// capital at the start of a sentence; inside a sentence small, unless
+/// the word is a noun or a name (the spelling dictionary knows only its
+/// capitalised form) or unknown; when the place cannot be told
+/// (`at_start` is `None`) it follows the replaced text. A sign that ended
+/// the replaced text (a comma, a full stop) is kept when the speaker did
+/// not say one, and the range's own spaces at both ends stay as they were.
+fn shape_replacement(original: &str, spoken: &str, at_start: Option<bool>, language: &str) -> String {
     let mut text = spoken.trim().to_string();
     if text.is_empty() {
         return text;
     }
-    let orig = original.trim();
+    let (lead, orig, trail) = split_edges(original);
     let first_orig = orig.chars().next();
     let first_new = text.chars().next();
-    // Capitalised stays capitalised (a sentence start, a noun). The
-    // recogniser capitalises the first word of anything it hears: for a
-    // lowercase word replaced by one word, the capital goes again when
-    // the lowercase form is an ordinary word (names and German nouns keep
-    // theirs). A full stop the recogniser added to a short replacement
-    // goes too when the replaced text had none.
-    if let (Some(o), Some(n)) = (first_orig, first_new) {
-        if o.is_uppercase() && n.is_lowercase() {
-            text = n.to_uppercase().chain(text.chars().skip(1)).collect();
-        } else if o.is_lowercase() && n.is_uppercase() {
-            // The recogniser capitalises the first word of anything it
-            // hears; mid-sentence that capital goes again when the word is
-            // an ordinary one (names it does not know keep theirs).
-            let first: String = text.split_whitespace().next().unwrap_or("").to_string();
-            let lowered_first: String = n.to_lowercase().chain(first.chars().skip(1)).collect();
-            let word = lowered_first.trim_end_matches(|c: char| ".,;:!?".contains(c));
-            if ikk_text::dictionary::is_word(word) {
-                text = n.to_lowercase().chain(text.chars().skip(1)).collect();
+    let first_word: String = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(|c: char| ".,;:!?".contains(c))
+        .to_string();
+    match (at_start, first_new) {
+        (Some(true), Some(_)) => text = with_first(&text, true),
+        (Some(false), Some(n)) => match ikk_ondevice::capital_only(&first_word, language) {
+            // A noun or a name keeps (or gets) its capital.
+            Some(true) => text = with_first(&text, true),
+            // An ordinary word: the recogniser's sentence capital goes.
+            Some(false) => text = with_first(&text, false),
+            // Unknown to the dictionary: an ordinary word of the word list
+            // loses the capital, anything else (a name) stays as heard.
+            None => {
+                if n.is_uppercase() && ikk_text::dictionary::is_word(&with_first(&first_word, false)) {
+                    text = with_first(&text, false);
+                }
+            }
+        },
+        _ => {
+            // The place is unknown: the case follows the replaced text.
+            // Capitalised stays capitalised (a sentence start, a noun);
+            // for a lowercase word the recogniser's capital goes again
+            // when the lowercase form is an ordinary word.
+            if let (Some(o), Some(n)) = (first_orig, first_new) {
+                if o.is_uppercase() && n.is_lowercase() {
+                    text = with_first(&text, true);
+                } else if o.is_lowercase()
+                    && n.is_uppercase()
+                    && ikk_text::dictionary::is_word(&with_first(&first_word, false))
+                {
+                    text = with_first(&text, false);
+                }
             }
         }
     }
+    // A full stop the recogniser added to a short replacement goes when
+    // the replaced text had none.
     if text.ends_with('.') && !orig.ends_with(|c: char| ".,;:!?".contains(c)) && text.split_whitespace().count() <= 3 {
         text.pop();
     }
@@ -2191,7 +2280,39 @@ fn shape_replacement(original: &str, spoken: &str) -> String {
             text.push(o);
         }
     }
-    text
+    format!("{lead}{text}{trail}")
+}
+
+/// A corrector's answer shaped to the place it goes: between the range's
+/// own spaces, with a capital at the start of a sentence. Inside a
+/// sentence the first word is small when the spelling dictionary knows it
+/// as an ordinary word (a corrector reads a piece of a sentence as a
+/// sentence and capitalises it), and also when it was small before and
+/// the dictionary does not know it; a noun or a name keeps its capital.
+fn shape_correction(original: &str, answer: &str, at_start: Option<bool>, language: &str) -> String {
+    let (lead, orig, trail) = split_edges(original);
+    let mut text = answer.trim().to_string();
+    if text.is_empty() {
+        return text;
+    }
+    let first_word: String = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(|c: char| ".,;:!?".contains(c))
+        .to_string();
+    let was_small = orig.chars().next().is_some_and(char::is_lowercase);
+    match at_start {
+        Some(true) => text = with_first(&text, true),
+        Some(false) => match ikk_ondevice::capital_only(&first_word, language) {
+            Some(true) => text = with_first(&text, true),
+            Some(false) => text = with_first(&text, false),
+            None if was_small => text = with_first(&text, false),
+            None => {}
+        },
+        None => {}
+    }
+    format!("{lead}{text}{trail}")
 }
 
 mod range_keys {
@@ -2209,7 +2330,91 @@ mod range_keys {
     /// from a stale clipboard.
     const MARKER: &str = "\u{200B}ikk-copy\u{200B}";
 
+    /// The characters in front of the last range taken (and when they were
+    /// read): what tells a sentence start from the middle of a sentence.
+    static CONTEXT: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+    fn stash(context: Option<String>) {
+        if let Ok(mut c) = CONTEXT.lock() {
+            *c = context.map(|t| (t, std::time::Instant::now()));
+        }
+    }
+
+    /// The context of the range just taken, once; nothing when it is
+    /// older than a few seconds (it belonged to another range).
+    pub fn take_context() -> Option<String> {
+        let (text, at) = CONTEXT.lock().ok()?.take()?;
+        (at.elapsed() < Duration::from_secs(5)).then_some(text)
+    }
+
+    /// Read the three characters in front of the cursor (no selection):
+    /// select them, copy, and put the cursor back. `None` at the very
+    /// start of a text, where there is nothing to select. The user's
+    /// clipboard is left as it was.
+    fn before_cursor() -> Option<String> {
+        let prior = d::clipboard_text();
+        let _ = d::set_clipboard_text(MARKER);
+        let back = Chord::Key(
+            Key::Left,
+            Modifiers {
+                shift: true,
+                command: false,
+                word: false,
+            },
+        );
+        let mut text = None;
+        if d::press_chord(back, 3).is_ok() {
+            sleep(Duration::from_millis(60));
+            if d::press_chord(Chord::shortcut('c'), 1).is_ok() {
+                for _ in 0..8 {
+                    sleep(Duration::from_millis(50));
+                    match d::clipboard_text() {
+                        Some(t) if t != MARKER => {
+                            text = Some(t);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Something was selected: back to where the cursor stood (the
+            // right end of those characters).
+            if text.is_some() {
+                let _ = d::press_chord(Chord::key(Key::Right), 1);
+                sleep(Duration::from_millis(40));
+            }
+        }
+        restore(prior);
+        text
+    }
+
+    /// For a caller that places the cursor at the start of a range itself
+    /// (a click) and extends the selection afterwards: read what stands
+    /// in front of the cursor now and keep it for the range.
+    pub fn note_context_at_cursor() {
+        // Nothing read (the very start of a text, or a program that did
+        // not answer): the place stays unknown and the old rule decides.
+        stash(before_cursor());
+    }
+
+    /// How many presses of Shift+Right select `text` again, when that can
+    /// be counted safely (plain characters, not too many).
+    fn steps(text: &str) -> Option<usize> {
+        let plain = text.chars().all(|c| {
+            (c as u32) < 0x1_0000 && !('\u{0300}'..='\u{036F}').contains(&c) && c != '\u{200D}' && c != '\u{FE0F}'
+        });
+        let n = text.replace("\r\n", "\n").chars().count();
+        (plain && n <= 200).then_some(n)
+    }
+
     pub fn select_and_copy(range: CorrectionRange) -> Result<(String, Option<String>), String> {
+        // Cursor to end: the cursor stands at the start of the range, so
+        // what is in front of it can be read before anything is selected.
+        match range {
+            CorrectionRange::CursorToEnd => note_context_at_cursor(),
+            CorrectionRange::WholeText => stash(Some("\n".into())),
+            _ => {}
+        }
         let prior = d::clipboard_text();
         let _ = d::set_clipboard_text(MARKER);
         let select = match range {
@@ -2249,6 +2454,28 @@ mod range_keys {
             restore(prior);
             return Err("nothing selected to correct".into());
         }
+        // A selection that was there already (a double-clicked word) and
+        // whose context nobody read: step to its start, read, and select
+        // the same characters again.
+        let unread = CONTEXT.lock().map(|c| c.is_none()).unwrap_or(false);
+        if unread && matches!(range, CorrectionRange::Selection | CorrectionRange::Word) {
+            if let Some(n) = steps(&text) {
+                if d::press_chord(Chord::key(Key::Left), 1).is_ok() {
+                    sleep(Duration::from_millis(40));
+                    note_context_at_cursor();
+                    let forward = Chord::Key(
+                        Key::Right,
+                        Modifiers {
+                            shift: true,
+                            command: false,
+                            word: false,
+                        },
+                    );
+                    let _ = d::press_chord(forward, n);
+                    sleep(Duration::from_millis(60));
+                }
+            }
+        }
         Ok((text, prior))
     }
 
@@ -2275,4 +2502,10 @@ mod range_keys {
     }
 }
 
-use range_keys::{leave_selection, paste_over_selection, select_and_copy};
+use range_keys::{leave_selection, paste_over_selection, select_and_copy, take_context};
+
+/// For the shell: the cursor was just placed at the start of a range (a
+/// click); read what stands in front of it before the range is selected.
+pub fn note_range_context() {
+    range_keys::note_context_at_cursor();
+}

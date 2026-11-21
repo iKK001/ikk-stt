@@ -30,7 +30,7 @@ pub enum WakeError {
     #[error("the recordings of this command differ too much; record them again more alike")]
     TakesInconsistent,
     #[error(
-        "the start and the stop command sound too alike to be told apart; choose two that differ in more than one word"
+        "the start command and the stop command sound too alike to each other to be told apart; choose two that sound more different"
     )]
     WordsTooSimilar,
     #[error("stored voice commands are unreadable: {0}")]

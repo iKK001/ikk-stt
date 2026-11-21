@@ -6,8 +6,11 @@ use crate::features::{Extractor, COEFFS};
 use crate::WakeError;
 
 pub const MIN_TAKES: usize = 3;
-/// Shortest take that can be a word (0.25 s).
-const MIN_FRAMES: usize = 25;
+/// Shortest take that can be a word (0.15 s of sound once the quiet
+/// edges are cut). It was 0.25 s, which a short word said quickly ("go",
+/// "los", "stopp") does not reach: such takes were refused as too short
+/// and, later, the word was never heard.
+const MIN_FRAMES: usize = 15;
 /// Accept up to this factor above the worst distance between the user's
 /// own takes.
 const THRESHOLD_FACTOR: f32 = 1.35;
@@ -55,13 +58,8 @@ impl VoiceCommands {
     /// Train both words from their takes (16 kHz mono each).
     pub fn train(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>]) -> Result<Self, WakeError> {
         let ex = Extractor::new();
-        let (start, start_worst) = CommandModel::train_measured(&ex, start_takes)?;
-        let (stop, stop_worst) = CommandModel::train_measured(&ex, stop_takes)?;
-        let cross = start
-            .templates
-            .iter()
-            .flat_map(|a| stop.templates.iter().map(move |b| dtw(a, b)))
-            .fold(f32::INFINITY, f32::min);
+        let (start, _) = CommandModel::train_measured(&ex, start_takes)?;
+        let (stop, _) = CommandModel::train_measured(&ex, stop_takes)?;
         // Told apart the way the spotter decides: a take of one command
         // must be closer to its own command (at worst `worst`) than to the
         // other one by the ambiguity margin. The acceptance thresholds do
@@ -71,7 +69,14 @@ impl VoiceCommands {
         // the spotter would never confuse them. Phrases sharing a word
         // ("Diktat starten" / "Diktat stoppen") still fail this when the
         // differing word is too small a part of the phrase.
-        if cross * AMBIGUITY_MARGIN <= start_worst.max(stop_worst) {
+        //
+        // Each take is tried the way a heard utterance is: against the
+        // other takes of its own command and against the other command.
+        // (Comparing the worst pair of one command with the best pair
+        // across the two — two different takes — refused short words that
+        // every single take tells apart: short words vary more from take
+        // to take and lie closer to each other.)
+        if !told_apart(&start.templates, &stop.templates) || !told_apart(&stop.templates, &start.templates) {
             return Err(WakeError::WordsTooSimilar);
         }
         Ok(Self { start, stop })
@@ -161,6 +166,22 @@ impl CommandModel {
                 .fold(f32::INFINITY, f32::min),
         )
     }
+}
+
+/// Is every take of one command closer to another take of the same
+/// command than to any take of the other command, by the margin the
+/// spotter asks for?
+fn told_apart(own: &[Vec<Vec<f32>>], other: &[Vec<Vec<f32>>]) -> bool {
+    own.iter().enumerate().all(|(i, take)| {
+        let same = own
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, t)| dtw(take, t))
+            .fold(f32::INFINITY, f32::min);
+        let cross = other.iter().map(|t| dtw(take, t)).fold(f32::INFINITY, f32::min);
+        same <= cross * AMBIGUITY_MARGIN
+    })
 }
 
 /// Decides for one utterance at a time.

@@ -89,6 +89,27 @@ fn language(code: &str) -> Option<&'static Language> {
     }
 }
 
+/// What the spelling dictionary says about the case of a word's first
+/// letter: `Some(true)` when only the capitalised form is a word (a German
+/// noun, a name), `Some(false)` when the lower-case form is one, `None`
+/// when the word is unknown or the language is not covered.
+pub fn capital_only(word: &str, language_code: &str) -> Option<bool> {
+    let lang = language(language_code)?;
+    let word: String = word.chars().filter(|c| c.is_alphabetic() || *c == '-').collect();
+    let mut chars = word.chars();
+    let first = chars.next()?;
+    let rest: String = chars.collect();
+    let lower: String = first.to_lowercase().chain(rest.chars()).collect();
+    let upper: String = first.to_uppercase().chain(rest.chars()).collect();
+    if lang.dict.check(&lower) {
+        Some(false)
+    } else if lang.dict.check(&upper) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// Whether the language is covered (for the app: say so in the settings).
 pub fn supports(code: &str) -> bool {
     matches!(

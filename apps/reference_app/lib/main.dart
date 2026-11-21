@@ -1108,10 +1108,12 @@ class _HomeScreenState extends State<HomeScreen> {
           if (!cancelled && takes[word]!.length == 3) {
             try {
               await voiceCheckWord(takes: takes[word]!);
-            } catch (_) {
+            } catch (e) {
               takes[word]!.clear();
               retry = false;
-              await show(_t.fmt('tooDifferent', {'l': label}), _StepKind.retry, 2500);
+              // Say what was wrong: too short is not "too different".
+              final short = '$e'.contains('too short');
+              await show(short ? _t['voiceErrShort'] : _t.fmt('tooDifferent', {'l': label}), _StepKind.retry, 3000);
             }
           }
         }
@@ -1130,7 +1132,15 @@ class _HomeScreenState extends State<HomeScreen> {
         if (mounted && !cancelled) Navigator.of(context).pop();
       } catch (e) {
         // Stays visible until closed: the reason matters for the next try.
-        final msg = '$e'.replaceFirst(RegExp(r'^.*?Error:\s*'), '');
+        final raw = '$e'.replaceFirst(RegExp(r'^.*?Error:\s*'), '');
+        // The three reasons the learning gives, in the app's language.
+        final msg = raw.contains('too alike')
+            ? _t['voiceErrAlike']
+            : raw.contains('differ too much')
+                ? _t['voiceErrDiffer']
+                : raw.contains('too short')
+                    ? _t['voiceErrShort']
+                    : raw;
         await show(_t.fmt('couldNotLearn', {'e': msg}), _StepKind.retry);
       }
       _applyVoice();

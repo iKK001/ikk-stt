@@ -1224,25 +1224,66 @@ async fn refined_thought_arriving_at_stop_still_replaces_the_typed_text() {
 }
 
 #[test]
-fn replacement_follows_case_and_sign_of_the_replaced_text() {
-    assert_eq!(super::shape_replacement("Haus", "maus"), "Maus");
-    assert_eq!(super::shape_replacement("haus", "Maus"), "maus");
-    assert_eq!(super::shape_replacement("Haus,", "Maus"), "Maus,");
+fn the_place_decides_the_first_letter_of_a_replacement() {
+    use super::{sentence_start, shape_correction, shape_replacement};
+    // What stands in front of the range.
+    assert_eq!(sentence_start("d. "), Some(true));
+    assert_eq!(sentence_start("?” "), Some(true));
+    assert_eq!(sentence_start("x\n"), Some(true));
+    assert_eq!(sentence_start("as "), Some(false));
+    assert_eq!(sentence_start("t, "), Some(false));
+    assert_eq!(sentence_start("   "), None);
+    // At a sentence start: a capital, whatever was replaced.
+    assert_eq!(shape_replacement("alte", "neue", Some(true), "deu"), "Neue");
+    // Inside a sentence: an ordinary word small, even where a noun stood;
+    // a noun capital, even where a small word stood.
+    assert_eq!(shape_replacement("Haus", "Schnell", Some(false), "deu"), "schnell");
+    assert_eq!(shape_replacement("alte", "Haus", Some(false), "deu"), "Haus");
+    assert_eq!(shape_replacement("alte", "haus", Some(false), "deu"), "Haus");
+    // The range's own spaces stay at both ends; none is added.
+    assert_eq!(shape_replacement(" alte ", "Neue", Some(false), "deu"), " neue ");
+    assert_eq!(shape_replacement("alte", " Neue ", Some(false), "deu"), "neue");
+    // A corrector's answer: the same edges, a capital at a sentence start,
+    // no new capital on an unchanged first word inside a sentence.
     assert_eq!(
-        super::shape_replacement("das alte Haus.", "das neue Haus"),
+        shape_correction(" das haus ", "das Haus", Some(true), "deu"),
+        " Das Haus "
+    );
+    assert_eq!(shape_correction("das haus", "Das Haus", Some(false), "deu"), "das Haus");
+    // Also when the piece had a wrong capital before, or the corrector
+    // changed the first word; a noun keeps its capital.
+    assert_eq!(shape_correction("Das haus", "Das Haus", Some(false), "deu"), "das Haus");
+    assert_eq!(shape_correction("unt das", "Und das", Some(false), "deu"), "und das");
+    assert_eq!(
+        shape_correction("haus und hof", "Haus und Hof", Some(false), "deu"),
+        "Haus und Hof"
+    );
+    assert_eq!(shape_correction("das haus", "Das Haus", None, "deu"), "Das Haus");
+}
+
+#[test]
+fn replacement_follows_case_and_sign_of_the_replaced_text() {
+    assert_eq!(super::shape_replacement("Haus", "maus", None, "deu"), "Maus");
+    assert_eq!(super::shape_replacement("haus", "Maus", None, "deu"), "maus");
+    assert_eq!(super::shape_replacement("Haus,", "Maus", None, "deu"), "Maus,");
+    assert_eq!(
+        super::shape_replacement("das alte Haus.", "das neue Haus", None, "deu"),
         "das neue Haus."
     );
-    assert_eq!(super::shape_replacement("Haus", "  "), "");
-    assert_eq!(super::shape_replacement("das", "Korner"), "Korner");
+    assert_eq!(super::shape_replacement("Haus", "  ", None, "deu"), "");
+    assert_eq!(super::shape_replacement("das", "Korner", None, "deu"), "Korner");
     // The recogniser's sentence capital and full stop go for a short
     // replacement of a lowercase word (the word list is case-blind, so a
     // noun put in for an adjective loses its capital too; names it does
     // not know keep theirs).
-    assert_eq!(super::shape_replacement("alte", "Neue."), "neue");
-    assert_eq!(super::shape_replacement("alte", "Haus"), "haus");
-    assert_eq!(super::shape_replacement("alte Haus", "Neue Scheune."), "neue Scheune");
+    assert_eq!(super::shape_replacement("alte", "Neue.", None, "deu"), "neue");
+    assert_eq!(super::shape_replacement("alte", "Haus", None, "deu"), "haus");
     assert_eq!(
-        super::shape_replacement("alte", "Das grosse Haus am See"),
+        super::shape_replacement("alte Haus", "Neue Scheune.", None, "deu"),
+        "neue Scheune"
+    );
+    assert_eq!(
+        super::shape_replacement("alte", "Das grosse Haus am See", None, "deu"),
         "das grosse Haus am See"
     );
 }

@@ -138,7 +138,7 @@ impl FfiEngine {
     /// selection (click, Shift-click), then the selection is corrected.
     pub fn correct_between(&self, settings_json: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
         let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
-        ikk_output::desktop::select_between(from, to).map_err(|e| e.to_string())?;
+        select_between_reading_context(from, to)?;
         let mut req = ikk_engine::config::correct_request(&settings);
         req.range = ikk_engine::CorrectionRange::Selection;
         self.send(EngineCommand::CorrectRange(req))
@@ -175,7 +175,7 @@ impl FfiEngine {
     /// Replace by voice between two clicked points (click, Shift-click).
     pub fn replace_between(&self, settings_json: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
         let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
-        ikk_output::desktop::select_between(from, to).map_err(|e| e.to_string())?;
+        select_between_reading_context(from, to)?;
         let start = Box::new(ikk_engine::config::start_config(&settings));
         self.send(EngineCommand::ReplaceByVoice {
             range: ikk_engine::CorrectionRange::Selection,
@@ -233,4 +233,17 @@ impl Default for FfiEngine {
 /// `{"Transcript":{"Final":"hallo"}}`, `{"ConsentRequired":{...}}`.
 pub fn event_json(ev: &EngineEvent) -> String {
     serde_json::to_string(ev).unwrap_or_else(|e| format!("{{\"Error\":\"serialize: {e}\"}}"))
+}
+
+/// Click to click: a click at the first point, a look at what stands in
+/// front of the cursor there (sentence start or not), then the Shift-click
+/// at the second point that makes the selection.
+fn select_between_reading_context(from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+    use std::time::Duration;
+    ikk_output::desktop::click_at(from.0, from.1, false).map_err(|e| e.to_string())?;
+    std::thread::sleep(Duration::from_millis(160));
+    ikk_engine::note_range_context();
+    ikk_output::desktop::click_at(to.0, to.1, true).map_err(|e| e.to_string())?;
+    std::thread::sleep(Duration::from_millis(120));
+    Ok(())
 }

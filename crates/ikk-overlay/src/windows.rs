@@ -1467,7 +1467,7 @@ unsafe fn hint_font(scale: f64) -> windows::Win32::Graphics::Gdi::HFONT {
     )
 }
 
-/// Window thread: the dark label with `State::hint` right under the
+/// Window thread: the label (in the start button's colour) with `State::hint` right under the
 /// buttons as they are drawn (above them when there is no room below);
 /// clicks pass through it.
 unsafe fn show_hint(panel: HWND) {
@@ -1520,7 +1520,7 @@ unsafe fn show_hint(panel: HWND) {
         ) else {
             return;
         };
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
         hw = hwnd.0 as isize;
         if let Ok(mut s) = state().lock() {
             s.hint_hwnd = hw;
@@ -1566,7 +1566,10 @@ unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rect = RECT::default();
             let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
-            let brush = CreateSolidBrush(HINT_BACK);
+            // The colour the start button has right now: yellow while a
+            // replacement by voice is armed, orange otherwise; black text.
+            let armed = state().lock().map(|s| s.replace_armed).unwrap_or(false);
+            let brush = CreateSolidBrush(if armed { YELLOW } else { ORANGE });
             let _ = FillRect(hdc, &rect, brush);
             let _ = DeleteObject(brush.into());
             let scale = work_area(0, 0, true).map_or(1.0, |(_, s)| s);
@@ -1579,7 +1582,7 @@ unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             let font = hint_font(scale);
             let old = SelectObject(hdc, font.into());
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+            SetTextColor(hdc, COLORREF(0x0000_0000));
             let mut wide: Vec<u16> = text.encode_utf16().collect();
             DrawTextW(
                 hdc,
