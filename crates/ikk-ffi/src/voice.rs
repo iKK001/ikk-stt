@@ -10,7 +10,8 @@ const CALIBRATION: Duration = Duration::from_millis(600);
 /// A take must be this much louder than the room (RMS).
 const MIN_SNR: f32 = 2.5;
 const MIN_LEVEL: f32 = 0.003;
-const MIN_WORD: Duration = Duration::from_millis(250);
+/// As short as the matcher takes a word (0.15 s of sound).
+const MIN_WORD: Duration = Duration::from_millis(150);
 /// A command may be a short phrase, said slowly.
 const MAX_WORD: Duration = Duration::from_secs(6);
 
@@ -101,14 +102,25 @@ fn no_word(last_reason: &str) -> String {
 }
 
 /// Check the takes of one word right after recording them.
-pub fn check_word(takes: &[Vec<f32>]) -> Result<(), String> {
-    ikk_wake::VoiceCommands::check_word(takes).map_err(|e| e.to_string())
+/// `attempt`: how often this command had to be recorded again already;
+/// each repeat gives the takes more room to differ.
+pub fn check_word(takes: &[Vec<f32>], attempt: u32) -> Result<(), String> {
+    let result = ikk_wake::VoiceCommands::check_word_lenient(takes, attempt);
+    let (closest, furthest) = ikk_wake::VoiceCommands::spread(takes).unwrap_or((f32::NAN, f32::NAN));
+    tracing::info!(
+        attempt,
+        closest,
+        furthest,
+        passed = result.is_ok(),
+        "voice command: how far the three takes are from each other"
+    );
+    result.map_err(|e| e.to_string())
 }
 
 /// Train start and stop word from three or more takes each. Returns the
 /// model as JSON for the shell to store.
-pub fn train(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>]) -> Result<String, String> {
-    ikk_wake::VoiceCommands::train(start_takes, stop_takes)
+pub fn train(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>], attempt: u32) -> Result<String, String> {
+    ikk_wake::VoiceCommands::train_lenient(start_takes, stop_takes, attempt)
         .map(|c| c.to_json())
         .map_err(|e| e.to_string())
 }

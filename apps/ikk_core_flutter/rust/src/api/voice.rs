@@ -8,11 +8,24 @@ pub fn voice_record_take(settings_json: String, timeout_secs: u32) -> Result<Vec
 
 /// Check one word's takes right after recording them (error text if the
 /// takes differ too much, e.g. noise or a cough among them).
-pub fn voice_check_word(takes: Vec<Vec<f32>>) -> Result<(), String> {
-    ikk_ffi::voice::check_word(&takes)
+/// `attempt`: how often this command was recorded again already.
+pub fn voice_check_word(takes: Vec<Vec<f32>>, attempt: u32) -> Result<(), String> {
+    ikk_ffi::voice::check_word(&takes, attempt)
 }
 
 /// Train both words from their takes; returns the model JSON to store.
-pub fn voice_train(start_takes: Vec<Vec<f32>>, stop_takes: Vec<Vec<f32>>) -> Result<String, String> {
-    ikk_ffi::voice::train(&start_takes, &stop_takes)
+pub fn voice_train(start_takes: Vec<Vec<f32>>, stop_takes: Vec<Vec<f32>>, attempt: u32) -> Result<String, String> {
+    ikk_ffi::voice::train(&start_takes, &stop_takes, attempt)
+}
+
+/// The words the active speech provider hears in one recorded take, to
+/// name a voice command. Refused unless the user has allowed that
+/// provider (`consent_json`) or it works on the device.
+pub fn voice_transcribe_take(
+    settings_json: String,
+    consent_json: String,
+    credential: String,
+    take: Vec<f32>,
+) -> Result<String, String> {
+    ikk_ffi::training::transcribe_clip(&settings_json, &consent_json, &credential, take)
 }

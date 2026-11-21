@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -828493697;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 2049766035;
 
 // Section: executor
 
@@ -1621,10 +1621,11 @@ fn wire__crate__api__voice__voice_check_word_impl(
             };
             let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_takes = <Vec<Vec<f32>>>::sse_decode(&mut deserializer);
+            let api_attempt = <u32>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::voice::voice_check_word(api_takes)?;
+                    let output_ok = crate::api::voice::voice_check_word(api_takes, api_attempt)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -1679,10 +1680,47 @@ fn wire__crate__api__voice__voice_train_impl(
             let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_start_takes = <Vec<Vec<f32>>>::sse_decode(&mut deserializer);
             let api_stop_takes = <Vec<Vec<f32>>>::sse_decode(&mut deserializer);
+            let api_attempt = <u32>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::voice::voice_train(api_start_takes, api_stop_takes)?;
+                    let output_ok = crate::api::voice::voice_train(api_start_takes, api_stop_takes, api_attempt)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__voice__voice_transcribe_take_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "voice_transcribe_take",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(ptr_, rust_vec_len_, data_len_)
+            };
+            let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_settings_json = <String>::sse_decode(&mut deserializer);
+            let api_consent_json = <String>::sse_decode(&mut deserializer);
+            let api_credential = <String>::sse_decode(&mut deserializer);
+            let api_take = <Vec<f32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::voice::voice_transcribe_take(
+                        api_settings_json,
+                        api_consent_json,
+                        api_credential,
+                        api_take,
+                    )?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -1937,6 +1975,7 @@ fn pde_ffi_dispatcher_primary_impl(
         45 => wire__crate__api__voice__voice_check_word_impl(port, ptr, rust_vec_len, data_len),
         46 => wire__crate__api__voice__voice_record_take_impl(port, ptr, rust_vec_len, data_len),
         47 => wire__crate__api__voice__voice_train_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__voice__voice_transcribe_take_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

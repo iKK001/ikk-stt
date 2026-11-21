@@ -18,14 +18,37 @@ Future<Float32List> voiceRecordTake({
 
 /// Check one word's takes right after recording them (error text if the
 /// takes differ too much, e.g. noise or a cough among them).
-Future<void> voiceCheckWord({required List<Float32List> takes}) =>
-    RustLib.instance.api.crateApiVoiceVoiceCheckWord(takes: takes);
+/// `attempt`: how often this command was recorded again already.
+Future<void> voiceCheckWord({
+  required List<Float32List> takes,
+  required int attempt,
+}) => RustLib.instance.api.crateApiVoiceVoiceCheckWord(
+  takes: takes,
+  attempt: attempt,
+);
 
 /// Train both words from their takes; returns the model JSON to store.
 Future<String> voiceTrain({
   required List<Float32List> startTakes,
   required List<Float32List> stopTakes,
+  required int attempt,
 }) => RustLib.instance.api.crateApiVoiceVoiceTrain(
   startTakes: startTakes,
   stopTakes: stopTakes,
+  attempt: attempt,
+);
+
+/// The words the active speech provider hears in one recorded take, to
+/// name a voice command. Refused unless the user has allowed that
+/// provider (`consent_json`) or it works on the device.
+Future<String> voiceTranscribeTake({
+  required String settingsJson,
+  required String consentJson,
+  required String credential,
+  required List<double> take,
+}) => RustLib.instance.api.crateApiVoiceVoiceTranscribeTake(
+  settingsJson: settingsJson,
+  consentJson: consentJson,
+  credential: credential,
+  take: take,
 );

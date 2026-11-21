@@ -134,3 +134,30 @@ pub async fn take(
         .map_err(|e| e.to_string())?;
     Ok(t.text.trim().to_string())
 }
+
+/// What the provider hears in a clip that was recorded already (16 kHz
+/// mono), without hints or learned words — for naming a recorded voice
+/// command. May be empty.
+pub async fn transcribe_samples(
+    provider: Arc<dyn Provider>,
+    settings: &Settings,
+    credential: Secret,
+    samples: Vec<f32>,
+) -> Result<String, String> {
+    let mut cfg = crate::config::start_config(settings).session;
+    cfg.credential = Some(credential);
+    cfg.keywords.clear();
+    cfg.learned.clear();
+    cfg.transfer = ikk_stt::TransferMode::Batch;
+    let frame = AudioFrame {
+        samples,
+        sample_rate_hz: 16_000,
+        offset: Duration::ZERO,
+        speech: None,
+    };
+    let t = provider
+        .transcribe(AudioClip { frames: vec![frame] }, &cfg)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(t.text.trim().to_string())
+}

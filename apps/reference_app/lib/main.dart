@@ -101,7 +101,6 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Where flutter_secure_storage keeps keys on this platform.
   String get _keyStoreName {
     if (Platform.isMacOS || Platform.isIOS) return _t['storeKeychain'];
-    if (Platform.isAndroid) return _t['storeAndroid'];
     if (Platform.isWindows) return _t['storeWindows'];
     return _t['storeGeneric'];
   }
@@ -746,7 +745,7 @@ class _HomeScreenState extends State<HomeScreen> {
         content: TextField(
           controller: ctl,
           autofocus: true,
-          decoration: InputDecoration(labelText: _t['positionName']),
+          decoration: InputDecoration(labelText: _t['positionName'], suffixIcon: _clearX(ctl)),
           onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
         actions: [
@@ -951,6 +950,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String? _voiceModel;
   bool _voiceOn = false;
+  /// The words of the start and the stop command ('start', 'stop'): what
+  /// the speech service heard in the recordings, changed by the user where
+  /// it heard wrong. And the day the commands were recorded.
+  Map<String, String> _voiceLabels = {};
+  String? _voiceRecordedAt;
   bool _voiceStandby = false;
   // Diagnosis: the listener's last utterance and its loudest recent level.
   String? _voiceHeard;
@@ -977,6 +981,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadVoice() async {
+    _voiceLabels = {};
+    _voiceRecordedAt = null;
     try {
       String? json;
       final legacy = File(_voicePath);
@@ -989,6 +995,11 @@ class _HomeScreenState extends State<HomeScreen> {
       final j = jsonDecode(json) as Map<String, dynamic>;
       _voiceModel = j['model'] as String?;
       _voiceOn = (j['enabled'] as bool? ?? false) && _voiceModel != null;
+      _voiceLabels = {
+        for (final e in ((j['labels'] as Map?) ?? const {}).entries)
+          if (e.value is String) '${e.key}': e.value as String,
+      };
+      _voiceRecordedAt = j['recorded_at'] as String?;
       _applyVoice();
     } catch (e) {
       _snack(_t.fmt('voiceReadError', {'e': e}));
@@ -1006,8 +1017,105 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveVoice() async {
-    final json = jsonEncode({'enabled': _voiceOn, 'model': _voiceModel});
+    final json = jsonEncode({
+      'enabled': _voiceOn,
+      'model': _voiceModel,
+      'labels': _voiceLabels,
+      if (_voiceRecordedAt != null) 'recorded_at': _voiceRecordedAt,
+    });
     await sealedSave(path: _voiceFile, keyHex: await _voiceKey(), plain: json);
+  }
+
+  /// What the profile's speech service hears in the takes of each command:
+  /// the reading most takes agree on. Nothing is sent without a key, or
+  /// when the user has not allowed that service; the command then stays
+  /// unnamed until the user writes it down.
+  Future<Map<String, String>> _voiceWords(Map<String, List<Float32List>> takes) async {
+    final words = <String, String>{};
+    try {
+      final key = await _secure.read(key: 'api_key:$_provider') ?? '';
+      if (key.isEmpty) return words;
+      final consent = await consentLoad(path: _consentPath);
+      final settings = jsonEncode(_settings);
+      for (final which in ['start', 'stop']) {
+        final heard = <String, int>{};
+        for (final take in takes[which] ?? const <Float32List>[]) {
+          try {
+            final text = (await voiceTranscribeTake(
+              settingsJson: settings,
+              consentJson: consent,
+              credential: key,
+              take: take,
+            ))
+                .trim()
+                .replaceAll(RegExp(r'[.!?,;:]+$'), '');
+            if (text.isNotEmpty) heard[text] = (heard[text] ?? 0) + 1;
+          } catch (_) {
+            // Not allowed, no network, nothing heard: this take says nothing.
+          }
+        }
+        if (heard.isNotEmpty) {
+          words[which] = (heard.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first.key;
+        }
+      }
+    } catch (_) {}
+    return words;
+  }
+
+  /// How many recordings a command has and how long they are on average
+  /// (read from the stored sound patterns: 10 ms per frame).
+  (int, double)? _voiceFacts(String which) {
+    try {
+      final m = (jsonDecode(_voiceModel ?? '') as Map<String, dynamic>)[which] as Map<String, dynamic>;
+      return ((m['templates'] as List).length, ((m['mean_frames'] as num).toDouble()) / 100.0);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// One command: its name, what the user wrote down for it (or a note
+  /// that nothing is written down yet), the facts of its recordings, and
+  /// a pencil to write the words down.
+  Widget _voiceCommandRow(String which) {
+    final label = (_voiceLabels[which] ?? '').trim();
+    final facts = _voiceFacts(which);
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      leading: Icon(which == 'start' ? Icons.play_circle_outline : Icons.stop_circle_outlined),
+      title: Text('${_t[which == 'start' ? 'voiceStartCmd' : 'voiceStopCmd']}: '
+          '${label.isEmpty ? _t['voiceCmdUnnamed'] : '„$label“'}'),
+      subtitle: facts == null
+          ? null
+          : Text(_t.fmt('voiceCmdFacts', {'n': facts.$1, 's': facts.$2.toStringAsFixed(1)})),
+      trailing: IconButton(
+        icon: const Icon(Icons.edit_outlined),
+        tooltip: _t['voiceCmdName'],
+        onPressed: () async {
+          final ctl = TextEditingController(text: label);
+          final text = await showDialog<String>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: Text(_t[which == 'start' ? 'voiceStartCmd' : 'voiceStopCmd']),
+              content: TextField(
+                controller: ctl,
+                autofocus: true,
+                decoration: InputDecoration(labelText: _t['voiceCmdName'], suffixIcon: _clearX(ctl)),
+                onSubmitted: (v) => Navigator.pop(ctx, v),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: Text(_t['cancel'])),
+                FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text), child: Text(_t['save'])),
+              ],
+            ),
+          );
+          if (text == null) return;
+          _voiceLabels[which] = text.trim();
+          await _saveVoice();
+          if (mounted) setState(() {});
+        },
+      ),
+    );
   }
 
   /// Tell the engine; a voice start dictates with the current settings.
@@ -1072,45 +1180,51 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       final takes = <String, List<Float32List>>{'start': [], 'stop': []};
+      // How often a command had to be recorded again: each repeat gives
+      // the three takes more room to differ, so the recording can always
+      // be finished.
+      var repeats = 0;
       for (final word in ['start', 'stop']) {
         final label = _t[word == 'start' ? 'wordStart' : 'wordStop'];
-        if (word == 'stop') {
-          await show(_t['startLearned'], _StepKind.ok, 2500);
-        }
         var retry = false;
+        var again = 0;
         while (!cancelled && takes[word]!.length < 3) {
           final n = takes[word]!.length + 1;
-          await show(
-            _t.fmt(
-              retry
-                  ? 'sayWordRetry'
-                  : n == 1
-                      ? 'sayWordNow'
-                      : 'sayWordMore',
-              {'d': detail, 'l': label, 'n': n},
-            ),
-            retry ? _StepKind.retry : _StepKind.listening,
+          final prompt = _t.fmt(
+            retry
+                ? 'sayWordRetry'
+                : n == 1
+                    ? 'sayWordNow'
+                    : 'sayWordMore',
+            {'d': detail, 'l': label, 'n': n},
           );
           try {
-            // A slow speaker's two-word command needs time; the room is
-            // measured first as well.
-            final take = await voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 12);
+            // The microphone opens and measures the room for a moment;
+            // what is said in that moment is lost. So the prompt stands
+            // still first and shows the running bar only when the take
+            // really counts. (A slow speaker's two-word command needs
+            // time, hence the long wait.)
+            final recording = voiceRecordTake(settingsJson: jsonEncode(_settings), timeoutSecs: 12);
+            recording.ignore();
+            await show(prompt, retry ? _StepKind.retry : _StepKind.info, 900);
+            if (!cancelled) await show(prompt, _StepKind.listening);
+            final take = await recording;
             if (cancelled) break;
             takes[word]!.add(take);
             retry = false;
-            await show(_t.fmt('understood', {'n': n}), _StepKind.ok, 1300);
           } catch (e) {
             if (cancelled) break;
             retry = true;
             detail = '$e'.replaceFirst(RegExp(r'^.*?(nothing heard|heard something)'), r'$1');
-            await show(_t.fmt('notClear', {'d': detail}), _StepKind.retry, 2000);
           }
           if (!cancelled && takes[word]!.length == 3) {
             try {
-              await voiceCheckWord(takes: takes[word]!);
+              await voiceCheckWord(takes: takes[word]!, attempt: again);
             } catch (e) {
               takes[word]!.clear();
               retry = false;
+              again++;
+              if (again > repeats) repeats = again;
               // Say what was wrong: too short is not "too different".
               final short = '$e'.contains('too short');
               await show(short ? _t['voiceErrShort'] : _t.fmt('tooDifferent', {'l': label}), _StepKind.retry, 3000);
@@ -1125,8 +1239,12 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       await show(_t['learningWords'], _StepKind.listening);
       try {
-        _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!);
+        _voiceModel = await voiceTrain(startTakes: takes['start']!, stopTakes: takes['stop']!, attempt: repeats);
         _voiceOn = true;
+        _voiceRecordedAt = DateTime.now().toIso8601String().substring(0, 10);
+        // The words, as the speech service hears them (the user can
+        // change them): a new recording gets new words.
+        _voiceLabels = await _voiceWords(takes);
         await _saveVoice();
         await show(_t['voiceDone'], _StepKind.ok, 2500);
         if (mounted && !cancelled) Navigator.of(context).pop();
@@ -1193,6 +1311,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
+            // The two commands as they are defined right now.
+            if (_voiceModel != null) ...[
+              _voiceCommandRow('start'),
+              _voiceCommandRow('stop'),
+              if (_voiceRecordedAt != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(_t.fmt('voiceCmdRecorded', {'d': _voiceRecordedAt}),
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+            ],
             OutlinedButton(
               onPressed: _trainVoice,
               child: Text(_t[_voiceModel == null ? 'voiceRecord' : 'voiceRecordAgain']),
@@ -1246,6 +1375,37 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _stop() => _engine.stop();
+
+  /// The x at the end of a text field: empties it (and tells the field's
+  /// own change handler, when it has one). Shown only while there is text.
+  Widget _clearX(TextEditingController? c, {ValueChanged<String>? onChanged}) {
+    if (c == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: c,
+      builder: (_, v, _) => v.text.isEmpty
+          ? const SizedBox.shrink()
+          : IconButton(
+              icon: const Icon(Icons.clear),
+              tooltip: _t['clearText'],
+              onPressed: () {
+                c.clear();
+                onChanged?.call('');
+              },
+            ),
+    );
+  }
+
+  /// The profile's own words for the recogniser changed: kept in the
+  /// settings and saved shortly after, so no Enter or click elsewhere is
+  /// needed.
+  void _vocabChanged(Map opts, String v) {
+    final o = Map<String, dynamic>.from(opts);
+    o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
+    (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
+    _vocabDirty = true;
+    _vocabTimer?.cancel();
+    _vocabTimer = Timer(const Duration(milliseconds: 600), _saveVocab);
+  }
 
   /// One message at a time: a new one takes the place of whatever is
   /// showing or waiting, instead of queueing behind it — queued messages
@@ -1813,12 +1973,19 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               controller: _nameCtl,
               enabled: !isDefault,
-              decoration: InputDecoration(labelText: _t['profileName'], helperText: isDefault ? _t['defaultFixedName'] : null),
+              decoration: InputDecoration(
+                labelText: _t['profileName'],
+                helperText: isDefault ? _t['defaultFixedName'] : null,
+                suffixIcon: isDefault ? null : _clearX(_nameCtl, onChanged: (v) => setState(() => p['title'] = v)),
+              ),
               onChanged: (v) => setState(() => p['title'] = v),
             ),
             TextField(
               controller: _subCtl,
-              decoration: InputDecoration(labelText: _t['profileSubtitle']),
+              decoration: InputDecoration(
+                labelText: _t['profileSubtitle'],
+                suffixIcon: _clearX(_subCtl, onChanged: (v) => setState(() => p['subtitle'] = v)),
+              ),
               onChanged: (v) => setState(() => p['subtitle'] = v),
             ),
             const SizedBox(height: 16),
@@ -2104,7 +2271,11 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 child: TextField(
                   controller: _trainCtl,
-                  decoration: InputDecoration(labelText: _t['wordToTrain'], hintText: _t['wordHint']),
+                  decoration: InputDecoration(
+                    labelText: _t['wordToTrain'],
+                    hintText: _t['wordHint'],
+                    suffixIcon: _clearX(_trainCtl, onChanged: (_) => setState(() {})),
+                  ),
                   onChanged: (_) => setState(() {}),
                   onSubmitted: (_) => hasKey ? _trainWord(_trainCtl.text.trim()) : null,
                 ),
@@ -2203,7 +2374,11 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_provider == 'azure')
               TextField(
                 controller: _regionCtl,
-                decoration: InputDecoration(labelText: _t['azureRegion'], helperText: _t['azureRegionHelper']),
+                decoration: InputDecoration(
+                  labelText: _t['azureRegion'],
+                  helperText: _t['azureRegionHelper'],
+                  suffixIcon: _clearX(_regionCtl),
+                ),
               ),
             Row(
               children: [
@@ -2218,6 +2393,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         'azure' => _t['azureKeyHelper'],
                         _ => null,
                       },
+                      suffixIcon: _clearX(_keyCtl),
                     ),
                   ),
                 ),
@@ -2377,6 +2553,7 @@ class _HomeScreenState extends State<HomeScreen> {
             decoration: InputDecoration(
               labelText: stored ? _t['newKey'] : _t.fmt('apiKeyFor', {'p': name}),
               helperText: id == 'openai' ? _t['openAiKeyShared'] : null,
+              suffixIcon: _clearX(_correctorKeyCtls[id]),
             ),
             onSubmitted: (_) => _saveCorrectorKey(id),
           ),
@@ -2481,14 +2658,18 @@ class _HomeScreenState extends State<HomeScreen> {
               ]),
               TextField(
                 controller: _ltUserCtl,
-                decoration: InputDecoration(labelText: _t['ltEmail']),
+                decoration: InputDecoration(labelText: _t['ltEmail'], suffixIcon: _clearX(_ltUserCtl)),
               ),
               Row(children: [
                 Expanded(
                   child: TextField(
                     controller: _ltKeyCtl,
                     obscureText: true,
-                    decoration: InputDecoration(labelText: _t['apiKey'], hintText: _t['ltKeyHint']),
+                    decoration: InputDecoration(
+                      labelText: _t['apiKey'],
+                      hintText: _t['ltKeyHint'],
+                      suffixIcon: _clearX(_ltKeyCtl),
+                    ),
                     onSubmitted: (_) => _saveLtKey(),
                   ),
                 ),
@@ -2506,7 +2687,14 @@ class _HomeScreenState extends State<HomeScreen> {
             if (corrector == 'openai' || corrector == 'anthropic')
               TextField(
                 controller: aiModelCtl,
-                decoration: InputDecoration(labelText: _t['aiModel'], helperText: _t['aiModelHelper']),
+                decoration: InputDecoration(
+                  labelText: _t['aiModel'],
+                  helperText: _t['aiModelHelper'],
+                  suffixIcon: _clearX(aiModelCtl, onChanged: (_) {
+                    _text['ai_model'] = '';
+                    _saveSettings();
+                  }),
+                ),
                 onSubmitted: (v) {
                   _text['ai_model'] = v.trim();
                   _saveSettings();
@@ -2604,16 +2792,12 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               controller: _vocabCtl,
               focusNode: _vocabFocus,
-              decoration: InputDecoration(labelText: _t['vocabLabel'], helperText: _t['vocabHelper']),
-              onChanged: (v) {
-                final o = Map<String, dynamic>.from(opts);
-                o['keywords'] = v.split(',').map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
-                (_settings['providers']['options'] as Map<String, dynamic>)[_provider] = o;
-                _vocabDirty = true;
-                // Saved while typing, so no Enter or click elsewhere is needed.
-                _vocabTimer?.cancel();
-                _vocabTimer = Timer(const Duration(milliseconds: 600), _saveVocab);
-              },
+              decoration: InputDecoration(
+                labelText: _t['vocabLabel'],
+                helperText: _t['vocabHelper'],
+                suffixIcon: _clearX(_vocabCtl, onChanged: (v) => _vocabChanged(opts, v)),
+              ),
+              onChanged: (v) => _vocabChanged(opts, v),
               onSubmitted: (_) => _saveVocab(),
               onEditingComplete: _saveVocab,
               onTapOutside: (_) {
@@ -3033,7 +3217,11 @@ class _HomeScreenState extends State<HomeScreen> {
             if (replaying) ...[
               TextField(
                 controller: _replayCtl,
-                decoration: InputDecoration(labelText: _t['wavLabel'], helperText: _t['wavHelper']),
+                decoration: InputDecoration(
+                  labelText: _t['wavLabel'],
+                  helperText: _t['wavHelper'],
+                  suffixIcon: _clearX(_replayCtl),
+                ),
                 onSubmitted: (_) => _saveReplayPath(),
               ),
               Align(

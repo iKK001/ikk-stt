@@ -26,10 +26,17 @@ const AMBIGUITY_MARGIN: f32 = 0.85;
 const MIN_THRESHOLD: f32 = 23.0;
 /// One take much further from the others than they are from each other
 /// (noise, a cough, a different word) makes the set unusable ...
-const CONSISTENCY_RATIO: f32 = 2.2;
+const CONSISTENCY_RATIO: f32 = 3.0;
 /// ... unless it is still close enough to be the same word: two nearly
 /// identical takes must not turn a good third one into a reject.
-const CONSISTENT_ENOUGH: f32 = 20.0;
+/// (It was 20, below the limit a heard word is accepted at: three good
+/// takes of a short word, which spread more, were refused again and again.)
+const CONSISTENT_ENOUGH: f32 = 28.0;
+/// Each time the user had to record a command again, the check gives this
+/// much more room; from the third repeat on any three takes pass, so the
+/// recording can always be finished.
+const LENIENCY_STEP: f32 = 8.0;
+const LENIENCY_FREE: u32 = 3;
 /// Utterances much shorter or longer than the takes are not the word.
 const DURATION_RANGE: (f32, f32) = (0.5, 2.0);
 
@@ -57,9 +64,15 @@ pub struct VoiceCommands {
 impl VoiceCommands {
     /// Train both words from their takes (16 kHz mono each).
     pub fn train(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>]) -> Result<Self, WakeError> {
+        Self::train_lenient(start_takes, stop_takes, 0)
+    }
+
+    /// As [`Self::train`]; `leniency`: how often the user already had to
+    /// record a command again (the takes may differ more each time).
+    pub fn train_lenient(start_takes: &[Vec<f32>], stop_takes: &[Vec<f32>], leniency: u32) -> Result<Self, WakeError> {
         let ex = Extractor::new();
-        let (start, _) = CommandModel::train_measured(&ex, start_takes)?;
-        let (stop, _) = CommandModel::train_measured(&ex, stop_takes)?;
+        let (start, _) = CommandModel::train_measured(&ex, start_takes, leniency)?;
+        let (stop, _) = CommandModel::train_measured(&ex, stop_takes, leniency)?;
         // Told apart the way the spotter decides: a take of one command
         // must be closer to its own command (at worst `worst`) than to the
         // other one by the ambiguity margin. The acceptance thresholds do
@@ -85,7 +98,31 @@ impl VoiceCommands {
     /// Check the takes of one word right after recording them, so a bad
     /// take can be repeated before the other word is recorded.
     pub fn check_word(takes: &[Vec<f32>]) -> Result<(), WakeError> {
-        CommandModel::train(&Extractor::new(), takes).map(|_| ())
+        Self::check_word_lenient(takes, 0)
+    }
+
+    /// As [`Self::check_word`], with more room after each repeat.
+    pub fn check_word_lenient(takes: &[Vec<f32>], leniency: u32) -> Result<(), WakeError> {
+        CommandModel::train_measured(&Extractor::new(), takes, leniency).map(|_| ())
+    }
+
+    /// The smallest and the largest distance between the takes of one
+    /// command, for a log line that explains a refusal.
+    pub fn spread(takes: &[Vec<f32>]) -> Option<(f32, f32)> {
+        let ex = Extractor::new();
+        let t: Vec<Vec<Vec<f32>>> = takes
+            .iter()
+            .map(|t| ex.utterance(t).into_iter().map(|f| f.to_vec()).collect())
+            .collect();
+        let (mut best, mut worst) = (f32::INFINITY, 0f32);
+        for i in 0..t.len() {
+            for j in i + 1..t.len() {
+                let d = dtw(&t[i], &t[j]);
+                best = best.min(d);
+                worst = worst.max(d);
+            }
+        }
+        (worst.is_finite() && best.is_finite()).then_some((best, worst))
     }
 
     pub fn to_json(&self) -> String {
@@ -98,12 +135,8 @@ impl VoiceCommands {
 }
 
 impl CommandModel {
-    fn train(ex: &Extractor, takes: &[Vec<f32>]) -> Result<Self, WakeError> {
-        Self::train_measured(ex, takes).map(|(m, _)| m)
-    }
-
     /// The model and the worst distance between the takes.
-    fn train_measured(ex: &Extractor, takes: &[Vec<f32>]) -> Result<(Self, f32), WakeError> {
+    fn train_measured(ex: &Extractor, takes: &[Vec<f32>], leniency: u32) -> Result<(Self, f32), WakeError> {
         if takes.len() < MIN_TAKES {
             return Err(WakeError::TooFewTakes(MIN_TAKES));
         }
@@ -124,7 +157,9 @@ impl CommandModel {
                 best = best.min(d);
             }
         }
-        if !worst.is_finite() || (worst > best.max(1e-3) * CONSISTENCY_RATIO && worst > CONSISTENT_ENOUGH) {
+        let enough = CONSISTENT_ENOUGH + LENIENCY_STEP * leniency as f32;
+        let odd_one_out = worst > best.max(1e-3) * CONSISTENCY_RATIO && worst > enough;
+        if !worst.is_finite() || (odd_one_out && leniency < LENIENCY_FREE) {
             return Err(WakeError::TakesInconsistent);
         }
         let mean_frames = templates.iter().map(|t| t.len() as f32).sum::<f32>() / templates.len() as f32;

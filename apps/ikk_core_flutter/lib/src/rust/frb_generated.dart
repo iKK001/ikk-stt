@@ -72,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -828493697;
+  int get rustContentHash => 2049766035;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -258,7 +258,10 @@ abstract class RustLibApi extends BaseApi {
     required int timeoutSecs,
   });
 
-  Future<void> crateApiVoiceVoiceCheckWord({required List<Float32List> takes});
+  Future<void> crateApiVoiceVoiceCheckWord({
+    required List<Float32List> takes,
+    required int attempt,
+  });
 
   Future<Float32List> crateApiVoiceVoiceRecordTake({
     required String settingsJson,
@@ -268,6 +271,14 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiVoiceVoiceTrain({
     required List<Float32List> startTakes,
     required List<Float32List> stopTakes,
+    required int attempt,
+  });
+
+  Future<String> crateApiVoiceVoiceTranscribeTake({
+    required String settingsJson,
+    required String consentJson,
+    required String credential,
+    required List<double> take,
   });
 
   RustArcIncrementStrongCountFnType
@@ -1626,12 +1637,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiVoiceVoiceCheckWord({required List<Float32List> takes}) {
+  Future<void> crateApiVoiceVoiceCheckWord({
+    required List<Float32List> takes,
+    required int attempt,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_list_list_prim_f_32_strict(takes, serializer);
+          sse_encode_u_32(attempt, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1644,14 +1659,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiVoiceVoiceCheckWordConstMeta,
-        argValues: [takes],
+        argValues: [takes, attempt],
         apiImpl: this,
       ),
     );
   }
 
   TaskConstMeta get kCrateApiVoiceVoiceCheckWordConstMeta =>
-      const TaskConstMeta(debugName: "voice_check_word", argNames: ["takes"]);
+      const TaskConstMeta(
+        debugName: "voice_check_word",
+        argNames: ["takes", "attempt"],
+      );
 
   @override
   Future<Float32List> crateApiVoiceVoiceRecordTake({
@@ -1692,6 +1710,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<String> crateApiVoiceVoiceTrain({
     required List<Float32List> startTakes,
     required List<Float32List> stopTakes,
+    required int attempt,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1699,6 +1718,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_list_list_prim_f_32_strict(startTakes, serializer);
           sse_encode_list_list_prim_f_32_strict(stopTakes, serializer);
+          sse_encode_u_32(attempt, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1711,7 +1731,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiVoiceVoiceTrainConstMeta,
-        argValues: [startTakes, stopTakes],
+        argValues: [startTakes, stopTakes, attempt],
         apiImpl: this,
       ),
     );
@@ -1719,8 +1739,47 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiVoiceVoiceTrainConstMeta => const TaskConstMeta(
     debugName: "voice_train",
-    argNames: ["startTakes", "stopTakes"],
+    argNames: ["startTakes", "stopTakes", "attempt"],
   );
+
+  @override
+  Future<String> crateApiVoiceVoiceTranscribeTake({
+    required String settingsJson,
+    required String consentJson,
+    required String credential,
+    required List<double> take,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(settingsJson, serializer);
+          sse_encode_String(consentJson, serializer);
+          sse_encode_String(credential, serializer);
+          sse_encode_list_prim_f_32_loose(take, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 48,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiVoiceVoiceTranscribeTakeConstMeta,
+        argValues: [settingsJson, consentJson, credential, take],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVoiceVoiceTranscribeTakeConstMeta =>
+      const TaskConstMeta(
+        debugName: "voice_transcribe_take",
+        argNames: ["settingsJson", "consentJson", "credential", "take"],
+      );
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_IkkEngine => wire
@@ -1842,6 +1901,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return (raw as List<dynamic>)
         .map(dco_decode_list_prim_f_32_strict)
         .toList();
+  }
+
+  @protected
+  List<double> dco_decode_list_prim_f_32_loose(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as List<double>;
   }
 
   @protected
@@ -2036,6 +2101,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ans_.add(sse_decode_list_prim_f_32_strict(deserializer));
     }
     return ans_;
+  }
+
+  @protected
+  List<double> sse_decode_list_prim_f_32_loose(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getFloat32List(len_);
   }
 
   @protected
@@ -2240,6 +2312,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     for (final item in self) {
       sse_encode_list_prim_f_32_strict(item, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_list_prim_f_32_loose(
+    List<double> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putFloat32List(
+      self is Float32List ? self : Float32List.fromList(self),
+    );
   }
 
   @protected
