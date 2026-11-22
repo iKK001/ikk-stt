@@ -47,7 +47,7 @@ jobs:
         shell: pwsh
         run: |
           $out = 'apps/reference_app/build/windows/x64/runner/Release'
-          if (-not (Test-Path "$out/reference_app.exe")) { throw 'the build produced no reference_app.exe' }
+          if (-not (Test-Path "$out/ikk-stt.exe")) { throw 'the build produced no ikk-stt.exe' }
           # The Visual C++ runtime the program needs, so it starts on a
           # machine that never had Visual Studio or the redistributable.
           foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
@@ -86,7 +86,7 @@ jobs:
               '',
               '    irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex',
               '',
-              'Or download the zip, unpack it anywhere and start reference_app.exe.'
+              'Or download the zip, unpack it anywhere and start ikk-stt.exe.'
             ) -join "`n"
             gh release create $tag $files --target '${{ github.sha }}' --title 'ikk-stt ${{ steps.version.outputs.label }}' --notes $notes
           }

@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$exe    = 'reference_app.exe'
+$exe    = 'ikk-stt.exe'
 $name   = 'ikk-stt'
 $target = Join-Path $env:LOCALAPPDATA "Programs\$name"
 

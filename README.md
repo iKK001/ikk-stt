@@ -24,7 +24,7 @@ irm https://raw.githubusercontent.com/iKK001/ikk-stt/main/uninstall.ps1 | iex
 
 The program is not code-signed: Windows may ask once whether to run it.
 Without PowerShell, download `ikk-stt-windows-x64.zip` from the releases
-page, unpack it anywhere and start `reference_app.exe`.
+page, unpack it anywhere and start `ikk-stt.exe`.
 
 Releases are made by hand: Actions tab > release > "Run workflow".
 

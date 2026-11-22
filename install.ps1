@@ -14,7 +14,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $repo    = 'iKK001/ikk-stt'
 $asset   = 'ikk-stt-windows-x64.zip'
-$exe     = 'reference_app.exe'
+$exe     = 'ikk-stt.exe'
 $name    = 'ikk-stt'
 $target  = Join-Path $env:LOCALAPPDATA "Programs\$name"
 $base    = "https://github.com/$repo/releases/latest/download"
