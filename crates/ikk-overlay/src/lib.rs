@@ -22,6 +22,12 @@ pub type OnClicks = Arc<dyn Fn(Vec<(f64, f64)>) + Send + Sync>;
 /// Called (on a background thread) with the buttons' new top-left corner
 /// after the user dragged them (screen points, origin top-left).
 pub type OnMoved = Arc<dyn Fn(f64, f64) + Send + Sync>;
+/// Called (on a background thread) with the candidate the user clicked
+/// in the list under the buttons.
+pub type OnChoice = Arc<dyn Fn(String) + Send + Sync>;
+/// A list of candidates for the platform to show: the candidates, the
+/// screen point of the word they belong to (if known) and who hears the pick.
+pub type Choices = (Vec<String>, Option<(f64, f64)>, OnChoice);
 /// Called (on a background thread) when the user flips the switch:
 /// `true` = audio correction (replace by voice), `false` = AI correction.
 pub type OnMode = Arc<dyn Fn(bool) + Send + Sync>;
@@ -94,6 +100,40 @@ pub fn set_hint(text: Option<&str>) {
     }
 }
 
+/// A list of candidates right under the screen point `at` — the middle of
+/// the lower edge of the word they belong to, in the coordinates of the
+/// captured clicks — or above the word when there is no room below;
+/// without a point, under the buttons. A click on one calls `on_pick` with it and takes the list
+/// away. A click anywhere else takes it away as well — the marked text it
+/// belongs to is then no longer marked — and so do 30 s without a click.
+/// Returns false where there is no floating panel.
+pub fn set_choices(choices: Vec<String>, at: Option<(f64, f64)>, on_pick: OnChoice) -> bool {
+    if choices.is_empty() {
+        clear_choices();
+        return false;
+    }
+    set_hint(None);
+    let picked: OnChoice = Arc::new(move |text| {
+        cancel_capture();
+        on_pick(text);
+    });
+    platform::set_choices(Some((choices, at, picked)));
+    let armed = capture_clicks(
+        1,
+        std::time::Duration::from_secs(30),
+        Arc::new(|_| platform::set_choices(None)),
+    );
+    if !armed {
+        platform::set_choices(None);
+    }
+    armed
+}
+
+/// Take the list of candidates away.
+pub fn clear_choices() {
+    platform::set_choices(None);
+}
+
 /// Which half of the switch is lit: audio correction (true) or AI (false).
 pub fn set_audio_mode(on: bool) {
     platform::set_audio_mode(on);
@@ -148,6 +188,13 @@ pub fn set_range_mode(mode: RangeMode) {
 /// click names the word, or a second press names the range.
 pub fn set_replace_armed(on: bool) {
     platform::set_replace_armed(on);
+}
+
+/// The start button drawn grey: what it would start is not available
+/// right now (word suggestions without a text model's key). A click
+/// still reaches the shell, which says why.
+pub fn set_start_disabled(on: bool) {
+    platform::set_start_disabled(on);
 }
 
 /// A translucent yellow mark over the text that is being replaced
@@ -360,6 +407,8 @@ pub fn cancel_capture() -> bool {
     let cancelled = platform::cancel_capture();
     if cancelled {
         set_hint(None);
+        // A list of candidates waits on the same capture: it goes as well.
+        platform::set_choices(None);
     }
     cancelled
 }

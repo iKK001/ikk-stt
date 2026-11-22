@@ -21,6 +21,7 @@ pub fn correct_request(settings: &Settings) -> crate::CorrectRequest {
         model: settings.text.ai_model.clone(),
         language: settings.providers.language.clone(),
         host_text: None,
+        host_around: None,
     }
 }
 

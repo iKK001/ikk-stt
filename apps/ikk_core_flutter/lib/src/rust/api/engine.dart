@@ -9,6 +9,10 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<IkkEngine>>
 abstract class IkkEngine implements RustOpaqueInterface {
+  /// The candidate the user picked: it goes over the marked part
+  /// (`HostReplace` for a host).
+  void applyChoice({required String text});
+
   void clearSessionText();
 
   /// Phones: correct text the host selected itself (`HostReplace` answers).
@@ -97,6 +101,11 @@ abstract class IkkEngine implements RustOpaqueInterface {
   /// (counts while shrinking is on). Out-of-range values are pulled in.
   void setFloatingSize({required int sizePercent, required int growthPercent});
 
+  /// Whether word suggestions can be asked for (a text model is the
+  /// corrector and its key is stored): without, the start button is
+  /// grey while that range is chosen.
+  void setSuggestionsAvailable({required bool available});
+
   /// Offline voice commands on (model JSON from `voice_train`) or off
   /// (`None`). `settings_json`: what a voice start dictates with.
   void setVoiceCommands({String? commandsJson, required String settingsJson});
@@ -117,6 +126,15 @@ abstract class IkkEngine implements RustOpaqueInterface {
 
   /// The app's stop button: a click, so the voice listener goes off too.
   void stop();
+
+  /// Word suggestions for text a host marked itself, with the
+  /// text around it; the candidates come as the `WordChoices` event.
+  void suggestHost({
+    required String settingsJson,
+    required String original,
+    required String before,
+    required String after,
+  });
 
   void transferToTarget();
 }

@@ -83,6 +83,14 @@ pub fn selection_bounds() -> Option<(f64, f64, f64, f64)> {
     platform::selection_bounds()
 }
 
+/// The focused app's selected text with up to `before` characters in
+/// front of it and `after` behind it, read from its accessibility tree:
+/// nothing is selected, copied or moved for it. `None` when the app does
+/// not tell (then the caller has to read with the keyboard).
+pub fn selection_around(before: usize, after: usize) -> Option<(String, String, String)> {
+    platform::selection_around(before, after)
+}
+
 pub fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }

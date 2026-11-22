@@ -766,6 +766,7 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 language,
                 host_text: None,
+                host_around: None,
             };
             {
                 run_correct(corrector, key, req, delay, between).await

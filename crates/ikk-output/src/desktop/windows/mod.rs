@@ -339,6 +339,49 @@ fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The focused element's selected text and the text around it through UI
+/// Automation's text pattern: copies of the selected range are collapsed
+/// to its start and its end and widened by characters; nothing in the
+/// control is selected or moved for it.
+pub fn selection_around(before: usize, after: usize) -> Option<(String, String, String)> {
+    use windows::Win32::UI::Accessibility::{
+        TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, TextUnit_Character,
+    };
+    uia::with_focused(|el| {
+        let pattern = uia::text_pattern(el).ok_or(uia::UiaError::NoText)?;
+        unsafe {
+            let ranges = pattern.GetSelection().map_err(|_| uia::UiaError::NoText)?;
+            if ranges.Length().unwrap_or(0) < 1 {
+                return Err(uia::UiaError::NoText);
+            }
+            let range = ranges.GetElement(0).map_err(|_| uia::UiaError::NoText)?;
+            let marked = range.GetText(400).map_err(|_| uia::UiaError::NoText)?.to_string();
+            if marked.trim().is_empty() {
+                return Err(uia::UiaError::NoText);
+            }
+            // In front: both ends at the selection's start, the start moved back.
+            let front = range.Clone().map_err(|_| uia::UiaError::NoText)?;
+            front
+                .MoveEndpointByRange(TextPatternRangeEndpoint_End, &range, TextPatternRangeEndpoint_Start)
+                .map_err(|_| uia::UiaError::NoText)?;
+            let _ = front.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -(before as i32));
+            let before_text = front.GetText(before as i32).map(|t| t.to_string()).unwrap_or_default();
+            // Behind: both ends at the selection's end, the end moved on.
+            let back = range.Clone().map_err(|_| uia::UiaError::NoText)?;
+            back.MoveEndpointByRange(TextPatternRangeEndpoint_Start, &range, TextPatternRangeEndpoint_End)
+                .map_err(|_| uia::UiaError::NoText)?;
+            let _ = back.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, after as i32);
+            let after_text = back.GetText(after as i32).map(|t| t.to_string()).unwrap_or_default();
+            Ok((
+                unify_newlines(&before_text),
+                unify_newlines(&marked),
+                unify_newlines(&after_text),
+            ))
+        }
+    })
+    .ok()
+}
+
 /// The focused element's selection rectangle through UI Automation's text
 /// pattern (the first rectangle of the first selected range), in screen
 /// pixels. `None` when the control has no text pattern or no selection.

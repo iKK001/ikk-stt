@@ -284,6 +284,34 @@ impl IkkEngine {
         self.inner.remember_settings(&settings_json);
         self.inner.engine.correct_host(&settings_json, &original)
     }
+    /// Whether word suggestions can be asked for (a text model is the
+    /// corrector and its key is stored): without, the start button is
+    /// grey while that range is chosen.
+    #[frb(sync)]
+    pub fn set_suggestions_available(&self, available: bool) {
+        self.inner.set_suggestions_available(available);
+    }
+    /// Word suggestions for text a host marked itself, with the
+    /// text around it; the candidates come as the `WordChoices` event.
+    #[frb(sync)]
+    pub fn suggest_host(
+        &self,
+        settings_json: String,
+        original: String,
+        before: String,
+        after: String,
+    ) -> Result<(), String> {
+        self.inner.remember_settings(&settings_json);
+        self.inner
+            .engine
+            .suggest_host(&settings_json, &original, &before, &after)
+    }
+    /// The candidate the user picked: it goes over the marked part
+    /// (`HostReplace` for a host).
+    #[frb(sync)]
+    pub fn apply_choice(&self, text: String) -> Result<(), String> {
+        self.inner.engine.apply_choice(&text)
+    }
     /// The correction button from the app: correct the chosen range in the
     /// focused app with the chosen corrector.
     #[frb(sync)]

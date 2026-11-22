@@ -163,6 +163,11 @@ impl CorrectionRange {
     }
 }
 
+/// Word suggestions: how much of the text in front of the marked part and
+/// after it goes to the model, in characters.
+const AROUND_BEFORE: usize = 400;
+const AROUND_AFTER: usize = 200;
+
 /// An on-demand correction (the correction button next to the microphone).
 #[derive(Debug, Clone)]
 pub struct CorrectRequest {
@@ -170,6 +175,9 @@ pub struct CorrectRequest {
     /// selected the text and hands it over; the answer goes back as
     /// [`EngineEvent::HostReplace`] instead of a paste.
     pub host_text: Option<String>,
+    /// Word suggestions through a host: the text in front of the marked
+    /// part and after it, as far as the host can read it.
+    pub host_around: Option<(String, String)>,
     pub range: CorrectionRange,
     /// Corrector id ("languagetool", "openai", "anthropic").
     pub corrector: String,
@@ -279,6 +287,18 @@ pub enum EngineCommand {
     },
     /// Internal: the spoken replacement has settled (or timed out).
     ReplaceTick(u64),
+    /// Word suggestions: read the selection in the app in front and ask
+    /// the text model what else may have been said there.
+    SuggestWords(CorrectRequest),
+    /// Internal: the text model answered with candidates.
+    WordChoicesReady {
+        original: String,
+        bounds: Option<(f64, f64, f64, f64)>,
+        result: Result<Vec<String>, String>,
+    },
+    /// The user picked a candidate (see [`EngineEvent::WordChoices`]): it
+    /// goes over the selection, which is still the marked part.
+    ApplyChoice(String),
     /// The corrector answered for a range correction.
     ApplyRangeCorrection {
         original: String,
@@ -333,6 +353,18 @@ pub enum EngineEvent {
     Corrected {
         changed: bool,
         chars: usize,
+    },
+    /// Word suggestions: what else may have been said in place of the
+    /// marked `word`, the most likely first; empty when the model found
+    /// nothing. The marked part is still selected: the shell offers the
+    /// candidates and answers with [`EngineCommand::ApplyChoice`].
+    WordChoices {
+        word: String,
+        choices: Vec<String>,
+        /// Where the marked part stands on the screen (x, y, width,
+        /// height; origin top-left), when the program in front tells.
+        #[serde(default)]
+        bounds: Option<(f64, f64, f64, f64)>,
     },
     /// A voice command was understood but not carried out (why).
     CommandRefused(String),
@@ -511,6 +543,10 @@ pub struct Engine {
     /// cannot be told), and the language its first word is looked up in.
     range_at_start: Option<bool>,
     range_language: String,
+    /// Word suggestions on offer: the marked part as it was read, and
+    /// whether a host holds it (the pick then goes back as `HostReplace`).
+    choice_original: Option<String>,
+    choice_host: bool,
 }
 
 impl Engine {
@@ -566,6 +602,8 @@ impl Engine {
             language: String::new(),
             range_at_start: None,
             range_language: String::new(),
+            choice_original: None,
+            choice_host: false,
         };
         let task = tokio::spawn(engine.run(cmd_rx));
         EngineHandle {
@@ -731,6 +769,22 @@ impl Engine {
             }
             EngineCommand::ReplaceTick(generation) => {
                 self.replace_tick(generation).await;
+                Ok(())
+            }
+            EngineCommand::SuggestWords(req) => {
+                self.suggest_words(req).await;
+                Ok(())
+            }
+            EngineCommand::WordChoicesReady {
+                original,
+                bounds,
+                result,
+            } => {
+                self.word_choices_ready(original, bounds, result).await;
+                Ok(())
+            }
+            EngineCommand::ApplyChoice(text) => {
+                self.apply_choice(text).await;
                 Ok(())
             }
             EngineCommand::ApplyRangeCorrection {
@@ -1923,6 +1977,205 @@ impl Engine {
         });
     }
 
+    /// Word suggestions: read the selection, leave it selected, and ask
+    /// the chosen text model for other things that may have been said.
+    async fn suggest_words(&mut self, req: CorrectRequest) {
+        self.choice_original = None;
+        if self.hold.is_some() {
+            self.say_error("suggestions: a correction is running").await;
+            return;
+        }
+        if matches!(self.state, EngineState::AwaitingConsent | EngineState::Error) {
+            self.say_error("suggestions: not while the engine waits for consent or shows an error")
+                .await;
+            return;
+        }
+        // Only a text model can: the on-device corrector that steps in
+        // without a key knows spelling, not what was said.
+        let chosen = self.registry.corrector_named(&req.corrector);
+        let Some(corrector) = chosen.filter(|c| !c.local() && matches!(c.id(), "openai" | "anthropic")) else {
+            self.say_error("suggestions: need-ai-corrector").await;
+            return;
+        };
+        let credential = self
+            .credentials
+            .get(&ProviderId(corrector.id().to_string()))
+            .map(|s| s.expose().to_string());
+        if self.consent.decision(corrector.id()) != Decision::Allowed {
+            let r = recipient_for(corrector.id(), corrector.display_name());
+            let _ = self.events.send(EngineEvent::ConsentRequired(r)).await;
+            return;
+        }
+        if credential.is_none() {
+            self.say_error("suggestions: need-ai-corrector").await;
+            return;
+        }
+        self.hold = Some(String::new());
+        self.correcting = Some(CorrectionRange::Selection);
+        // The marked part and the text around it: from the host that holds
+        // the field, or read from the program in front with the keyboard
+        // (the selection stays and the user's clipboard comes back).
+        self.choice_host = req.host_text.is_some();
+        let selected = match req.host_text.clone() {
+            Some(t) if t.trim().is_empty() => Err("nothing marked".to_string()),
+            Some(t) => Ok((t, req.host_around.clone(), None)),
+            None => tokio::task::spawn_blocking(|| {
+                // First the quiet way: the program's accessibility tree
+                // gives the marked part and the text around it without
+                // anything being selected, copied or moved. (A selection
+                // just made needs a moment to show there.)
+                std::thread::sleep(Duration::from_millis(150));
+                if let Some((before, marked, after)) = range_keys::around_quietly() {
+                    info!("word suggestions: context read from the program, nothing selected for it");
+                    return Ok((marked, Some((before, after)), range_keys::marked_bounds()));
+                }
+                info!("word suggestions: the program does not tell its text; reading with the keyboard");
+                // Otherwise with the keyboard: copy the selection and step
+                // around it (the selection moves visibly for a moment).
+                select_and_copy(CorrectionRange::Selection).map(|(text, prior)| {
+                    let around = range_keys::read_around(&text);
+                    range_keys::give_back_clipboard(prior);
+                    (text, around, range_keys::marked_bounds())
+                })
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string())),
+        };
+        let (original, around, bounds) = match selected {
+            Ok(v) => v,
+            Err(_) => {
+                self.choice_host = false;
+                self.say_error("suggestions: nothing-marked").await;
+                self.end_hold(false).await;
+                return;
+            }
+        };
+        // Where the marked part stands decides the first letter of what
+        // replaces it: from the text in front of it when that was read.
+        let probed = take_context();
+        self.range_at_start = match &around {
+            Some((before, _)) if !before.is_empty() => sentence_start(before),
+            // Nothing in front of it: the very start of the text, unless
+            // the probe of the keyboard way says otherwise.
+            Some(_) => probed.as_deref().and_then(sentence_start).or(Some(true)),
+            None => probed.as_deref().and_then(sentence_start),
+        };
+        self.range_language = req.language.clone();
+        // What the model judges with: the sentences around the marked
+        // part, its place shown by ⟦ ⟧; failing that, the text typed in
+        // this session.
+        let context: String = match &around {
+            Some((before, after)) if !(before.trim().is_empty() && after.trim().is_empty()) => {
+                let skip = before.chars().count().saturating_sub(AROUND_BEFORE);
+                let before: String = before.chars().skip(skip).collect();
+                let after: String = after.chars().take(AROUND_AFTER).collect();
+                format!("{before}⟦{}⟧{after}", original.trim())
+            }
+            _ => {
+                let typed = self.live.text();
+                let skip = typed.chars().count().saturating_sub(600);
+                typed.chars().skip(skip).collect()
+            }
+        };
+        info!(
+            chars = original.chars().count(),
+            context_chars = context.chars().count(),
+            around_read = around.is_some(),
+            bounds_known = bounds.is_some(),
+            host = self.choice_host,
+            corrector = corrector.id(),
+            "asking for word suggestions"
+        );
+        corrector.set_model(&req.model);
+        let (language, tx) = (req.language.clone(), self.self_tx.clone());
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let result = match tokio::time::timeout(
+                RANGE_CORRECTION_TIMEOUT,
+                corrector.suggest(&original, &context, &language, credential.as_deref()),
+            )
+            .await
+            {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err(format!(
+                    "the corrector did not answer within {} s",
+                    RANGE_CORRECTION_TIMEOUT.as_secs()
+                )),
+            };
+            info!(
+                ms = started.elapsed().as_millis() as u64,
+                found = result.as_ref().map_or(0, |c| c.len()),
+                "word suggestions answered"
+            );
+            let _ = tx
+                .send(EngineCommand::WordChoicesReady {
+                    original,
+                    bounds,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    async fn word_choices_ready(
+        &mut self,
+        original: String,
+        bounds: Option<(f64, f64, f64, f64)>,
+        result: Result<Vec<String>, String>,
+    ) {
+        // The field is free again while the user chooses: dictated words
+        // that waited are typed (they go where the selection is, as any
+        // typing would — the shell closes the offer when that happens).
+        self.end_hold(false).await;
+        match result {
+            Ok(choices) => {
+                if !choices.is_empty() {
+                    self.choice_original = Some(original.clone());
+                }
+                let _ = self
+                    .events
+                    .send(EngineEvent::WordChoices {
+                        word: original,
+                        choices,
+                        bounds,
+                    })
+                    .await;
+            }
+            Err(e) => self.say_error(&format!("suggestions: {e}")).await,
+        }
+    }
+
+    /// The chosen candidate goes over the marked part, shaped for its place.
+    async fn apply_choice(&mut self, text: String) {
+        let Some(original) = self.choice_original.take() else {
+            return;
+        };
+        if self.hold.is_some() {
+            self.say_error("suggestions: a correction is running").await;
+            return;
+        }
+        self.hold = Some(String::new());
+        self.correcting = Some(CorrectionRange::Selection);
+        let text = shape_correction(&original, &text, self.range_at_start.take(), &self.range_language);
+        let chars = text.chars().count();
+        let pasted = if std::mem::take(&mut self.choice_host) {
+            // The host holds the marked part and puts the pick over it.
+            let _ = self.events.send(EngineEvent::HostReplace { text }).await;
+            Ok(())
+        } else {
+            tokio::task::spawn_blocking(move || range_keys::paste_choice(&text))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        };
+        match pasted {
+            Ok(()) => {
+                let _ = self.events.send(EngineEvent::Corrected { changed: true, chars }).await;
+            }
+            Err(e) => self.say_error(&format!("suggestions: {e}")).await,
+        }
+        self.end_hold(true).await;
+    }
+
     async fn apply_range_correction(
         &mut self,
         original: String,
@@ -2490,6 +2743,98 @@ mod range_keys {
             restore(prior);
         });
         Ok(())
+    }
+
+    /// Up to `words` words in front of the cursor (`back`) or after it:
+    /// selected word by word, copied, and the cursor put back. `None`
+    /// where there is nothing, or the program did not serve the copy.
+    fn beside_cursor(back: bool, words: usize) -> Option<String> {
+        let _ = d::set_clipboard_text(MARKER);
+        let (out, home) = if back {
+            (Key::Left, Key::Right)
+        } else {
+            (Key::Right, Key::Left)
+        };
+        let reach = Chord::Key(
+            out,
+            Modifiers {
+                shift: true,
+                command: false,
+                word: true,
+            },
+        );
+        let mut text = None;
+        if d::press_chord(reach, words).is_ok() {
+            sleep(Duration::from_millis(80));
+            if d::press_chord(Chord::shortcut('c'), 1).is_ok() {
+                for _ in 0..8 {
+                    sleep(Duration::from_millis(50));
+                    match d::clipboard_text() {
+                        Some(t) if t != MARKER => {
+                            text = Some(t);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Something was selected: back to where the cursor stood, the
+            // end of the selection it started from.
+            if text.is_some() {
+                let _ = d::press_chord(Chord::key(home), 1);
+                sleep(Duration::from_millis(40));
+            }
+        }
+        text
+    }
+
+    /// The text around a selection whose text is `marked`: what stands in
+    /// front of it and after it (some sentences each). The selection is
+    /// the same afterwards. `None` when the selection cannot be stepped
+    /// over safely; the caller restores the clipboard.
+    pub fn read_around(marked: &str) -> Option<(String, String)> {
+        let n = steps(marked)?;
+        // To the start of the selection, and read backwards from there.
+        d::press_chord(Chord::key(Key::Left), 1).ok()?;
+        sleep(Duration::from_millis(40));
+        let before = beside_cursor(true, 40).unwrap_or_default();
+        // Over the marked part, and read on from its end.
+        let _ = d::press_chord(Chord::key(Key::Right), n);
+        sleep(Duration::from_millis(40));
+        let after = beside_cursor(false, 25).unwrap_or_default();
+        // Mark the same characters again.
+        let again = Chord::Key(
+            Key::Left,
+            Modifiers {
+                shift: true,
+                command: false,
+                word: false,
+            },
+        );
+        let _ = d::press_chord(again, n);
+        sleep(Duration::from_millis(60));
+        Some((before, after))
+    }
+
+    /// The marked part with the text in front of it and behind it, from
+    /// the accessibility tree of the program in front: no key is pressed.
+    pub fn around_quietly() -> Option<(String, String, String)> {
+        d::selection_around(super::AROUND_BEFORE, super::AROUND_AFTER)
+    }
+
+    /// Where the marked part stands on the screen, when the program tells.
+    pub fn marked_bounds() -> Option<(f64, f64, f64, f64)> {
+        d::selection_bounds()
+    }
+
+    /// The selection was only read and stays as it is.
+    pub fn give_back_clipboard(prior: Option<String>) {
+        restore(prior);
+    }
+
+    /// Paste over a selection made earlier, keeping the user's clipboard.
+    pub fn paste_choice(text: &str) -> Result<(), String> {
+        paste_over_selection(text, d::clipboard_text())
     }
 
     /// Nothing to change: collapse the selection to its end.

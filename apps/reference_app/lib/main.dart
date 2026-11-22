@@ -228,7 +228,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _listenKeyboard() {
     if (!KeyboardBridge.supported) return;
     KeyboardBridge.setCorrectionRange(_text['correction_range'] as String? ?? 'cursor_to_end');
-    KeyboardBridge.listen((cmd, original) {
+    KeyboardBridge.listen((cmd, original, all) {
       switch (cmd) {
         case 'start':
           if (!_listening) _start();
@@ -244,6 +244,27 @@ class _HomeScreenState extends State<HomeScreen> {
         case 'correct':
           try {
             _engine.correctHost(settingsJson: jsonEncode(_settings), original: original);
+          } catch (e) {
+            KeyboardBridge.done(false);
+            _snack('$e');
+          }
+        case 'suggest':
+          // Word suggestions for the text marked in the keyboard's field.
+          try {
+            _engine.suggestHost(
+              settingsJson: jsonEncode(_settings),
+              original: original,
+              before: all['before'] as String? ?? '',
+              after: all['after'] as String? ?? '',
+            );
+          } catch (e) {
+            KeyboardBridge.status('$e');
+          }
+        case 'choose':
+          // The suggestion tapped on the keyboard: the engine shapes it
+          // for its place and answers with the text to put in.
+          try {
+            _engine.applyChoice(text: original);
           } catch (e) {
             KeyboardBridge.done(false);
             _snack('$e');
@@ -359,6 +380,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _snack(_t.settingsNotSaved('$e'));
       return;
     }
+    _syncSuggestions();
     _applyVoice();
     setState(() {});
   }
@@ -435,7 +457,20 @@ class _HomeScreenState extends State<HomeScreen> {
           _fallbackText = '';
           _snack(_t.insertedIntoTarget);
         case 'Error':
-          _error = v as String;
+          // Word suggestions say why in the app's language, as a short note.
+          final message = v as String;
+          if (message == 'suggestions: need-ai-corrector') {
+            _snack(_t['buttonHint10']);
+            KeyboardBridge.status(_t['buttonHint10']);
+          } else if (message == 'suggestions: nothing-marked') {
+            _snack(_t['buttonHint7']);
+            KeyboardBridge.status(_t['buttonHint7']);
+          } else if (message.startsWith('suggestions:')) {
+            _error = message;
+            KeyboardBridge.status(message);
+          } else {
+            _error = message;
+          }
         case 'Suggestion':
           _suggestion = v as String;
         case 'Corrected':
@@ -460,6 +495,10 @@ class _HomeScreenState extends State<HomeScreen> {
           final r = v as Map<String, dynamic>;
           _snack(r['changed'] == true ? _t.fmt('replaced', {'f': r['from'], 't': r['to']}) : _t['replacedNone']);
           KeyboardBridge.done(r['changed'] == true);
+        case 'WordChoices':
+          // The keyboard offers them (the floating buttons show their own list).
+          final found = [for (final c in ((v as Map<String, dynamic>)['choices'] as List? ?? const [])) '$c'];
+          KeyboardBridge.choices(found);
         case 'HostReplace':
           KeyboardBridge.replace((v as Map<String, dynamic>)['text'] as String? ?? '');
         case 'HostText':
@@ -580,7 +619,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// (what to click, when to speak), in the app's language.
   void _sendButtonHints() {
     if (!_shrinkSupported) return;
-    _engine.setFloatingHints(hints: [for (var i = 0; i < 10; i++) _t['buttonHint$i']]);
+    _engine.setFloatingHints(hints: [for (var i = 0; i < 12; i++) _t['buttonHint$i']]);
   }
 
   /// Desktop buttons can shrink away from the mouse (ui.json
@@ -2631,6 +2670,15 @@ class _HomeScreenState extends State<HomeScreen> {
   final _correctorKeyCtls = {'openai': TextEditingController(), 'anthropic': TextEditingController()};
   final Map<String, (bool, String?)> _correctorKeys = {};
 
+  /// Word suggestions need a text model as corrector and its key: the
+  /// start button is grey while that range is chosen without them.
+  void _syncSuggestions() {
+    final corrector = (_text['corrector'] as String?) ?? '';
+    final available = (corrector == 'openai' || corrector == 'anthropic') && (_correctorKeys[corrector]?.$1 ?? false);
+    _engine.setSuggestionsAvailable(available: available);
+    KeyboardBridge.setSuggestionsAvailable(available);
+  }
+
   Future<void> _loadCorrectorKey(String id) async {
     try {
       final k = await _secure.read(key: 'api_key:$id') ?? '';
@@ -2640,6 +2688,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _correctorKeys[id] = (false, null);
     }
     if (mounted) setState(() {});
+    _syncSuggestions();
   }
 
   Future<void> _saveCorrectorKey(String id) async {

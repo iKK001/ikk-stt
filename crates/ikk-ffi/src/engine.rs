@@ -134,6 +134,37 @@ impl FfiEngine {
         req.range = ikk_engine::CorrectionRange::Selection;
         self.send(EngineCommand::CorrectRange(req))
     }
+    /// Word suggestions: what else may have been said in place of the
+    /// selection in the app in front; the answer is the `WordChoices` event.
+    pub fn suggest_selection(&self, settings_json: &str) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        self.send(EngineCommand::SuggestWords(ikk_engine::config::correct_request(
+            &settings,
+        )))
+    }
+    /// Word suggestions for the word under a single click: the click is
+    /// completed to a double-click, which selects the word, and the
+    /// suggestions are asked for that selection.
+    pub fn suggest_word_at(&self, settings_json: &str, at: (f64, f64)) -> Result<(), String> {
+        ikk_output::desktop::complete_double_click_at(at.0, at.1).map_err(|e| e.to_string())?;
+        self.suggest_selection(settings_json)
+    }
+    /// Word suggestions for a host that holds the text itself:
+    /// `original` is the marked part, `before` and `after` the text around
+    /// it. The answer is the `WordChoices` event; the pick comes back as
+    /// `HostReplace` after [`Self::apply_choice`].
+    pub fn suggest_host(&self, settings_json: &str, original: &str, before: &str, after: &str) -> Result<(), String> {
+        let settings = ikk_settings::Settings::from_json(settings_json).map_err(|e| e.to_string())?;
+        let mut req = ikk_engine::config::correct_request(&settings);
+        req.range = ikk_engine::CorrectionRange::Selection;
+        req.host_text = Some(original.to_string());
+        req.host_around = Some((before.to_string(), after.to_string()));
+        self.send(EngineCommand::SuggestWords(req))
+    }
+    /// The candidate the user picked goes over the selection.
+    pub fn apply_choice(&self, text: &str) -> Result<(), String> {
+        self.send(EngineCommand::ApplyChoice(text.to_string()))
+    }
     /// Click to click: the two screen points the user clicked become a
     /// selection (click, Shift-click), then the selection is corrected.
     pub fn correct_between(&self, settings_json: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {

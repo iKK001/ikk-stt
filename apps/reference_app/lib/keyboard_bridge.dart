@@ -11,13 +11,14 @@ class KeyboardBridge {
   static bool get supported => Platform.isIOS;
 
   /// Commands from the keyboard: `start`, `stop`, `replace` (with
-  /// `original`), `correct` (with `original`), `open`.
-  static void listen(void Function(String cmd, String original) onCommand) {
+  /// `original`), `correct` (with `original`), `suggest` (with `original`,
+  /// `before`, `after`), `choose` (with `original` = the chosen word), `open`.
+  static void listen(void Function(String cmd, String original, Map<String, dynamic> all) onCommand) {
     if (!supported) return;
     _channel.setMethodCallHandler((call) async {
       if (call.method != 'command') return null;
       final m = Map<String, dynamic>.from(call.arguments as Map);
-      onCommand(m['cmd'] as String? ?? '', m['original'] as String? ?? '');
+      onCommand(m['cmd'] as String? ?? '', m['original'] as String? ?? '', m);
       return null;
     });
     _channel.invokeMethod<void>('drain').catchError((_) {});
@@ -28,6 +29,9 @@ class KeyboardBridge {
 
   /// The answer of a replacement or correction: goes over the taken-out text.
   static Future<void> replace(String t) => _send({'kind': 'replace', 'text': t});
+
+  /// Word suggestions for the marked text (empty: none found).
+  static Future<void> choices(List<String> items) => _send({'kind': 'choices', 'items': items});
 
   /// A replacement or correction is over.
   static Future<void> done(bool changed) => _send({'kind': 'done', 'changed': changed});
@@ -45,6 +49,15 @@ class KeyboardBridge {
     if (!supported) return;
     try {
       await _channel.invokeMethod<void>('setCorrectionRange', {'range': range});
+    } catch (_) {}
+  }
+
+  /// Whether word suggestions can be asked for (the keyboard greys its
+  /// start button otherwise while that range is chosen).
+  static Future<void> setSuggestionsAvailable(bool on) async {
+    if (!supported) return;
+    try {
+      await _channel.invokeMethod<void>('setSuggestionsAvailable', {'on': on});
     } catch (_) {}
   }
 

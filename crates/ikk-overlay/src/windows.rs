@@ -54,6 +54,7 @@ const INK: COLORREF = COLORREF(0x0000_2E3A); // #3A2E00: glyph on the yellow but
 const COLOR_LISTEN_ARC: COLORREF = COLORREF(0x00AD_7800); // #0078AD
 const RED: COLORREF = COLORREF(0x002F_2FD3); // #D32F2F: dictating
 const GRAY: COLORREF = COLORREF(0x0042_4242); // #424242: off
+const DISABLED: COLORREF = COLORREF(0x009E_9E9E); // #9E9E9E: the start button when its mode is not available
 
 const MSG_REDRAW: u32 = WM_APP + 1;
 const MSG_HIDE: u32 = WM_APP + 2;
@@ -124,14 +125,19 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
         let (x, y) = (info.pt.x, info.pt.y);
         let own = {
-            let hwnd = state().lock().map(|s| s.hwnd).unwrap_or(0);
-            let mut rect = RECT::default();
-            hwnd > 0
-                && GetWindowRect(HWND(hwnd as *mut _), &mut rect).is_ok()
-                && x >= rect.left
-                && x <= rect.right
-                && y >= rect.top
-                && y <= rect.bottom
+            let (hwnd, list) = state().lock().map(|s| (s.hwnd, s.choices_hwnd)).unwrap_or((0, 0));
+            let inside = |hwnd: isize| {
+                let mut rect = RECT::default();
+                hwnd > 0
+                    && windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(hwnd as *mut _)).as_bool()
+                    && GetWindowRect(HWND(hwnd as *mut _), &mut rect).is_ok()
+                    && x >= rect.left
+                    && x <= rect.right
+                    && y >= rect.top
+                    && y <= rect.bottom
+            };
+            // The list of candidates is ours as well: a click on it picks.
+            inside(hwnd) || inside(list)
         };
         if !own {
             let done = CAPTURE.lock().ok().and_then(|mut c| {
@@ -169,6 +175,8 @@ struct State {
     busy_since: Option<Instant>,
     /// Replace by voice armed: the replace button is yellow.
     replace_armed: bool,
+    /// The start button is drawn grey (what it starts is not available).
+    start_disabled: bool,
     /// The range button's range: 0 cursor to end, 1 whole text, 2 click to click, 3 single word.
     range_mode: u8,
     /// The highlight window (0 = none) and where it should be.
@@ -187,6 +195,13 @@ struct State {
     /// The line of help under the buttons and its window (0 = none).
     hint: Option<String>,
     hint_hwnd: isize,
+    /// The list of candidates under the buttons (empty = none), its
+    /// window (0 = not created yet) and who hears the pick.
+    choices: Vec<String>,
+    /// The click on the word the candidates belong to (screen pixels).
+    choices_at: Option<(f64, f64)>,
+    choices_hwnd: isize,
+    on_choice: Option<crate::OnChoice>,
     /// The window's exact centre: what a size change keeps in place.
     centre: Option<(f64, f64)>,
     /// The buttons shrink when the mouse is not over them.
@@ -466,10 +481,19 @@ pub fn set_busy(busy: Busy) {
 const MSG_HIGHLIGHT_REPAINT: u32 = WM_APP + 11;
 /// Show, move or hide the line of help (`State::hint`).
 const MSG_HINT: u32 = WM_APP + 12;
+/// Show or hide the list of candidates (`State::choices`).
+const MSG_CHOICES: u32 = WM_APP + 13;
 
 pub fn set_audio_mode(on: bool) {
     if let Ok(mut s) = state().lock() {
         s.audio_mode = on;
+    }
+    post(MSG_REDRAW);
+}
+
+pub fn set_start_disabled(on: bool) {
+    if let Ok(mut s) = state().lock() {
+        s.start_disabled = on;
     }
     post(MSG_REDRAW);
 }
@@ -912,6 +936,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
+        MSG_CHOICES => {
+            show_choices(hwnd);
+            LRESULT(0)
+        }
         MSG_HINT => {
             show_hint(hwnd);
             LRESULT(0)
@@ -1192,6 +1220,9 @@ unsafe fn render(hwnd: HWND) {
                 YELLOW
             } else if is_capturing() {
                 ORANGE
+            } else if state().lock().map(|s| s.start_disabled).unwrap_or(false) {
+                // Not available right now: light grey.
+                DISABLED
             } else {
                 BRAND
             };
@@ -1265,11 +1296,12 @@ unsafe fn render(hwnd: HWND) {
                     line(cx - 4.0, gy - 4.5, cx, gy - 0.5, 2.2, ink);
                     line(cx + 4.0, gy - 4.5, cx, gy - 0.5, 2.2, ink);
                 }
-                // Word suggestions: a word bar and the arrow of a drop-down list.
+                // Word suggestions: a word bar and, under it, the wide arrow
+                // of a list that drops down from the word.
                 4 => {
-                    line(cx - 12.0, gy, cx + 2.0, gy, 3.0, ink);
-                    line(cx + 6.0, gy - 2.5, cx + 10.0, gy + 2.5, 2.2, ink);
-                    line(cx + 10.0, gy + 2.5, cx + 14.0, gy - 2.5, 2.2, ink);
+                    line(cx - 12.0, gy - 4.5, cx + 12.0, gy - 4.5, 3.0, ink);
+                    line(cx - 7.0, gy - 0.5, cx, gy + 5.5, 2.4, ink);
+                    line(cx, gy + 5.5, cx + 7.0, gy - 0.5, 2.4, ink);
                 }
                 _ => {
                     line(cx - 12.0, gy - 4.0, cx - 12.0, gy + 4.0, 2.4, ink);
@@ -1443,6 +1475,215 @@ pub fn set_hint(text: Option<String>) {
     post(MSG_HINT);
 }
 
+/// A list of candidates under the buttons, or `None` to take it away.
+pub fn set_choices(choices: Option<crate::Choices>) {
+    if let Ok(mut s) = state().lock() {
+        match choices {
+            Some((items, at, on_pick)) => {
+                s.choices = items;
+                s.choices_at = at;
+                s.on_choice = Some(on_pick);
+            }
+            None => {
+                s.choices.clear();
+                s.on_choice = None;
+            }
+        }
+    }
+    post(MSG_CHOICES);
+}
+
+/// Height of one candidate and the space beside its text, at scale 1.
+const CHOICE_ROW: f64 = 34.0;
+const CHOICE_PAD: f64 = 14.0;
+
+/// Window thread: the white list with `State::choices`, one per row,
+/// right under the buttons as they are drawn (above them when there is
+/// no room below). It takes clicks without taking the focus.
+unsafe fn show_choices(panel: HWND) {
+    use windows::Win32::Graphics::Gdi::{DrawTextW, GetDC, ReleaseDC, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE};
+    let (mut hw, items, at) = state()
+        .lock()
+        .map(|s| (s.choices_hwnd, s.choices.clone(), s.choices_at))
+        .unwrap_or((0, Vec::new(), None));
+    if items.is_empty() {
+        if hw != 0 {
+            let _ = ShowWindow(HWND(hw as *mut _), SW_HIDE);
+        }
+        return;
+    }
+    let mut pr = RECT::default();
+    if GetWindowRect(panel, &mut pr).is_err() {
+        return;
+    }
+    // Under the clicked word, or under the buttons when none was clicked.
+    let (cx, cy) = match at {
+        Some((x, y)) => (x.round() as i32, y.round() as i32),
+        None => ((pr.left + pr.right) / 2, (pr.top + pr.bottom) / 2),
+    };
+    let (area, scale) = work_area(cx, cy, true).unwrap_or(((0.0, 0.0, 1e9, 1e9), 1.0));
+    if hw == 0 {
+        let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
+            return;
+        };
+        let class = w!("ikk_choices");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(choices_proc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            hbrBackground: CreateSolidBrush(COLORREF(0x00FF_FFFF)),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            class,
+            w!("Suggestions"),
+            WS_POPUP,
+            0,
+            0,
+            10,
+            10,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        ) else {
+            return;
+        };
+        hw = hwnd.0 as isize;
+        if let Ok(mut s) = state().lock() {
+            s.choices_hwnd = hw;
+        }
+    }
+    let hwnd = HWND(hw as *mut _);
+    // The widest candidate in the list's font.
+    let dc = GetDC(Some(hwnd));
+    let font = hint_font(scale);
+    let old = SelectObject(dc, font.into());
+    let mut widest = 0;
+    for text in &items {
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let mut r = RECT::default();
+        DrawTextW(dc, &mut wide, &mut r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        widest = widest.max(r.right - r.left);
+    }
+    SelectObject(dc, old);
+    let _ = DeleteObject(font.into());
+    ReleaseDC(Some(hwnd), dc);
+    let row = (CHOICE_ROW * scale).round() as i32;
+    let (w, h) = (
+        (widest + (2.0 * CHOICE_PAD * scale) as i32).max((180.0 * scale) as i32),
+        row * items.len() as i32,
+    );
+    // From the word's lower edge; from the middle of the buttons otherwise.
+    let half = match at {
+        Some(_) => 0,
+        None => {
+            let l = layout();
+            (height(l.with_correct) as f64 * l.scale / 2.0).round() as i32
+        }
+    };
+    let gap = (6.0 * scale) as i32;
+    let mut y = cy + half + gap;
+    if (y + h) as f64 > area.1 + area.3 {
+        // No room below: above the word (a line of text up) or the buttons.
+        let up = if at.is_some() {
+            (26.0 * scale).round() as i32
+        } else {
+            half
+        };
+        y = cy - up - gap - h;
+    }
+    let x = ((cx - w / 2) as f64).clamp(area.0, (area.0 + area.2 - w as f64).max(area.0)) as i32;
+    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    let _ = InvalidateRect(Some(hwnd), None, true);
+}
+
+unsafe extern "system" fn choices_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows::Win32::Graphics::Gdi::{
+        DrawTextW, FrameRect, SetBkMode, SetTextColor, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
+    };
+    let scale_here = || {
+        let mut here = RECT::default();
+        if GetWindowRect(hwnd, &mut here).is_ok() {
+            work_area(here.left, here.top, true).map_or(1.0, |(_, s)| s)
+        } else {
+            1.0
+        }
+    };
+    match msg {
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_LBUTTONDOWN => {
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let row = ((CHOICE_ROW * scale_here()).round() as i32).max(1);
+            let (picked, on_pick) = state()
+                .lock()
+                .map(|s| (s.choices.get((y / row).max(0) as usize).cloned(), s.on_choice.clone()))
+                .unwrap_or((None, None));
+            set_choices(None);
+            if let (Some(text), Some(on_pick)) = (picked, on_pick) {
+                std::thread::spawn(move || on_pick(text));
+            }
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            let items = state().lock().map(|s| s.choices.clone()).unwrap_or_default();
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+            let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+            let _ = FillRect(hdc, &rect, white);
+            let _ = DeleteObject(white.into());
+            let scale = scale_here();
+            let row = (CHOICE_ROW * scale).round() as i32;
+            let pad = (CHOICE_PAD * scale).round() as i32;
+            let font = hint_font(scale);
+            let old = SelectObject(hdc, font.into());
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(0x0000_0000));
+            let line = CreateSolidBrush(COLORREF(0x00E0_E0E0));
+            for (i, text) in items.iter().enumerate() {
+                let top = row * i as i32;
+                if i > 0 {
+                    let sep = RECT {
+                        left: pad / 2,
+                        top,
+                        right: rect.right - pad / 2,
+                        bottom: top + 1,
+                    };
+                    let _ = FillRect(hdc, &sep, line);
+                }
+                let mut r = RECT {
+                    left: pad,
+                    top,
+                    right: rect.right - pad,
+                    bottom: top + row,
+                };
+                let mut wide: Vec<u16> = text.encode_utf16().collect();
+                DrawTextW(
+                    hdc,
+                    &mut wide,
+                    &mut r,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            }
+            let _ = DeleteObject(line.into());
+            // Brand blue frame (#0099CC).
+            let frame = CreateSolidBrush(COLORREF(0x00CC_9900));
+            let _ = FrameRect(hdc, &rect, frame);
+            let _ = DeleteObject(frame.into());
+            SelectObject(hdc, old);
+            let _ = DeleteObject(font.into());
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
 const HINT_BACK: COLORREF = COLORREF(0x0024_1F1F);
 
 unsafe fn hint_font(scale: f64) -> windows::Win32::Graphics::Gdi::HFONT {
@@ -1467,7 +1708,7 @@ unsafe fn hint_font(scale: f64) -> windows::Win32::Graphics::Gdi::HFONT {
     )
 }
 
-/// Window thread: the label (in the start button's colour) with `State::hint` right under the
+/// Window thread: the white label with a blue frame and `State::hint` in black right under the
 /// buttons as they are drawn (above them when there is no room below);
 /// clicks pass through it.
 unsafe fn show_hint(panel: HWND) {
@@ -1566,12 +1807,14 @@ unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rect = RECT::default();
             let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
-            // The colour the start button has right now: yellow while a
-            // replacement by voice is armed, orange otherwise; black text.
-            let armed = state().lock().map(|s| s.replace_armed).unwrap_or(false);
-            let brush = CreateSolidBrush(if armed { YELLOW } else { ORANGE });
+            // White with a thin brand-blue frame and black text: the same
+            // look as the list of word suggestions.
+            let brush = CreateSolidBrush(COLORREF(0x00FF_FFFF));
             let _ = FillRect(hdc, &rect, brush);
             let _ = DeleteObject(brush.into());
+            let frame = CreateSolidBrush(COLORREF(0x00CC_9900));
+            let _ = windows::Win32::Graphics::Gdi::FrameRect(hdc, &rect, frame);
+            let _ = DeleteObject(frame.into());
             let scale = work_area(0, 0, true).map_or(1.0, |(_, s)| s);
             let mut here = RECT::default();
             let scale = if GetWindowRect(hwnd, &mut here).is_ok() {

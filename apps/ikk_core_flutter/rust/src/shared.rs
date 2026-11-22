@@ -61,9 +61,18 @@ pub const TRAINING: &str = "voice commands are being recorded";
 /// The lines of help shown under the floating buttons after the start
 /// button, in the app's language (the shell sends them): 0 and 1 click
 /// to click (AI, audio), 2 and 3 single word (AI, audio), 4 speak now,
-/// 5 correcting, 6 click a word for suggestions, 7 no suggestions yet,
-/// 8 and 9 click to end (AI, audio).
+/// 5 correcting, 6 click a word for suggestions, 7 no suggestions found,
+/// 8 and 9 click to end (AI, audio), 10 suggestions need an AI
+/// corrector, 11 looking for suggestions.
 static HINTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Where the word was clicked whose suggestions are being fetched: the
+/// list appears under it.
+static CHOICES_AT: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+/// Word suggestions can be asked for (see `Shared::set_suggestions_available`).
+/// True until the shell says otherwise, so nothing is grey before it knows.
+static SUGGESTIONS_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 pub fn set_hints(hints: Vec<String>) {
     if let Ok(mut h) = HINTS.lock() {
@@ -140,6 +149,41 @@ fn on_event(s: &Shared, ev: &EngineEvent) {
             });
         }
         EngineEvent::Corrected { .. } => ikk_overlay::set_busy(ikk_overlay::Busy::None),
+        // Word suggestions: the candidates go under the buttons; the one
+        // the user clicks goes over the marked part.
+        EngineEvent::WordChoices { choices, bounds, .. } => {
+            ikk_overlay::set_busy(ikk_overlay::Busy::None);
+            // Under the word: its own lower edge when the program tells
+            // where it stands, else half a line under the click.
+            let clicked = CHOICES_AT.lock().ok().and_then(|mut at| at.take());
+            let at = bounds
+                .map(|(x, y, w, h)| (x + w / 2.0, y + h))
+                .or(clicked.map(|(x, y)| (x, y + 12.0)));
+            if choices.is_empty() {
+                show_hint(7);
+            } else {
+                ikk_overlay::set_choices(
+                    choices.clone(),
+                    at,
+                    Arc::new(|text| {
+                        if let Some(s) = get() {
+                            ikk_overlay::set_busy(ikk_overlay::Busy::Processing);
+                            if s.engine.apply_choice(&text).is_err() {
+                                ikk_overlay::set_busy(ikk_overlay::Busy::None);
+                            }
+                        }
+                    }),
+                );
+            }
+        }
+        EngineEvent::Error(message) if message.starts_with("suggestions:") => {
+            ikk_overlay::set_busy(ikk_overlay::Busy::None);
+            match message.as_str() {
+                "suggestions: nothing-marked" => show_hint(7),
+                "suggestions: need-ai-corrector" => show_hint(10),
+                _ => ikk_overlay::set_hint(None),
+            }
+        }
         EngineEvent::Error(message) if message.starts_with("correction:") => {
             ikk_overlay::set_busy(ikk_overlay::Busy::None)
         }
@@ -174,6 +218,7 @@ impl Shared {
         if let Ok(range) = ikk_ffi::engine::FfiEngine::correction_range(json) {
             ikk_overlay::set_range_mode(ikk_overlay::RangeMode::parse(&range));
         }
+        self.show_start_availability();
         self.persist();
     }
 
@@ -331,18 +376,36 @@ impl Shared {
                 show_hint(if audio { 3 } else { 2 });
                 Ok(())
             }
-            // One click names the word whose suggestions are wanted. The
-            // sources (alternatives from the recognizer, word prediction)
-            // are not connected yet: the click is taken and the user told.
+            // Word suggestions: one click names the word. The click is
+            // completed to a double-click (the word is selected), the text
+            // model is asked what else may have been said there, and the
+            // answers appear right under the word
+            // (`EngineEvent::WordChoices`).
             "word_suggestions" => {
+                ikk_overlay::clear_choices();
+                if !self.start_available() {
+                    // The grey button: say why nothing starts.
+                    show_hint(10);
+                    return Ok(());
+                }
                 let armed = ikk_overlay::capture_clicks(
                     1,
                     std::time::Duration::from_secs(15),
                     std::sync::Arc::new(move |points| {
                         let Some(s) = get() else { return };
-                        s.end_replace();
-                        if !points.is_empty() {
-                            show_hint(7);
+                        let Some(&point) = points.first() else {
+                            // The capture timed out: nothing is armed any more.
+                            s.end_replace();
+                            return;
+                        };
+                        if let Ok(mut at) = CHOICES_AT.lock() {
+                            *at = Some(point);
+                        }
+                        ikk_overlay::set_busy(ikk_overlay::Busy::Processing);
+                        show_hint(11);
+                        if let Err(e) = s.engine.suggest_word_at(&json, point) {
+                            log::warn!("word suggestions: {e}");
+                            s.end_replace();
                         }
                     }),
                 );
@@ -473,6 +536,7 @@ impl Shared {
             *s = Some(v.to_string());
         }
         ikk_overlay::set_range_mode(ikk_overlay::RangeMode::parse(&next));
+        self.show_start_availability();
         self.persist();
         let _ = self
             .events
@@ -505,6 +569,25 @@ impl Shared {
         self.engine.replace_by_voice_host(&json, original)
     }
 
+    /// Word suggestions for text a host marked itself, with the text
+    /// around it.
+    #[allow(dead_code)]
+    pub fn suggest_host(&self, original: &str, before: &str, after: &str) -> Result<(), String> {
+        let json = self
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .ok_or_else(|| "open the app once to load settings".to_string())?;
+        self.engine.suggest_host(&json, original, before, after)
+    }
+
+    /// The suggestion the user tapped in a host's list.
+    #[allow(dead_code)]
+    pub fn apply_choice(&self, text: &str) -> Result<(), String> {
+        self.engine.apply_choice(text)
+    }
+
     /// Phones: correct text the host selected itself.
     #[allow(dead_code)]
     pub fn correct_host(&self, original: &str) -> Result<(), String> {
@@ -517,8 +600,25 @@ impl Shared {
         self.engine.correct_host(&json, original)
     }
 
+    /// The shell says whether word suggestions can be asked for (a text
+    /// model is chosen as corrector and its key is stored).
+    pub fn set_suggestions_available(&self, on: bool) {
+        SUGGESTIONS_AVAILABLE.store(on, Ordering::SeqCst);
+        self.show_start_availability();
+    }
+
+    /// Whether the start button can do what the range asks: false only
+    /// for word suggestions without a text model's key.
+    pub fn start_available(&self) -> bool {
+        self.correction_range() != "word_suggestions" || SUGGESTIONS_AVAILABLE.load(Ordering::SeqCst)
+    }
+
+    /// The start button grey when its range is not available.
+    fn show_start_availability(&self) {
+        ikk_overlay::set_start_disabled(!self.start_available());
+    }
+
     /// The correction range named in the settings ("" when unknown).
-    #[allow(dead_code)]
     pub fn correction_range(&self) -> String {
         self.settings
             .lock()

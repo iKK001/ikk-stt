@@ -135,45 +135,11 @@ fn changed(original: &str, answer: &str) -> Option<String> {
     (answer != original.trim_end_matches('\n') && !answer.trim().is_empty()).then(|| answer.to_string())
 }
 
-#[async_trait::async_trait]
-impl TextCorrector for AiCorrector {
-    fn id(&self) -> &'static str {
-        match self.vendor {
-            Vendor::OpenAi => "openai",
-            Vendor::Anthropic => "anthropic",
-        }
-    }
-    fn display_name(&self) -> &'static str {
-        match self.vendor {
-            Vendor::OpenAi => "OpenAI",
-            Vendor::Anthropic => "Anthropic",
-        }
-    }
-    /// The model to ask; empty restores the default.
-    fn set_model(&self, model: &str) {
-        if let Ok(mut m) = self.model.write() {
-            *m = model.trim().to_string();
-        }
-    }
-    fn set_gender_colon(&self, on: bool) {
-        self.gender_colon.store(on, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn set_broken_words(&self, on: bool) {
-        self.broken_words.store(on, std::sync::atomic::Ordering::Relaxed);
-    }
-    async fn correct(&self, text: &str, language: &str, credential: Option<&str>) -> Result<Option<String>, SttError> {
-        let key = credential.ok_or(SttError::MissingCredential)?.trim().to_string();
-        if key.is_empty() {
-            return Err(SttError::MissingCredential);
-        }
+impl AiCorrector {
+    /// One question to the text model: `system` says what to do with `text`.
+    async fn ask(&self, system: &str, text: &str, key: String) -> Result<String, SttError> {
         let err = |e: reqwest::Error| SttError::Provider(ErrorClass::from_message(&e.to_string()));
         let model = self.model();
-        let system = instruction(
-            language,
-            self.gender_colon.load(std::sync::atomic::Ordering::Relaxed),
-            self.broken_words.load(std::sync::atomic::Ordering::Relaxed),
-        );
         let (request, headers): (serde_json::Value, Vec<(&str, String)>) = match self.vendor {
             Vendor::OpenAi => (
                 serde_json::json!({
@@ -242,6 +208,133 @@ impl TextCorrector for AiCorrector {
                     .unwrap_or_default()
             }
         };
+        Ok(answer)
+    }
+}
+
+/// What the model is asked for other words in place of a marked one.
+pub fn suggest_instruction(language: &str) -> String {
+    let lang = match language.trim() {
+        "" => String::new(),
+        "deu" | "gsw" => " The text is German (Swiss spelling, no ß).".into(),
+        "eng" => " The text is English.".into(),
+        "fra" => " The text is French.".into(),
+        "ita" => " The text is Italian.".into(),
+        other => format!(" The text's language code is {other}."),
+    };
+    format!(
+        "A person with impaired speech dictated a text and a speech recogniser wrote it down; the person marked \
+         a part the recogniser may have got wrong.{lang} You get the marked part after MARKED: and, when known, the \
+         text around it after CONTEXT: (where the marked part stands there between ⟦ and ⟧, that is its place). Answer with five different things the person may really have said \
+         in place of the marked part: words or short phrases that sound similar to it and make sense in the \
+         context, the most likely first, written as they would stand in the text. Always give five, also when \
+         the marked part looks right to you or is a name: then give the words that sound most like it. Only \
+         the replacements for the marked part, never the sentence around it. One per line, nothing else: \
+         no numbering, no quotation marks, no brackets, no comments. Do not repeat the marked part itself."
+    )
+}
+
+/// The lines of a suggestion answer as candidates: trimmed, without list
+/// marks, without the marked part itself, no doubles, five at most.
+fn candidates(marked: &str, answer: &str) -> Vec<String> {
+    // One per line as asked; a model that put them all on one line
+    // separated them with commas or semicolons.
+    let lines: Vec<&str> = answer.lines().filter(|l| !l.trim().is_empty()).collect();
+    let pieces: Vec<&str> = if lines.len() == 1 && lines[0].contains([',', ';']) {
+        lines[0].split([',', ';']).collect()
+    } else {
+        lines
+    };
+    let marks = |c: char| matches!(c, '"' | '«' | '»' | '“' | '”' | '„' | '⟦' | '⟧' | '[' | ']' | '`' | '*');
+    let mut out: Vec<String> = Vec::new();
+    for piece in pieces {
+        let piece = piece
+            .trim()
+            .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '–' | '•' | '*'))
+            .trim()
+            .trim_matches(marks)
+            .trim();
+        if piece.is_empty() || piece.chars().count() > 80 {
+            continue;
+        }
+        if piece.to_lowercase() == marked.trim().to_lowercase()
+            || out.iter().any(|o| o.to_lowercase() == piece.to_lowercase())
+        {
+            continue;
+        }
+        out.push(piece.to_string());
+        if out.len() == 5 {
+            break;
+        }
+    }
+    out
+}
+
+#[async_trait::async_trait]
+impl TextCorrector for AiCorrector {
+    fn id(&self) -> &'static str {
+        match self.vendor {
+            Vendor::OpenAi => "openai",
+            Vendor::Anthropic => "anthropic",
+        }
+    }
+    fn display_name(&self) -> &'static str {
+        match self.vendor {
+            Vendor::OpenAi => "OpenAI",
+            Vendor::Anthropic => "Anthropic",
+        }
+    }
+    /// The model to ask; empty restores the default.
+    fn set_model(&self, model: &str) {
+        if let Ok(mut m) = self.model.write() {
+            *m = model.trim().to_string();
+        }
+    }
+    fn set_gender_colon(&self, on: bool) {
+        self.gender_colon.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_broken_words(&self, on: bool) {
+        self.broken_words.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    async fn suggest(
+        &self,
+        marked: &str,
+        context: &str,
+        language: &str,
+        credential: Option<&str>,
+    ) -> Result<Vec<String>, SttError> {
+        let key = credential.ok_or(SttError::MissingCredential)?.trim().to_string();
+        if key.is_empty() {
+            return Err(SttError::MissingCredential);
+        }
+        let question = if context.trim().is_empty() {
+            format!("MARKED: {}", marked.trim())
+        } else {
+            format!("MARKED: {}\nCONTEXT: {}", marked.trim(), context.trim())
+        };
+        let answer = self.ask(&suggest_instruction(language), &question, key).await?;
+        let found = candidates(marked, &answer);
+        if found.is_empty() {
+            // Why nothing can be offered: what the model wrote instead.
+            let shown: String = answer.chars().take(300).collect();
+            tracing::info!(vendor = ?self.vendor, answer = %shown, "text model gave no usable suggestion");
+        }
+        debug!(vendor = ?self.vendor, found = found.len(), "text model suggested");
+        Ok(found)
+    }
+    async fn correct(&self, text: &str, language: &str, credential: Option<&str>) -> Result<Option<String>, SttError> {
+        let key = credential.ok_or(SttError::MissingCredential)?.trim().to_string();
+        if key.is_empty() {
+            return Err(SttError::MissingCredential);
+        }
+        let system = instruction(
+            language,
+            self.gender_colon.load(std::sync::atomic::Ordering::Relaxed),
+            self.broken_words.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let answer = self.ask(&system, text, key).await?;
+        let model = self.model();
         let corrected = changed(text, &singular_without_colon(text, &answer));
         debug!(vendor = ?self.vendor, model = %model, changed = corrected.is_some(), "text model answered");
         Ok(corrected)
@@ -273,6 +366,17 @@ mod tests {
     #[test]
     fn instruction_names_the_language() {
         assert!(instruction("deu", false, false).contains("German"));
+        assert_eq!(
+            candidates(
+                "Kranken Haus",
+                "1. Krankenhaus\n- \"Krankenkasse\"\nKranken Haus\nkrankenhaus\n\nKrankenhauses"
+            ),
+            vec!["Krankenhaus", "Krankenkasse", "Krankenhauses"]
+        );
+        assert_eq!(
+            candidates("Haus", "⟦Maus⟧, Laus; [Haus], raus"),
+            vec!["Maus", "Laus", "raus"]
+        );
         assert!(instruction("deu", false, true).contains("ventilator"));
         assert!(!instruction("deu", false, false).contains("ventilator"));
         assert!(!instruction("", false, false).contains("language code"));

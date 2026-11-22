@@ -541,6 +541,18 @@ pub trait TextCorrector: Send + Sync {
     /// Text-model correctors: write feminine plurals of persons with the
     /// gender colon ("Autor:innen"). Rule-based checkers ignore it.
     fn set_gender_colon(&self, _on: bool) {}
+    /// Other things the person may have said in place of `marked` (up to
+    /// five, the most likely first), judged with the text around it when
+    /// `context` is not empty. Only text models can.
+    async fn suggest(
+        &self,
+        _marked: &str,
+        _context: &str,
+        _language: &str,
+        _credential: Option<&str>,
+    ) -> Result<Vec<String>, SttError> {
+        Err(SttError::Unsupported)
+    }
     /// Text-model correctors: the speaker is on a ventilator, a word may
     /// have come back in parts. Rule-based checkers ignore it.
     fn set_broken_words(&self, _on: bool) {}
