@@ -19,6 +19,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'theme.dart';
 import 'ui_strings.dart';
 import 'app_name.dart';
+import 'earlier_keys.dart';
 import 'platform_extras.dart';
 import 'profiles.dart';
 import 'keyboard_bridge.dart';
@@ -173,6 +174,8 @@ class _HomeScreenState extends State<HomeScreen> {
       };
 
   Future<void> _init() async {
+    // Before the first key is read.
+    await adoptEarlierKeys();
     final dir = configDir() ?? (await getApplicationSupportDirectory()).path;
     _settingsPath = '$dir${Platform.pathSeparator}settings.json';
     _consentPath = '$dir${Platform.pathSeparator}consent.json';
@@ -878,14 +881,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ------------------------------------------------ background mode
 
-  bool _keepRunning = true;
+  /// Off until the user switches it on; kept from then on.
+  bool _keepRunning = false;
   /// Registered to start with the session; null while unknown.
   bool? _loginItem;
 
   Future<void> _loadBackground() async {
     if (!BackgroundControl.supported) return;
     await _loadUi();
-    _keepRunning = _ui['keep_running'] as bool? ?? true;
+    _keepRunning = _ui['keep_running'] as bool? ?? false;
     await BackgroundControl.setKeepRunning(_keepRunning);
     _loginItem = await BackgroundControl.isLoginItem();
   }
@@ -1779,6 +1783,24 @@ class _HomeScreenState extends State<HomeScreen> {
         _commandsSection(),
         const SizedBox(height: 16),
         _statusStrip(),
+        // Last on the page, a second way next to the bin in the header.
+        if (p['id'] != kDefaultProfileId) ...[
+          const SizedBox(height: 24),
+          Center(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error,
+                side: BorderSide(color: Theme.of(context).colorScheme.error, width: 1.5),
+                shape: const StadiumBorder(),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              ),
+              icon: const Icon(Icons.delete_outline),
+              label: Text(_t['deleteProfile']),
+              onPressed: () => _deleteProfile(p),
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
       ],
     );
   }

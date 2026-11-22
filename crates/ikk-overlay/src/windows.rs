@@ -210,6 +210,13 @@ struct State {
     hover: bool,
     /// The running size change: from, to, when it started.
     anim: Option<(f64, f64, Instant)>,
+    /// Growing from one button: the middle of the button the mouse came
+    /// to first, in the drawing's own measure (scale 1, origin top-left).
+    pivot: (f64, f64),
+    /// How far the window is moved right now (pixels) so that this button
+    /// stays where it is while the buttons are grown; zero at rest. The
+    /// window's own place is its rectangle without this.
+    shift: (i32, i32),
 }
 
 /// The current layout: window size, drawing scale and offset, dimmed.
@@ -285,6 +292,47 @@ fn layout() -> Layout {
         count,
         animating,
     }
+}
+
+/// Where the window belongs at the size drawn right now: the buttons grow
+/// from the button under the mouse, not from their middle, so the window
+/// moves with the growth. `None` when its place is not known.
+unsafe fn follow_growth(hwnd: HWND, l: &Layout) -> Option<POINT> {
+    let mut rect = RECT::default();
+    GetWindowRect(hwnd, &mut rect).ok()?;
+    let (rest, pivot, old) = state()
+        .lock()
+        .map(|s| (target_scale(s.shrink, false), s.pivot, s.shift))
+        .ok()?;
+    // The window's own place and the middle of the buttons at rest.
+    let home = (rect.left - old.0, rect.top - old.1);
+    let size = ((rect.right - rect.left) as f64, (rect.bottom - rect.top) as f64);
+    let centre = (home.0 as f64 + size.0 / 2.0, home.1 as f64 + size.1 / 2.0);
+    let screen = work_area(centre.0.round() as i32, centre.1.round() as i32, true).map(|(area, _)| area);
+    let dx = crate::grow_shift(
+        pivot.0,
+        width(l.count) as f64,
+        rest,
+        l.scale,
+        centre.0,
+        screen.map(|a| (a.0, a.0 + a.2)),
+    );
+    let dy = crate::grow_shift(
+        pivot.1,
+        height(l.with_correct) as f64,
+        rest,
+        l.scale,
+        centre.1,
+        screen.map(|a| (a.1, a.1 + a.3)),
+    );
+    let shift = (dx.round() as i32, dy.round() as i32);
+    if let Ok(mut s) = state().lock() {
+        s.shift = shift;
+    }
+    Some(POINT {
+        x: home.0 + shift.0,
+        y: home.1 + shift.1,
+    })
 }
 
 /// Start moving from the size drawn now to the current target (window
@@ -402,6 +450,12 @@ unsafe fn note_position(hwnd: HWND, dragged: bool) {
     if GetWindowRect(hwnd, &mut rect).is_err() {
         return;
     }
+    // The window's own place, without the move that follows the growth.
+    let shift = state().lock().map(|s| s.shift).unwrap_or((0, 0));
+    rect.left -= shift.0;
+    rect.right -= shift.0;
+    rect.top -= shift.1;
+    rect.bottom -= shift.1;
     let p = (rect.left as f64, rect.top as f64);
     let size = ((rect.right - rect.left) as f64, (rect.bottom - rect.top) as f64);
     let anchor = work_area((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2, true).map(|(screen, scale)| {
@@ -724,7 +778,21 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let over = (cursor.x as f64 - cx).abs() <= hw && (cursor.y as f64 - cy).abs() <= hh;
                 let changed = state()
                     .lock()
-                    .map(|mut s| s.shrink && std::mem::replace(&mut s.hover, over) != over)
+                    .map(|mut s| {
+                        let changed = s.shrink && std::mem::replace(&mut s.hover, over) != over;
+                        // Coming to buttons at rest: they grow from the
+                        // button the mouse is on, so that one stays under
+                        // the mouse. Buttons still on their way back keep
+                        // the button they grew from.
+                        if changed && over && (l.scale - idle_scale()).abs() < 1e-3 {
+                            let at = (
+                                (cursor.x as f64 - (cx - hw)) / l.scale,
+                                (cursor.y as f64 - (cy - hh)) / l.scale,
+                            );
+                            s.pivot = crate::button_centre(at, l.count, l.with_correct, SIZE as f64, GAP as f64);
+                        }
+                        changed
+                    })
                     .unwrap_or(false);
                 if changed {
                     start_animation(hwnd, l.scale);
@@ -849,6 +917,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         (x.clamp(0, (sw - l.width).max(0)), y.clamp(0, (sh - l.height).max(0)))
                     }
                 };
+                // A place of its own again; the next drawing moves it with
+                // the growth if the buttons are grown.
+                if let Ok(mut s) = state().lock() {
+                    s.shift = (0, 0);
+                }
                 let _ = SetWindowPos(
                     hwnd,
                     Some(HWND_TOPMOST),
@@ -890,6 +963,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         .and_then(|mut s| s.last_shown.replace(shown))
                         .unwrap_or(shown);
                     let (x, y) = crate::around_centre(c, (l.width as f64, l.height as f64), shown, before, screen);
+                    if let Ok(mut s) = state().lock() {
+                        s.shift = (0, 0);
+                    }
                     let _ = SetWindowPos(
                         hwnd,
                         Some(HWND_TOPMOST),
@@ -1379,10 +1455,13 @@ unsafe fn render(hwnd: HWND) {
         SourceConstantAlpha: 255,
         AlphaFormat: AC_SRC_ALPHA as u8,
     };
+    // Its place goes along with the picture, in one step: the button under
+    // the mouse does not wobble while the others grow away from it.
+    let place = follow_growth(hwnd, &l);
     let _ = UpdateLayeredWindow(
         hwnd,
         None,
-        None,
+        place.as_ref().map(|p| p as *const POINT),
         Some(&size),
         Some(mem),
         Some(&src),

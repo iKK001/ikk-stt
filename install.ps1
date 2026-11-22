@@ -5,8 +5,9 @@
 #
 # What it does: downloads the newest release from GitHub, checks its
 # SHA-256 against the value published with it, unpacks it into
-# %LOCALAPPDATA%\Programs\ikk-stt and adds a Start menu entry. Settings and
-# stored keys are not touched.
+# %LOCALAPPDATA%\Programs\ikk-stt, adds a Start menu entry and lists the
+# app under Settings > Apps > Installed apps, from where it can be removed.
+# Settings and stored keys are not touched.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -73,11 +74,30 @@ try {
     $version = ''
     $versionFile = Join-Path $target 'VERSION.txt'
     if (Test-Path $versionFile) { $version = ' ' + (Get-Content $versionFile -Raw).Trim() }
+
+    # Listed under Settings > Apps > Installed apps (for this user), with
+    # the uninstall script that came in the release as its "Uninstall".
+    $remover = Join-Path $target 'uninstall.ps1'
+    if (Test-Path $remover) {
+        $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$name"
+        New-Item -Path $key -Force | Out-Null
+        $quoted = $remover.Replace("'", "''")
+        $run = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command `"& '$quoted'; Read-Host 'Press Enter to close'`""
+        $sizeKb = [int](((Get-ChildItem $target -Recurse -File | Measure-Object Length -Sum).Sum) / 1KB)
+        Set-ItemProperty -Path $key -Name DisplayName -Value $name
+        Set-ItemProperty -Path $key -Name DisplayVersion -Value $version.Trim()
+        Set-ItemProperty -Path $key -Name DisplayIcon -Value (Join-Path $target $exe)
+        Set-ItemProperty -Path $key -Name InstallLocation -Value $target
+        Set-ItemProperty -Path $key -Name UninstallString -Value $run
+        Set-ItemProperty -Path $key -Name EstimatedSize -Value $sizeKb -Type DWord
+        Set-ItemProperty -Path $key -Name NoModify -Value 1 -Type DWord
+        Set-ItemProperty -Path $key -Name NoRepair -Value 1 -Type DWord
+    }
     Write-Host ""
     Write-Host "$name$version is installed in $target"
     Write-Host "Start it from the Start menu ($name), or run:"
     Write-Host "  & '$(Join-Path $target $exe)'"
-    Write-Host "To remove it:"
+    Write-Host "To remove it: Settings > Apps > Installed apps > $name > Uninstall, or run:"
     Write-Host "  irm https://raw.githubusercontent.com/$repo/main/uninstall.ps1 | iex"
 }
 finally {

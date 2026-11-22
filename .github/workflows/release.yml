@@ -55,7 +55,7 @@ jobs:
             if ((Test-Path $src) -and -not (Test-Path "$out/$dll")) { Copy-Item $src $out }
           }
           # The licence texts and where the source of exactly this build is.
-          Copy-Item LICENSE, NOTICE $out
+          Copy-Item LICENSE, NOTICE, uninstall.ps1 $out
           if (Test-Path THIRD_PARTY.md) { Copy-Item THIRD_PARTY.md $out }
           "${{ steps.version.outputs.label }}" | Set-Content "$out/VERSION.txt"
           @(

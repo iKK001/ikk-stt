@@ -3,7 +3,8 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// Credential store for the API keys (Windows Credential Manager).
+/// Store for the API keys: encrypted files in the user's roaming app data,
+/// their key in the Windows Credential Manager (see earlier_keys.dart).
 FlutterSecureStorage createSecureStorage() => const FlutterSecureStorage();
 
 /// Null when the microphone may be used, otherwise a message for the user.

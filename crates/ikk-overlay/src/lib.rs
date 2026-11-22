@@ -380,6 +380,55 @@ pub(crate) fn around_centre(
     (cx - panel.0 / 2.0, cy - panel.1 / 2.0)
 }
 
+/// The middle of the button nearest to `at`, both in the drawing's own
+/// measure (scale 1, origin top-left, y downwards): `count` columns of
+/// buttons `size` wide with `gap` between them; with a correction column
+/// (the second one) that holds two buttons, the others beside its middle.
+#[allow(dead_code)]
+pub(crate) fn button_centre(at: (f64, f64), count: usize, with_correct: bool, size: f64, gap: f64) -> (f64, f64) {
+    let count = count.max(1);
+    let width = size * count as f64 + gap * (count as f64 - 1.0);
+    let height = if with_correct { 2.0 * size + gap } else { size };
+    let slot = ((at.0 / width * count as f64).floor().max(0.0) as usize).min(count - 1);
+    let x = slot as f64 * (size + gap) + size / 2.0;
+    let y = if with_correct && slot == 1 {
+        if at.1 < height / 2.0 {
+            size / 2.0
+        } else {
+            size + gap + size / 2.0
+        }
+    } else {
+        height / 2.0
+    };
+    (x, y)
+}
+
+/// Growing from one button: how far the middle of the buttons moves along
+/// one axis while they are drawn at `scale`, so that the point `pivot`
+/// (measured from the start of the drawing at scale 1, which is `content`
+/// long) stays where it was at the resting size `rest`. `centre` is the
+/// middle of the buttons at rest and `screen` the usable stretch of the
+/// screen (from, to), both on the same axis: the buttons are kept inside
+/// it, except on a side they already reached over at rest.
+#[allow(dead_code)]
+pub(crate) fn grow_shift(
+    pivot: f64,
+    content: f64,
+    rest: f64,
+    scale: f64,
+    centre: f64,
+    screen: Option<(f64, f64)>,
+) -> f64 {
+    let mut now = centre + (pivot - content / 2.0) * (rest - scale);
+    if let Some((from, to)) = screen {
+        let half = content * scale / 2.0;
+        let lo = from.min(centre - content * rest / 2.0) + half;
+        let hi = to.max(centre + content * rest / 2.0) - half;
+        now = now.clamp(lo, hi.max(lo));
+    }
+    now - centre
+}
+
 /// Set the plain size and the growth under the mouse (both in percent,
 /// kept inside their ranges); the buttons are resized around their
 /// centre at once.
@@ -506,6 +555,43 @@ mod anchor_tests {
             around_centre((980.0, 790.0), panel, shown, shown, screen),
             (880.0, 740.0)
         );
+    }
+
+    #[test]
+    fn the_nearest_button_is_found_in_every_layout() {
+        // Three columns with the correction column: 212 × 138.
+        assert_eq!(button_centre((5.0, 60.0), 3, true, 64.0, 10.0), (32.0, 69.0));
+        assert_eq!(button_centre((100.0, 10.0), 3, true, 64.0, 10.0), (106.0, 32.0));
+        assert_eq!(button_centre((100.0, 120.0), 3, true, 64.0, 10.0), (106.0, 106.0));
+        assert_eq!(button_centre((210.0, 130.0), 3, true, 64.0, 10.0), (180.0, 69.0));
+        // Outside the drawing: the nearest column.
+        assert_eq!(button_centre((-4.0, 0.0), 3, true, 64.0, 10.0), (32.0, 69.0));
+        assert_eq!(button_centre((999.0, 0.0), 3, true, 64.0, 10.0), (180.0, 69.0));
+        // The microphone alone, and two columns without a correction column.
+        assert_eq!(button_centre((30.0, 30.0), 1, false, 64.0, 10.0), (32.0, 32.0));
+        assert_eq!(button_centre((100.0, 5.0), 2, false, 64.0, 10.0), (106.0, 32.0));
+    }
+
+    #[test]
+    fn the_button_under_the_mouse_stays_where_it_is_while_growing() {
+        // 200 long, at rest half size around 500: from 450 to 550.
+        let on_screen = |pivot: f64, scale: f64, shift: f64| 500.0 + shift + (pivot - 100.0) * scale;
+        for pivot in [20.0, 100.0, 180.0] {
+            let at_rest = on_screen(pivot, 0.5, 0.0);
+            for scale in [0.5, 0.8, 1.0] {
+                let shift = grow_shift(pivot, 200.0, 0.5, scale, 500.0, None);
+                assert!((on_screen(pivot, scale, shift) - at_rest).abs() < 1e-9);
+            }
+        }
+        // From the middle nothing moves; at rest nothing moves either.
+        assert_eq!(grow_shift(100.0, 200.0, 0.5, 1.0, 500.0, None), 0.0);
+        assert_eq!(grow_shift(20.0, 200.0, 0.5, 0.5, 500.0, Some((0.0, 560.0))), 0.0);
+        // Growing from the first button reaches 40 further to the right
+        // (to 640): a screen that ends at 620 pushes the buttons back.
+        assert_eq!(grow_shift(20.0, 200.0, 0.5, 1.0, 500.0, None), 40.0);
+        assert_eq!(grow_shift(20.0, 200.0, 0.5, 1.0, 500.0, Some((0.0, 620.0))), 20.0);
+        // Buttons that hang over the edge at rest stay as far out, not further.
+        assert_eq!(grow_shift(20.0, 200.0, 0.5, 1.0, 500.0, Some((0.0, 520.0))), -50.0);
     }
 
     #[test]

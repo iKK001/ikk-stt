@@ -48,7 +48,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
 
   bool start_hidden_ = false;
-  bool keep_running_ = true;
+  bool keep_running_ = false;
   bool tray_installed_ = false;
 };
 

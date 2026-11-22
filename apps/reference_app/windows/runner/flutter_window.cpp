@@ -135,7 +135,7 @@ void FlutterWindow::HandleBackgroundCall(
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   const std::string& method = call.method_name();
   if (method == "setKeepRunning") {
-    keep_running_ = BoolArg(call, "on", true);
+    keep_running_ = BoolArg(call, "on", false);
     result->Success();
   } else if (method == "showWindow") {
     ShowFromTray();

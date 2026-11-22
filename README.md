@@ -16,7 +16,8 @@ irm https://raw.githubusercontent.com/iKK001/ikk-stt/main/install.ps1 | iex
 
 This downloads the newest [release](https://github.com/iKK001/ikk-stt/releases),
 checks its SHA-256, unpacks it into `%LOCALAPPDATA%\Programs\ikk-stt` and
-adds a Start menu entry. Run the same line again to update. To remove it:
+adds a Start menu entry. Run the same line again to update. To remove it,
+use Settings > Apps > Installed apps > ikk-stt > Uninstall, or:
 
 ```
 irm https://raw.githubusercontent.com/iKK001/ikk-stt/main/uninstall.ps1 | iex
