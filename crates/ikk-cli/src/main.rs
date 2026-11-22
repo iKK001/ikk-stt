@@ -1226,6 +1226,7 @@ async fn run_replace(
             range,
             start: Some(Box::new(start)),
             host_text: None,
+            first: None,
         })
         .await;
     let started = Instant::now();

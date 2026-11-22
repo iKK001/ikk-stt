@@ -435,16 +435,18 @@ impl Shared {
                             s.end_replace();
                             return;
                         }
-                        // The program needs a moment to place its cursor.
-                        std::thread::sleep(std::time::Duration::from_millis(180));
                         s.busy_start(audio);
                         if audio {
                             s.replace_armed.store(true, Ordering::SeqCst);
                             ikk_overlay::set_replace_armed(true);
                         }
+                        // The program needs a moment to place its cursor.
+                        // With voice the microphone opens first and the
+                        // moment passes while it listens.
                         let r = if audio {
-                            s.engine.replace_by_voice(&json, None, true)
+                            s.engine.replace_from_click(&json)
                         } else {
+                            std::thread::sleep(std::time::Duration::from_millis(180));
                             s.engine.correct_now(&json)
                         };
                         if let Err(e) = r {

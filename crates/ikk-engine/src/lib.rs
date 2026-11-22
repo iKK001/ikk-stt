@@ -284,6 +284,9 @@ pub enum EngineCommand {
         start: Option<Box<StartConfig>>,
         /// See [`CorrectRequest::host_text`].
         host_text: Option<String>,
+        /// What makes the selection, done once the microphone is open:
+        /// the user may speak right after the click, while this runs.
+        first: Option<SelectFirst>,
     },
     /// Internal: the spoken replacement has settled (or timed out).
     ReplaceTick(u64),
@@ -763,8 +766,9 @@ impl Engine {
                 range,
                 start,
                 host_text,
+                first,
             } => {
-                self.replace_by_voice(range, start, host_text).await;
+                self.replace_by_voice(range, start, host_text, first).await;
                 Ok(())
             }
             EngineCommand::ReplaceTick(generation) => {
@@ -1630,6 +1634,7 @@ impl Engine {
         range: CorrectionRange,
         start: Option<Box<StartConfig>>,
         host_text: Option<String>,
+        first: Option<SelectFirst>,
     ) {
         if self.replace.is_some() || self.hold.is_some() {
             self.say_error("replace: a correction is running already").await;
@@ -1677,11 +1682,20 @@ impl Engine {
         self.hold = Some(String::new());
         self.correcting = Some(range);
         self.host_mode = host_text.is_some();
+        // The microphone is open from here on. Making the selection takes
+        // a moment (clicks, keys, the copy); what the user says meanwhile
+        // waits in the recording's queue and is heard afterwards, so
+        // nothing spoken right after the click is lost.
         let selected = match host_text {
             Some(t) => Ok((t, None)),
-            None => tokio::task::spawn_blocking(move || select_and_copy(range))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string())),
+            None => tokio::task::spawn_blocking(move || {
+                if let Some(first) = first {
+                    select_first(first)?;
+                }
+                select_and_copy(range)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string())),
         };
         let (original, prior_clipboard) = match selected {
             Ok(v) => v,
@@ -2602,6 +2616,29 @@ mod range_keys {
         (at.elapsed() < Duration::from_secs(5)).then_some(text)
     }
 
+    /// Copy what is selected in the program in front and wait for it to
+    /// arrive (the clipboard holds [`MARKER`] before). A program that is
+    /// busy or a slow computer may miss the first copy or answer late:
+    /// when nothing came within `patience`, the copy is asked for once
+    /// more and waited for twice as long. `None`: nothing was served.
+    fn copy_served(patience: Duration) -> Option<String> {
+        const STEP: Duration = Duration::from_millis(30);
+        for wait in [patience, patience * 2] {
+            if d::press_chord(Chord::shortcut('c'), 1).is_err() {
+                return None;
+            }
+            let asked = std::time::Instant::now();
+            while asked.elapsed() < wait {
+                sleep(STEP);
+                match d::clipboard_text() {
+                    Some(t) if t != MARKER => return Some(t),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Read the three characters in front of the cursor (no selection):
     /// select them, copy, and put the cursor back. `None` at the very
     /// start of a text, where there is nothing to select. The user's
@@ -2620,18 +2657,7 @@ mod range_keys {
         let mut text = None;
         if d::press_chord(back, 3).is_ok() {
             sleep(Duration::from_millis(60));
-            if d::press_chord(Chord::shortcut('c'), 1).is_ok() {
-                for _ in 0..8 {
-                    sleep(Duration::from_millis(50));
-                    match d::clipboard_text() {
-                        Some(t) if t != MARKER => {
-                            text = Some(t);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            text = copy_served(Duration::from_millis(450));
             // Something was selected: back to where the cursor stood (the
             // right end of those characters).
             if text.is_some() {
@@ -2660,6 +2686,24 @@ mod range_keys {
         });
         let n = text.replace("\r\n", "\n").chars().count();
         (plain && n <= 200).then_some(n)
+    }
+
+    /// Make the selection a click-based range names (see [`SelectFirst`]).
+    pub fn select_first(first: super::SelectFirst) -> Result<(), String> {
+        match first {
+            super::SelectFirst::Settle(wait) => sleep(wait),
+            super::SelectFirst::WordAt(x, y) => d::complete_double_click_at(x, y).map_err(|e| e.to_string())?,
+            super::SelectFirst::Between(from, to) => {
+                // A drag with the mouse from the first point to the
+                // second, without any key. What stands in front of the
+                // selection is read afterwards.
+                {
+                    d::drag(from.0, from.1, to.0, to.1).map_err(|e| e.to_string())?;
+                    sleep(Duration::from_millis(150));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn select_and_copy(range: CorrectionRange) -> Result<(String, Option<String>), String> {
@@ -2691,20 +2735,9 @@ mod range_keys {
         };
         if let Some(select) = select {
             d::press_chord(select, 1).map_err(|e| e.to_string())?;
-            sleep(Duration::from_millis(80));
+            sleep(Duration::from_millis(120));
         }
-        d::press_chord(Chord::shortcut('c'), 1).map_err(|e| e.to_string())?;
-        // The app in front needs a moment to serve the copy.
-        let mut text = String::new();
-        for _ in 0..12 {
-            sleep(Duration::from_millis(60));
-            if let Some(t) = d::clipboard_text() {
-                if t != MARKER {
-                    text = t;
-                    break;
-                }
-            }
-        }
+        let text = copy_served(Duration::from_millis(900)).unwrap_or_default();
         if text.trim().is_empty() {
             restore(prior);
             return Err("nothing selected to correct".into());
@@ -2850,6 +2883,22 @@ mod range_keys {
 }
 
 use range_keys::{leave_selection, paste_over_selection, select_and_copy, take_context};
+
+/// How a range named by clicks becomes a selection in the program in front.
+#[derive(Debug, Clone, Copy)]
+pub enum SelectFirst {
+    /// The user's click placed the cursor; the program gets this long to do so.
+    Settle(Duration),
+    /// The word under this screen point (the user just clicked there).
+    WordAt(f64, f64),
+    /// The text between two screen points the user clicked.
+    Between((f64, f64), (f64, f64)),
+}
+
+/// Make that selection now (desktop; nothing elsewhere).
+pub fn select_first(first: SelectFirst) -> Result<(), String> {
+    range_keys::select_first(first)
+}
 
 /// For the shell: the cursor was just placed at the start of a range (a
 /// click); read what stands in front of it before the range is selected.

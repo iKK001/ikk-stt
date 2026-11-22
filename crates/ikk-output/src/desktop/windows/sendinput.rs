@@ -294,21 +294,29 @@ pub fn double_click_time() -> std::time::Duration {
     std::time::Duration::from_millis(unsafe { GetDoubleClickTime() }.clamp(100, 5000) as u64)
 }
 
-/// Press at one point, move in steps, release at another.
+/// Press at one point, move in steps, release at another: selects the
+/// text between the two in every text field, with the mouse alone. (No
+/// Shift is involved: a Shift pressed without a letter key is held on by
+/// the Sticky Keys aid for the user's next click, which then selects
+/// from wherever the cursor stood.)
 pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), OutputError> {
-    if unsafe { SetCursorPos(x1, y1) } == 0 {
-        return Err(OutputError::Failed("SetCursorPos failed".into()));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(40));
-    send(&[mouse(MOUSEEVENTF_LEFTDOWN)])?;
-    for i in 1..=8 {
-        std::thread::sleep(std::time::Duration::from_millis(25));
-        let x = x1 + (x2 - x1) * i / 8;
-        let y = y1 + (y2 - y1) * i / 8;
+    wait_buttons_up();
+    place(x1, y1)?;
+    let (down, up) = primary_button();
+    send(&[mouse(down)])?;
+    let pause = std::time::Duration::from_millis(20);
+    for i in 1..=10 {
+        std::thread::sleep(pause);
+        let x = x1 + (x2 - x1) * i / 10;
+        let y = y1 + (y2 - y1) * i / 10;
         let _ = unsafe { SetCursorPos(x, y) };
     }
+    // The program under the pointer must have seen the last place before
+    // the button is let go.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let _ = unsafe { SetCursorPos(x2, y2) };
     std::thread::sleep(std::time::Duration::from_millis(40));
-    send(&[mouse(MOUSEEVENTF_LEFTUP)])
+    send(&[mouse(up)])
 }
 
 pub fn ctrl_v() -> Result<(), OutputError> {
