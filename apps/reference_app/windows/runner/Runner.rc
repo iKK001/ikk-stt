@@ -90,11 +90,14 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "ch.ikk" "\0"
-            VALUE "FileDescription", "ikk-stt" "\0"
+            // The name shown (Task Manager, file properties).
+            VALUE "FileDescription", "Bettina" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "ikk-stt" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 ch.ikk. All rights reserved." "\0"
             VALUE "OriginalFilename", "ikk-stt.exe" "\0"
+            // Not a shown name: the folder of the stored API keys is named
+            // after it (see lib/earlier_keys.dart before changing it).
             VALUE "ProductName", "ikk-stt" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END

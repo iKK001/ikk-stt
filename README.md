@@ -1,4 +1,4 @@
-# ikk-stt
+# Bettina (ikk-stt)
 
 Dictation for people with impaired speech on Windows: microphone audio →
 speech-to-text API (streaming or batch) → text at the blinking cursor of the
@@ -16,8 +16,8 @@ irm https://raw.githubusercontent.com/iKK001/ikk-stt/main/install.ps1 | iex
 
 This downloads the newest [release](https://github.com/iKK001/ikk-stt/releases),
 checks its SHA-256, unpacks it into `%LOCALAPPDATA%\Programs\ikk-stt` and
-adds a Start menu entry. Run the same line again to update. To remove it,
-use Settings > Apps > Installed apps > ikk-stt > Uninstall, or:
+adds a Start menu entry "Bettina". Run the same line again to update. To remove it,
+use Settings > Apps > Installed apps > Bettina > Uninstall, or:
 
 ```
 irm https://raw.githubusercontent.com/iKK001/ikk-stt/main/uninstall.ps1 | iex

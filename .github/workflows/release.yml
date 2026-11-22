@@ -59,7 +59,7 @@ jobs:
           if (Test-Path THIRD_PARTY.md) { Copy-Item THIRD_PARTY.md $out }
           "${{ steps.version.outputs.label }}" | Set-Content "$out/VERSION.txt"
           @(
-            'ikk-stt ${{ steps.version.outputs.label }}, GNU Affero General Public License v3.0 or later.',
+            'Bettina (ikk-stt) ${{ steps.version.outputs.label }}, GNU Affero General Public License v3.0 or later.',
             'Source of this build:',
             '${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}'
           ) | Set-Content "$out/SOURCE.txt"
@@ -88,6 +88,6 @@ jobs:
               '',
               'Or download the zip, unpack it anywhere and start ikk-stt.exe.'
             ) -join "`n"
-            gh release create $tag $files --target '${{ github.sha }}' --title 'ikk-stt ${{ steps.version.outputs.label }}' --notes $notes
+            gh release create $tag $files --target '${{ github.sha }}' --title 'Bettina ${{ steps.version.outputs.label }}' --notes $notes
           }
           if ($LASTEXITCODE -ne 0) { throw 'publishing the release failed' }

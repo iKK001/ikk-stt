@@ -1,4 +1,4 @@
-# Installs or updates ikk-stt for the current user (no administrator
+# Installs or updates Bettina (ikk-stt) for the current user (no administrator
 # rights needed). Run it again to update. AGPL-3.0-or-later.
 #
 #   irm https://raw.githubusercontent.com/iKK001/ikk-stt/main/install.ps1 | iex
@@ -16,19 +16,20 @@ $ProgressPreference = 'SilentlyContinue'
 $repo    = 'iKK001/ikk-stt'
 $asset   = 'ikk-stt-windows-x64.zip'
 $exe     = 'ikk-stt.exe'
-$name    = 'ikk-stt'
+$name    = 'ikk-stt'   # folder, program file and registry key
+$shown   = 'Bettina'   # the name people see
 $target  = Join-Path $env:LOCALAPPDATA "Programs\$name"
 $base    = "https://github.com/$repo/releases/latest/download"
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    throw "$name needs 64-bit Windows."
+    throw "$shown needs 64-bit Windows."
 }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("$name-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
     $zip = Join-Path $work $asset
-    Write-Host "Downloading $name ..."
+    Write-Host "Downloading $shown ..."
     Invoke-WebRequest -Uri "$base/$asset" -OutFile $zip -UseBasicParsing
 
     # The release publishes the zip's SHA-256 next to it.
@@ -50,7 +51,7 @@ try {
     Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -and $_.Path.StartsWith($target, [StringComparison]::OrdinalIgnoreCase) } |
         ForEach-Object {
-            Write-Host "Closing the running $name ..."
+            Write-Host "Closing the running $shown ..."
             $_ | Stop-Process -Force
             $_.WaitForExit(5000) | Out-Null
         }
@@ -63,7 +64,10 @@ try {
 
     # Start menu entry.
     $programs = [Environment]::GetFolderPath('Programs')
-    $link = Join-Path $programs "$name.lnk"
+    $link = Join-Path $programs "$shown.lnk"
+    # The entry of versions that showed the project's name.
+    $oldLink = Join-Path $programs "$name.lnk"
+    if (Test-Path $oldLink) { Remove-Item -Path $oldLink -Force }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($link)
     $shortcut.TargetPath = Join-Path $target $exe
@@ -84,7 +88,7 @@ try {
         $quoted = $remover.Replace("'", "''")
         $run = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command `"& '$quoted'; Read-Host 'Press Enter to close'`""
         $sizeKb = [int](((Get-ChildItem $target -Recurse -File | Measure-Object Length -Sum).Sum) / 1KB)
-        Set-ItemProperty -Path $key -Name DisplayName -Value $name
+        Set-ItemProperty -Path $key -Name DisplayName -Value $shown
         Set-ItemProperty -Path $key -Name DisplayVersion -Value $version.Trim()
         Set-ItemProperty -Path $key -Name DisplayIcon -Value (Join-Path $target $exe)
         Set-ItemProperty -Path $key -Name InstallLocation -Value $target
@@ -94,10 +98,10 @@ try {
         Set-ItemProperty -Path $key -Name NoRepair -Value 1 -Type DWord
     }
     Write-Host ""
-    Write-Host "$name$version is installed in $target"
-    Write-Host "Start it from the Start menu ($name), or run:"
+    Write-Host "$shown$version is installed in $target"
+    Write-Host "Start it from the Start menu ($shown), or run:"
     Write-Host "  & '$(Join-Path $target $exe)'"
-    Write-Host "To remove it: Settings > Apps > Installed apps > $name > Uninstall, or run:"
+    Write-Host "To remove it: Settings > Apps > Installed apps > $shown > Uninstall, or run:"
     Write-Host "  irm https://raw.githubusercontent.com/$repo/main/uninstall.ps1 | iex"
 }
 finally {
