@@ -301,6 +301,10 @@ impl Shared {
         // wand runs from the moment the range is fixed until the answer.
         let audio = self.audio_mode.load(Ordering::SeqCst);
         let range = ikk_ffi::engine::FfiEngine::correction_range(&json)?;
+        log::info!(
+            "start button: range {range}, voice {audio}, keys held: [{}]",
+            ikk_output::desktop::modifiers_down()
+        );
         // A press while a click capture waits: cancel.
         if ikk_overlay::cancel_capture() {
             self.end_replace();
@@ -315,6 +319,7 @@ impl Shared {
                     std::time::Duration::from_secs(20),
                     std::sync::Arc::new(move |points| {
                         let Some(s) = get() else { return };
+                        log::info!("click to click: clicks at {points:?}");
                         if points.len() < 2 {
                             // The capture timed out: nothing is armed any more.
                             s.end_replace();
@@ -430,6 +435,7 @@ impl Shared {
                     std::time::Duration::from_secs(15),
                     std::sync::Arc::new(move |points| {
                         let Some(s) = get() else { return };
+                        log::info!("click to end: click at {points:?}");
                         if points.is_empty() {
                             // The capture timed out: nothing is armed any more.
                             s.end_replace();

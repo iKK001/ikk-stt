@@ -35,7 +35,13 @@ pub fn click_at(x: f64, y: f64, shift: bool) -> Result<(), OutputError> {
     platform::click_at(x, y, shift)
 }
 
-/// Press the left button at one point, move, release at another (tests).
+/// Which modifier keys the system takes as held right now, where that
+/// can be asked (for the log).
+pub fn modifiers_down() -> String {
+    platform::modifiers_down()
+}
+
+/// Press the left button at one point, release at another.
 pub fn drag(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), OutputError> {
     platform::drag(x1, y1, x2, y2)
 }

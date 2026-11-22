@@ -2639,11 +2639,23 @@ mod range_keys {
         None
     }
 
+    /// Whether the characters in front of a range are read with the
+    /// keyboard (select them, copy, step back). Not on Windows: there the
+    /// extra selecting showed as a flicker in the text, cost up to a
+    /// second and a half before the range itself was taken, and left
+    /// letters selected when the program answered late. Without it the
+    /// place in the sentence is unknown and the capital letter follows
+    /// the text that is replaced.
+    const READS_IN_FRONT: bool = !cfg!(target_os = "windows");
+
     /// Read the three characters in front of the cursor (no selection):
     /// select them, copy, and put the cursor back. `None` at the very
     /// start of a text, where there is nothing to select. The user's
     /// clipboard is left as it was.
     fn before_cursor() -> Option<String> {
+        if !READS_IN_FRONT {
+            return None;
+        }
         let prior = d::clipboard_text();
         let _ = d::set_clipboard_text(MARKER);
         let back = Chord::Key(
@@ -2746,7 +2758,7 @@ mod range_keys {
         // whose context nobody read: step to its start, read, and select
         // the same characters again.
         let unread = CONTEXT.lock().map(|c| c.is_none()).unwrap_or(false);
-        if unread && matches!(range, CorrectionRange::Selection | CorrectionRange::Word) {
+        if READS_IN_FRONT && unread && matches!(range, CorrectionRange::Selection | CorrectionRange::Word) {
             if let Some(n) = steps(&text) {
                 if d::press_chord(Chord::key(Key::Left), 1).is_ok() {
                     sleep(Duration::from_millis(40));

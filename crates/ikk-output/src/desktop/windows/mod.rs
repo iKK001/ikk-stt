@@ -219,6 +219,11 @@ pub fn double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
     sendinput::double_click_at(x.round() as i32, y.round() as i32)
 }
 
+/// Shift, Ctrl, Alt as the system sees them held right now (for the log).
+pub fn modifiers_down() -> String {
+    sendinput::modifiers_down()
+}
+
 /// The system's double-click time.
 pub fn double_click_time() -> std::time::Duration {
     sendinput::double_click_time()

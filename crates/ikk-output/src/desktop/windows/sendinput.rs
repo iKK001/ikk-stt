@@ -294,29 +294,38 @@ pub fn double_click_time() -> std::time::Duration {
     std::time::Duration::from_millis(unsafe { GetDoubleClickTime() }.clamp(100, 5000) as u64)
 }
 
-/// Press at one point, move in steps, release at another: selects the
-/// text between the two in every text field, with the mouse alone. (No
-/// Shift is involved: a Shift pressed without a letter key is held on by
-/// the Sticky Keys aid for the user's next click, which then selects
-/// from wherever the cursor stood.)
+/// Press at one point, release at another: selects the text between the
+/// two in every text field, with the mouse alone and at once (no Shift:
+/// a Shift pressed without a letter key is held on by the Sticky Keys aid
+/// for the user's next click). The pointer goes to the end in one step;
+/// it is placed there twice because a program only extends a selection
+/// when it has seen the pointer move while the button is down.
 pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), OutputError> {
     wait_buttons_up();
     place(x1, y1)?;
     let (down, up) = primary_button();
     send(&[mouse(down)])?;
-    let pause = std::time::Duration::from_millis(20);
-    for i in 1..=10 {
-        std::thread::sleep(pause);
-        let x = x1 + (x2 - x1) * i / 10;
-        let y = y1 + (y2 - y1) * i / 10;
-        let _ = unsafe { SetCursorPos(x, y) };
-    }
-    // The program under the pointer must have seen the last place before
-    // the button is let go.
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    let pause = std::time::Duration::from_millis(25);
+    std::thread::sleep(pause);
+    // One pixel short first, so that the second placing is a move too.
+    let _ = unsafe { SetCursorPos(x2 - (x2 - x1).signum(), y2) };
+    std::thread::sleep(pause);
     let _ = unsafe { SetCursorPos(x2, y2) };
-    std::thread::sleep(std::time::Duration::from_millis(40));
+    std::thread::sleep(pause);
     send(&[mouse(up)])
+}
+
+/// Which of Shift, Ctrl and Alt the system takes as held right now (for
+/// the log: a held Shift turns every click into "select up to here").
+pub fn modifiers_down() -> String {
+    let down = |vk: i32| unsafe { GetAsyncKeyState(vk) } < 0;
+    let mut held = Vec::new();
+    for (vk, name) in [(0x10, "shift"), (0x11, "ctrl"), (0x12, "alt")] {
+        if down(vk) {
+            held.push(name);
+        }
+    }
+    held.join("+")
 }
 
 pub fn ctrl_v() -> Result<(), OutputError> {
