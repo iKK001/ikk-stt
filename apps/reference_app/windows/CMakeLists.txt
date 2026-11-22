@@ -6,6 +6,13 @@ project(reference_app LANGUAGES CXX)
 # the on-disk name of your application.
 set(BINARY_NAME "ikk-stt")
 
+# The key store (flutter_secure_storage) starts the names of its files and
+# of its entry in the Windows Credential Manager with this. Without it the
+# plugin takes BINARY_NAME, and a renamed program file can no longer read
+# the stored API keys. It is the name the program file had first; never
+# change it.
+set(STORAGE_PREFIX "reference_app")
+
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
 cmake_policy(VERSION 3.14...3.25)
