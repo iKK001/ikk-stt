@@ -118,39 +118,83 @@ pub fn is_capturing() -> bool {
     CAPTURE.lock().map(|c| c.is_some()).unwrap_or(false)
 }
 
-/// Low-level mouse hook: left button down anywhere outside our own window
-/// is one captured click.
+/// When the left button went down for the last captured click.
+static LAST_DOWN: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// How long ago the button went down for the last captured click.
+pub fn last_click_age() -> Option<Duration> {
+    LAST_DOWN.lock().ok().and_then(|t| t.map(|t| t.elapsed()))
+}
+
+/// Is this screen point on the buttons as they are drawn right now, or on
+/// the list of candidates? The buttons' window is larger than the drawing
+/// (invisible room for the growth) and lets clicks through there, so it
+/// is the drawing that counts.
+unsafe fn on_own(x: i32, y: i32) -> bool {
+    let (hwnd, list) = state().lock().map(|s| (s.hwnd, s.choices_hwnd)).unwrap_or((0, 0));
+    let mut rect = RECT::default();
+    let visible = |hwnd: isize| {
+        hwnd > 0 && windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(hwnd as *mut _)).as_bool()
+    };
+    if visible(hwnd) && GetWindowRect(HWND(hwnd as *mut _), &mut rect).is_ok() {
+        let l = layout();
+        let (cx, cy) = (
+            (rect.left + rect.right) as f64 / 2.0,
+            (rect.top + rect.bottom) as f64 / 2.0,
+        );
+        let (hw, hh) = (
+            width(l.count) as f64 * l.scale / 2.0 + 2.0,
+            height(l.with_correct) as f64 * l.scale / 2.0 + 2.0,
+        );
+        if (x as f64 - cx).abs() <= hw && (y as f64 - cy).abs() <= hh {
+            return true;
+        }
+    }
+    // The list of candidates is ours as well: a click on it picks.
+    visible(list)
+        && GetWindowRect(HWND(list as *mut _), &mut rect).is_ok()
+        && x >= rect.left
+        && x <= rect.right
+        && y >= rect.top
+        && y <= rect.bottom
+}
+
+/// Low-level mouse hook: a left click anywhere outside our own drawing is
+/// one captured click. The place is taken when the button goes down; the
+/// capture ends when the button of the last click is up again, so that
+/// nothing is done to the text while the user still holds the button
+/// (that would drag a selection).
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN {
-        let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+    if code < 0 {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+    let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+    // Clicks the app sends itself are not the user's.
+    let injected = info.flags & 0x1 != 0;
+    if !injected && wparam.0 as u32 == WM_LBUTTONDOWN {
         let (x, y) = (info.pt.x, info.pt.y);
-        let own = {
-            let (hwnd, list) = state().lock().map(|s| (s.hwnd, s.choices_hwnd)).unwrap_or((0, 0));
-            let inside = |hwnd: isize| {
-                let mut rect = RECT::default();
-                hwnd > 0
-                    && windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(hwnd as *mut _)).as_bool()
-                    && GetWindowRect(HWND(hwnd as *mut _), &mut rect).is_ok()
-                    && x >= rect.left
-                    && x <= rect.right
-                    && y >= rect.top
-                    && y <= rect.bottom
-            };
-            // The list of candidates is ours as well: a click on it picks.
-            inside(hwnd) || inside(list)
-        };
-        if !own {
-            let done = CAPTURE.lock().ok().and_then(|mut c| {
-                let cap = c.as_mut()?;
-                cap.points.push((x as f64, y as f64));
-                (cap.points.len() >= cap.wanted).then(|| c.take()).flatten()
-            });
-            if let Some(cap) = done {
-                post(MSG_DISARM);
-                post(MSG_REDRAW);
-                let (points, on_done) = (cap.points, cap.on_done);
-                std::thread::spawn(move || on_done(points));
+        if !on_own(x, y) {
+            if let Ok(mut c) = CAPTURE.lock() {
+                if let Some(cap) = c.as_mut() {
+                    if cap.points.len() < cap.wanted {
+                        cap.points.push((x as f64, y as f64));
+                        if let Ok(mut t) = LAST_DOWN.lock() {
+                            *t = Some(Instant::now());
+                        }
+                    }
+                }
             }
+        }
+    } else if !injected && wparam.0 as u32 == WM_LBUTTONUP {
+        let done = CAPTURE.lock().ok().and_then(|mut c| {
+            let full = c.as_ref().is_some_and(|cap| cap.points.len() >= cap.wanted);
+            full.then(|| c.take()).flatten()
+        });
+        if let Some(cap) = done {
+            post(MSG_DISARM);
+            post(MSG_REDRAW);
+            let (points, on_done) = (cap.points, cap.on_done);
+            std::thread::spawn(move || on_done(points));
         }
     }
     CallNextHookEx(None, code, wparam, lparam)
@@ -760,6 +804,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_HOVER => {
+            hint_under_mouse();
             // Over the buttons as they are drawn right now? The window is
             // larger (invisible room for the growth) and fully transparent
             // there, so it is the drawing that counts, not the window.
@@ -1676,8 +1721,36 @@ unsafe fn show_choices(panel: HWND) {
     }
     let x = ((cx - w / 2) as f64).clamp(area.0, (area.0 + area.2 - w as f64).max(area.0)) as i32;
     let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
-    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    // Not under the mouse: there it would cover what the user is about
+    // to click (see `hint_under_mouse`).
+    let mut cursor = POINT::default();
+    let covered =
+        GetCursorPos(&mut cursor).is_ok() && cursor.x >= x && cursor.x < x + w && cursor.y >= y && cursor.y < y + h;
+    let _ = ShowWindow(hwnd, if covered { SW_HIDE } else { SW_SHOWNOACTIVATE });
     let _ = InvalidateRect(Some(hwnd), None, true);
+}
+
+/// Window thread, from the hover timer: the line of help goes away while
+/// the mouse is on its place, so that the text under it can be read and
+/// clicked, and comes back when the mouse has left.
+unsafe fn hint_under_mouse() {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    let (hw, wanted) = state()
+        .lock()
+        .map(|s| (s.hint_hwnd, s.hint.is_some()))
+        .unwrap_or((0, false));
+    if hw == 0 || !wanted {
+        return;
+    }
+    let hwnd = HWND(hw as *mut _);
+    let (mut cursor, mut rect) = (POINT::default(), RECT::default());
+    if GetCursorPos(&mut cursor).is_err() || GetWindowRect(hwnd, &mut rect).is_err() {
+        return;
+    }
+    let covered = cursor.x >= rect.left && cursor.x < rect.right && cursor.y >= rect.top && cursor.y < rect.bottom;
+    if covered == IsWindowVisible(hwnd).as_bool() {
+        let _ = ShowWindow(hwnd, if covered { SW_HIDE } else { SW_SHOWNOACTIVATE });
+    }
 }
 
 unsafe extern "system" fn choices_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

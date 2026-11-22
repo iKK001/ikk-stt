@@ -21,6 +21,9 @@ extern "system" {
     fn SetFocus(h_wnd: *mut c_void) -> *mut c_void;
     fn SendInput(c_inputs: u32, p_inputs: *const InputRecord, cb_size: i32) -> u32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
+    fn GetAsyncKeyState(v_key: i32) -> i16;
+    fn GetSystemMetrics(index: i32) -> i32;
+    fn GetDoubleClickTime() -> u32;
     fn SendMessageTimeoutW(
         h_wnd: *mut c_void,
         msg: u32,
@@ -83,6 +86,8 @@ const INPUT_MOUSE: u32 = 0;
 const INPUT_KEYBOARD: u32 = 1;
 const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
 const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
 const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
 const KEYEVENTF_KEYUP: u32 = 0x0002;
 const KEYEVENTF_UNICODE: u32 = 0x0004;
@@ -221,23 +226,72 @@ fn mouse(flags: u32) -> InputRecord {
     }
 }
 
-/// A left click at screen pixel (`x`, `y`); with `shift` held it extends a
-/// text selection.
-pub fn click_at(x: i32, y: i32, shift: bool) -> Result<(), OutputError> {
+/// Wait until the user has let go of the mouse buttons (at most 3 s): a
+/// click sent while a button is held is taken as part of a drag.
+fn wait_buttons_up() {
+    const VK_LBUTTON: i32 = 0x01;
+    const VK_RBUTTON: i32 = 0x02;
+    let down = |vk: i32| unsafe { GetAsyncKeyState(vk) } < 0;
+    // Left and right are swapped for some users: wait for both.
+    for _ in 0..300 {
+        if !down(VK_LBUTTON) && !down(VK_RBUTTON) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The button that does the "left click" (users may have swapped them).
+fn primary_button() -> (u32, u32) {
+    const SM_SWAPBUTTON: i32 = 23;
+    if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+        (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
+    } else {
+        (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
+    }
+}
+
+/// Put the pointer on the pixel and give the program under it a moment to
+/// notice; then once more, in case the user's hand moved it meanwhile.
+fn place(x: i32, y: i32) -> Result<(), OutputError> {
     if unsafe { SetCursorPos(x, y) } == 0 {
         return Err(OutputError::Failed("SetCursorPos failed".into()));
     }
     std::thread::sleep(std::time::Duration::from_millis(40));
+    let _ = unsafe { SetCursorPos(x, y) };
+    Ok(())
+}
+
+/// A left click at screen pixel (`x`, `y`); with `shift` held it extends a
+/// text selection.
+pub fn click_at(x: i32, y: i32, shift: bool) -> Result<(), OutputError> {
+    wait_buttons_up();
+    place(x, y)?;
+    let (down, up) = primary_button();
     if shift {
         send(&[
             record(VK_SHIFT, 0, 0),
-            mouse(MOUSEEVENTF_LEFTDOWN),
-            mouse(MOUSEEVENTF_LEFTUP),
+            mouse(down),
+            mouse(up),
             record(VK_SHIFT, 0, KEYEVENTF_KEYUP),
         ])
     } else {
-        send(&[mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)])
+        send(&[mouse(down), mouse(up)])
     }
+}
+
+/// A double-click at screen pixel (`x`, `y`), sent as one piece so that
+/// nothing can come between its two clicks.
+pub fn double_click_at(x: i32, y: i32) -> Result<(), OutputError> {
+    wait_buttons_up();
+    place(x, y)?;
+    let (down, up) = primary_button();
+    send(&[mouse(down), mouse(up), mouse(down), mouse(up)])
+}
+
+/// The system's double-click time.
+pub fn double_click_time() -> std::time::Duration {
+    std::time::Duration::from_millis(unsafe { GetDoubleClickTime() }.clamp(100, 5000) as u64)
 }
 
 /// Press at one point, move in steps, release at another.

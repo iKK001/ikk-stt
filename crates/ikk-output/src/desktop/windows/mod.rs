@@ -214,6 +214,16 @@ pub fn click_at(x: f64, y: f64, shift: bool) -> Result<(), OutputError> {
     sendinput::click_at(x.round() as i32, y.round() as i32, shift)
 }
 
+/// A double-click at screen pixel (`x`, `y`): selects the word under it.
+pub fn double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
+    sendinput::double_click_at(x.round() as i32, y.round() as i32)
+}
+
+/// The system's double-click time.
+pub fn double_click_time() -> std::time::Duration {
+    sendinput::double_click_time()
+}
+
 /// A drag with the left button from one screen pixel to another (tests).
 pub fn drag(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), OutputError> {
     sendinput::drag(

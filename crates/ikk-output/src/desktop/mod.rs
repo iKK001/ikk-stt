@@ -55,12 +55,39 @@ pub fn select_between(from: (f64, f64), to: (f64, f64)) -> Result<(), OutputErro
 /// text field (two clicks inside the system's double-click time).
 pub fn double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
     {
-        // Windows and X11 count two clicks inside the double-click time as one.
-        platform::click_at(x, y, false)?;
-        std::thread::sleep(Duration::from_millis(70));
-        platform::click_at(x, y, false)?;
+        platform::double_click_at(x, y)?;
         std::thread::sleep(Duration::from_millis(120));
         Ok(())
+    }
+}
+
+/// When the user pressed the mouse button for the click a word is about
+/// to be selected at (see [`note_user_click`]).
+static USER_CLICK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The click capture tells how long ago the user's button went down, so
+/// that [`complete_double_click_at`] knows whether one more click still
+/// makes a double-click.
+pub fn note_user_click(age: Option<Duration>) {
+    if let Ok(mut c) = USER_CLICK.lock() {
+        *c = age.and_then(|a| std::time::Instant::now().checked_sub(a));
+    }
+}
+
+/// What selects the word under a click the user made `age` ago, with the
+/// system's double-click time `limit`: one more click while that surely
+/// still counts as the second of a double-click (`None`), or else a wait
+/// until the user's click is forgotten and then a whole double-click
+/// (`Some(wait)`). In between lies the risk of both: a single click that
+/// selects nothing, or a triple one that selects the line.
+pub fn word_click_plan(age: Option<Duration>, limit: Duration) -> Option<Duration> {
+    // What sending the click itself takes, with room to spare.
+    const SENDING: Duration = Duration::from_millis(120);
+    const FORGOTTEN: Duration = Duration::from_millis(80);
+    match age {
+        Some(age) if age + SENDING < limit * 6 / 10 => None,
+        Some(age) => Some((limit + FORGOTTEN).saturating_sub(age)),
+        None => Some(limit + FORGOTTEN),
     }
 }
 
@@ -70,7 +97,17 @@ pub fn double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
 /// selects the whole line.)
 pub fn complete_double_click_at(x: f64, y: f64) -> Result<(), OutputError> {
     {
-        platform::click_at(x, y, false)?;
+        // A user who holds the button long (or a busy computer) uses up
+        // the double-click time: then the word is selected by a
+        // double-click of its own, once the user's click is forgotten.
+        let age = USER_CLICK.lock().ok().and_then(|mut c| c.take()).map(|t| t.elapsed());
+        match word_click_plan(age, platform::double_click_time()) {
+            None => platform::click_at(x, y, false)?,
+            Some(wait) => {
+                std::thread::sleep(wait);
+                platform::double_click_at(x, y)?;
+            }
+        }
         std::thread::sleep(Duration::from_millis(120));
         Ok(())
     }
@@ -340,5 +377,25 @@ impl TextSink for DesktopSink {
         // Both modes need the whole segment: paste inserts it at once,
         // confirmed typing sets its own rhythm and can repair it.
         self.paste_mode || self.confirm_typing
+    }
+}
+
+#[cfg(test)]
+mod word_click_tests {
+    use super::word_click_plan;
+    use std::time::Duration;
+
+    #[test]
+    fn a_quick_click_is_completed_a_slow_one_waited_out() {
+        let ms = Duration::from_millis;
+        let limit = ms(500);
+        // Let go at once: one more click makes the double-click.
+        assert_eq!(word_click_plan(Some(ms(90)), limit), None);
+        // Held for a while: wait until the click is forgotten.
+        assert_eq!(word_click_plan(Some(ms(300)), limit), Some(ms(280)));
+        // Held longer than the double-click time: only the margin is left.
+        assert_eq!(word_click_plan(Some(ms(900)), limit), Some(ms(0)));
+        // Nothing known about the click: the whole time.
+        assert_eq!(word_click_plan(None, limit), Some(ms(580)));
     }
 }

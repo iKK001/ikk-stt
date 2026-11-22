@@ -451,6 +451,12 @@ pub fn capture_clicks(count: usize, timeout: std::time::Duration, on_done: OnCli
     platform::capture_clicks(count, timeout, on_done)
 }
 
+/// How long ago the mouse button went down for the last captured click,
+/// where the platform tells.
+pub fn last_click_age() -> Option<std::time::Duration> {
+    platform::last_click_age()
+}
+
 /// Stop a capture (the button pressed again); true when one was running.
 pub fn cancel_capture() -> bool {
     let cancelled = platform::cancel_capture();

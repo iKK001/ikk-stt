@@ -357,6 +357,7 @@ impl Shared {
                             s.end_replace();
                             return;
                         };
+                        ikk_output::desktop::note_user_click(ikk_overlay::last_click_age());
                         s.busy_start(audio);
                         let r = if audio {
                             s.engine.replace_by_voice(&json, Some(point), false)
@@ -398,6 +399,7 @@ impl Shared {
                             s.end_replace();
                             return;
                         };
+                        ikk_output::desktop::note_user_click(ikk_overlay::last_click_age());
                         if let Ok(mut at) = CHOICES_AT.lock() {
                             *at = Some(point);
                         }
