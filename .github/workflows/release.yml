@@ -1,0 +1,93 @@
+name: release
+# Runs only by hand: Actions tab > release > "Run workflow" (on the branch
+# to release, normally main). Builds the Windows app, packs it as
+# ikk-stt-windows-x64.zip and publishes it as the release of the version
+# in Cargo.toml (tag v<version>-<build number>). install.ps1 downloads
+# the newest such release.
+on:
+  workflow_dispatch:
+
+# The only workflow that writes: it creates the tag and the release.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows app release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Version from Cargo.toml
+        id: version
+        shell: pwsh
+        run: |
+          $cargo = Get-Content Cargo.toml -Raw
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw 'no version in Cargo.toml' }
+          $version = $Matches[1]
+          if ($cargo -notmatch '(?m)^build_number\s*=\s*(\d+)') { throw 'no build_number in Cargo.toml' }
+          $build = $Matches[1]
+          "tag=v$version-$build" >> $env:GITHUB_OUTPUT
+          "label=v$version($build)" >> $env:GITHUB_OUTPUT
+
+      - run: flutter pub get
+        working-directory: apps/reference_app
+      - run: flutter build windows --release
+        working-directory: apps/reference_app
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          $out = 'apps/reference_app/build/windows/x64/runner/Release'
+          if (-not (Test-Path "$out/reference_app.exe")) { throw 'the build produced no reference_app.exe' }
+          # The Visual C++ runtime the program needs, so it starts on a
+          # machine that never had Visual Studio or the redistributable.
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            $src = Join-Path $env:SystemRoot "System32\$dll"
+            if ((Test-Path $src) -and -not (Test-Path "$out/$dll")) { Copy-Item $src $out }
+          }
+          # The licence texts and where the source of exactly this build is.
+          Copy-Item LICENSE, NOTICE $out
+          if (Test-Path THIRD_PARTY.md) { Copy-Item THIRD_PARTY.md $out }
+          "${{ steps.version.outputs.label }}" | Set-Content "$out/VERSION.txt"
+          @(
+            'ikk-stt ${{ steps.version.outputs.label }}, GNU Affero General Public License v3.0 or later.',
+            'Source of this build:',
+            '${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}'
+          ) | Set-Content "$out/SOURCE.txt"
+          $zip = 'ikk-stt-windows-x64.zip'
+          Compress-Archive -Path "$out/*" -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Set-Content "$zip.sha256"
+          Write-Host "$zip $hash"
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $files = 'ikk-stt-windows-x64.zip', 'ikk-stt-windows-x64.zip.sha256'
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            # The version was released before: its files are replaced.
+            gh release upload $tag $files --clobber
+          } else {
+            $notes = @(
+              'Install or update on Windows (PowerShell):',
+              '',
+              '    irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex',
+              '',
+              'Or download the zip, unpack it anywhere and start reference_app.exe.'
+            ) -join "`n"
+            gh release create $tag $files --target '${{ github.sha }}' --title 'ikk-stt ${{ steps.version.outputs.label }}' --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'publishing the release failed' }
