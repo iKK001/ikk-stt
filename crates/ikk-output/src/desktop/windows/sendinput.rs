@@ -83,6 +83,7 @@ const INPUT_MOUSE: u32 = 0;
 const INPUT_KEYBOARD: u32 = 1;
 const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
 const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
 const KEYEVENTF_KEYUP: u32 = 0x0002;
 const KEYEVENTF_UNICODE: u32 = 0x0004;
 const DESKTOP_SWITCHDESKTOP: u32 = 0x0100;
@@ -165,9 +166,24 @@ pub fn send_unicode_char(ch: char) -> Result<(), OutputError> {
     send(&inputs)
 }
 
+/// The arrow keys, Home, End, Page Up, Page Down and Delete exist twice:
+/// on the number pad and beside it. Without this flag Windows takes an
+/// injected one for the number pad's, and with Num Lock on it lets go of
+/// Shift for those: Shift+End or Shift+Left then move the cursor without
+/// selecting anything. The flag names the keys beside the number pad.
+fn key_flags(vk: u16) -> u32 {
+    match vk {
+        VK_PRIOR | VK_NEXT | VK_END | VK_HOME | VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN | VK_DELETE => {
+            KEYEVENTF_EXTENDEDKEY
+        }
+        _ => 0,
+    }
+}
+
 pub fn press_vk(vk: u16, n: usize) -> Result<(), OutputError> {
+    let flags = key_flags(vk);
     for _ in 0..n {
-        send(&[record(vk, 0, 0), record(vk, 0, KEYEVENTF_KEYUP)])?;
+        send(&[record(vk, 0, flags), record(vk, 0, flags | KEYEVENTF_KEYUP)])?;
     }
     Ok(())
 }
@@ -178,9 +194,10 @@ pub fn press_vk_with(mods: &[u16], vk: u16, n: usize) -> Result<(), OutputError>
     for m in mods {
         records.push(record(*m, 0, 0));
     }
+    let flags = key_flags(vk);
     for _ in 0..n {
-        records.push(record(vk, 0, 0));
-        records.push(record(vk, 0, KEYEVENTF_KEYUP));
+        records.push(record(vk, 0, flags));
+        records.push(record(vk, 0, flags | KEYEVENTF_KEYUP));
     }
     for m in mods.iter().rev() {
         records.push(record(*m, 0, KEYEVENTF_KEYUP));
